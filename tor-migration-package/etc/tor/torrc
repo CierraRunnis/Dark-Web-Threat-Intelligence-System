@@ -1,0 +1,12 @@
+SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+
+UseBridges 1
+ClientTransportPlugin webtunnel exec /usr/local/bin/lyrebird
+
+Bridge webtunnel 103.17.153.45:443 412F21AAD09FA4F83AD52186458466BEC5D27795 url=https://cdn-45.triplebit.dev/yaux5diphu8Meiqu ver=0.0.2
+Bridge webtunnel [2001:db8:1b75:cd28:36c7:1347:3eda:a01e]:443 2852538D49D7D73C1A6694FC492104983A9C4FA2 url=https://mrrp.sillykittens.net/IfuJ9KsjkEk6462QblGNI0pR ver=0.0.3
+
+DataDirectory /var/lib/tor
+Log notice file /var/log/tor/notices.log

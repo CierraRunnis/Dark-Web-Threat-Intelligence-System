@@ -1,0 +1,13 @@
+SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+
+UseBridges 1
+ClientTransportPlugin snowflake exec /usr/bin/snowflake-client \
+  -url https://snowflake-broker.torproject.net/ \
+  -ice stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478 \
+  -log /var/log/tor/snowflake.log
+Bridge snowflake 192.0.2.3:1 2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.torproject.net/ ampcache=https://cdn.ampproject.org/ front=www.google.com ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478 utls-imitate=hellorandomizedalpn
+
+DataDirectory /var/lib/tor
+Log notice file /var/log/tor/notices.log

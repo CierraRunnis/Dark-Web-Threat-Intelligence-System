@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+import html
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+
+BASE_URL = "https://bridges.torproject.org/bridges?transport={transport}"
+WINDOWS_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+WINDOWS_CURL = "/mnt/c/Windows/System32/curl.exe"
+
+
+def fetch_native(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", "ignore")
+
+
+def fetch_powershell(url: str) -> str:
+    cmd = [
+        WINDOWS_POWERSHELL,
+        "-NoProfile",
+        "-Command",
+        f"(Invoke-WebRequest -UseBasicParsing -Uri '{url}' -TimeoutSec 30).Content",
+    ]
+    return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+
+
+def fetch_curl(url: str) -> str:
+    cmd = [WINDOWS_CURL, "-L", "--max-time", "30", url]
+    return subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+
+
+def normalize_line(transport: str, line: str) -> str | None:
+    line = html.unescape(line)
+    line = re.sub(r"<br\s*/?>", "", line, flags=re.IGNORECASE)
+    line = re.sub(r"<[^>]+>", " ", line)
+    line = " ".join(line.strip().split())
+    if not line or line.startswith("#"):
+        return None
+
+    if line.startswith("Bridge "):
+        return line
+
+    if transport == "vanilla":
+        if re.match(r"^[^\s]+:\d+\s+[A-Fa-f0-9]{40}\b", line):
+            return f"Bridge {line}"
+        return None
+
+    prefixes = {
+        "obfs4": "obfs4 ",
+        "webtunnel": "webtunnel ",
+        "meek": "meek_lite ",
+    }
+    prefix = prefixes.get(transport)
+    if prefix and line.startswith(prefix):
+        return f"Bridge {line}"
+
+    return None
+
+
+def parse_lines(transport: str, body: str) -> list[str]:
+    lines: list[str] = []
+    body = html.unescape(body)
+    body = re.sub(r"<br\s*/?>", "\n", body, flags=re.IGNORECASE)
+    for raw in body.splitlines():
+        normalized = normalize_line(transport, raw)
+        if normalized:
+            lines.append(normalized)
+    seen = set()
+    unique = []
+    for line in lines:
+        if line not in seen:
+            seen.add(line)
+            unique.append(line)
+    return unique
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in {"obfs4", "webtunnel", "vanilla"}:
+        print("Usage: bridgedb-fetch <obfs4|webtunnel|vanilla>", file=sys.stderr)
+        return 1
+
+    transport = sys.argv[1]
+    url = BASE_URL.format(transport=transport)
+    methods = [fetch_native, fetch_powershell, fetch_curl]
+    last_error = None
+
+    for method in methods:
+        try:
+            body = method(url)
+            lines = parse_lines(transport, body)
+            if lines:
+                print("\n".join(lines))
+                return 0
+        except (OSError, subprocess.CalledProcessError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+
+    if last_error:
+        print(f"bridge fetch failed for {transport}: {last_error}", file=sys.stderr)
+    else:
+        print(f"bridge fetch returned no usable lines for {transport}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

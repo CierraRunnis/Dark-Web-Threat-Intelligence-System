@@ -1,0 +1,25 @@
+{
+  "site_name": "dragonforceblog",
+  "parser": "example_forum",
+  "db_path": "results/dragonforceblog.db",
+  "entries": [
+    {
+      "file": "list_page_1.html",
+      "page_type": "list",
+      "source_url": "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog?page=1",
+      "output_json": "results/list_page_1.parsed.json"
+    },
+    {
+      "file": "list_page_2.html",
+      "page_type": "list",
+      "source_url": "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog?page=2",
+      "output_json": "results/list_page_2.parsed.json"
+    },
+    {
+      "file": "detail_1.html",
+      "page_type": "detail",
+      "source_url": "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog/detail_1",
+      "output_json": "results/detail_1.parsed.json"
+    }
+  ]
+}

@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root: sudo tor-bridge-switch <snowflake|obfs4|webtunnel|vanilla|meek|auto|status>" >&2
+  exit 1
+fi
+
+mode="${1:-status}"
+tor_dir="/etc/tor"
+torrc="${tor_dir}/torrc"
+notices="/var/log/tor/notices.log"
+service="tor@default.service"
+test_url="https://check.torproject.org/api/ip"
+wait_timeout="${TOR_BRIDGE_WAIT_TIMEOUT:-120}"
+
+find_lyrebird() {
+  local path
+  for path in /usr/local/bin/lyrebird /usr/bin/lyrebird /opt/tor/pluggable_transports/lyrebird; do
+    if [[ -x "${path}" ]]; then
+      echo "${path}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+bridge_file() {
+  echo "${tor_dir}/bridges.$1"
+}
+
+has_lines() {
+  local file="$1"
+  [[ -f "${file}" ]] && grep -Eq '^[[:space:]]*Bridge[[:space:]]+' "${file}"
+}
+
+emit_common() {
+  cat <<'EOF'
+SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+
+UseBridges 1
+EOF
+}
+
+emit_tail() {
+  cat <<'EOF'
+
+DataDirectory /var/lib/tor
+Log notice file /var/log/tor/notices.log
+EOF
+}
+
+render_mode() {
+  local selected="$1"
+  local lyrebird
+  local file
+
+  case "${selected}" in
+    snowflake)
+      command -v /usr/bin/snowflake-client >/dev/null 2>&1
+      emit_common
+      cat <<'EOF'
+ClientTransportPlugin snowflake exec /usr/bin/snowflake-client \
+  -url https://snowflake-broker.torproject.net/ \
+  -ice stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478 \
+  -log /var/log/tor/snowflake.log
+Bridge snowflake 192.0.2.3:1 2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://snowflake-broker.torproject.net/ ampcache=https://cdn.ampproject.org/ front=www.google.com ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,stun:stun.bluesip.net:3478 utls-imitate=hellorandomizedalpn
+EOF
+      emit_tail
+      ;;
+    obfs4)
+      command -v /usr/bin/obfs4proxy >/dev/null 2>&1
+      file="$(bridge_file obfs4)"
+      has_lines "${file}"
+      emit_common
+      echo "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy"
+      echo
+      grep -E '^[[:space:]]*Bridge[[:space:]]+' "${file}"
+      emit_tail
+      ;;
+    webtunnel)
+      lyrebird="$(find_lyrebird)"
+      file="$(bridge_file webtunnel)"
+      has_lines "${file}"
+      emit_common
+      echo "ClientTransportPlugin webtunnel exec ${lyrebird}"
+      echo
+      grep -E '^[[:space:]]*Bridge[[:space:]]+' "${file}"
+      emit_tail
+      ;;
+    vanilla)
+      file="$(bridge_file vanilla)"
+      has_lines "${file}"
+      emit_common
+      echo
+      grep -E '^[[:space:]]*Bridge[[:space:]]+' "${file}"
+      emit_tail
+      ;;
+    meek)
+      lyrebird="$(find_lyrebird)"
+      file="$(bridge_file meek)"
+      has_lines "${file}"
+      emit_common
+      echo "ClientTransportPlugin meek_lite exec ${lyrebird}"
+      echo
+      grep -E '^[[:space:]]*Bridge[[:space:]]+' "${file}"
+      emit_tail
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+cleanup_processes() {
+  pkill -f '^tor -f /etc/tor/torrc$' || true
+  pkill -f '^/usr/bin/snowflake-client ' || true
+  pkill -f '^/usr/bin/obfs4proxy$' || true
+  pkill -f '(^|/)lyrebird([[:space:]]|$)' || true
+}
+
+restart_service() {
+  cleanup_processes
+  systemctl restart "${service}"
+}
+
+recent_bootstrap() {
+  tail -n 120 "${notices}" | grep 'Bootstrapped' | tail -n 1 || true
+}
+
+wait_for_bootstrap() {
+  local deadline=$((SECONDS + wait_timeout))
+  local line
+
+  while (( SECONDS < deadline )); do
+    line="$(recent_bootstrap)"
+    if [[ "${line}" == *"Bootstrapped 100% (done): Done"* ]]; then
+      echo "${line}"
+      return 0
+    fi
+    sleep 2
+  done
+
+  recent_bootstrap
+  return 1
+}
+
+tor_api_ready() {
+  timeout 45 curl --socks5-hostname 127.0.0.1:9050 -fsS "${test_url}" >/tmp/tor-check.json 2>/dev/null
+}
+
+mode_ready() {
+  tor_api_ready
+}
+
+current_mode() {
+  if grep -q '^ClientTransportPlugin snowflake ' "${torrc}" 2>/dev/null; then
+    echo "snowflake"
+  elif grep -q '^ClientTransportPlugin obfs4 ' "${torrc}" 2>/dev/null; then
+    echo "obfs4"
+  elif grep -q '^ClientTransportPlugin webtunnel ' "${torrc}" 2>/dev/null; then
+    echo "webtunnel"
+  elif grep -q '^ClientTransportPlugin meek_lite ' "${torrc}" 2>/dev/null; then
+    echo "meek"
+  elif grep -Eq '^Bridge[[:space:]]+[[:digit:]\[:alpha:].-]+:[0-9]+[[:space:]]+[A-Fa-f0-9]{40}\b' "${torrc}" 2>/dev/null; then
+    echo "vanilla"
+  else
+    echo "unknown"
+  fi
+}
+
+show_status() {
+  local transport
+  local file
+  echo "Current torrc bridge mode: $(current_mode)"
+  echo "Installed transports:"
+  command -v /usr/bin/snowflake-client >/dev/null 2>&1 && echo "  snowflake: /usr/bin/snowflake-client" || echo "  snowflake: missing"
+  command -v /usr/bin/obfs4proxy >/dev/null 2>&1 && echo "  obfs4: /usr/bin/obfs4proxy" || echo "  obfs4: missing"
+  if find_lyrebird >/dev/null 2>&1; then
+    echo "  lyrebird: $(find_lyrebird)"
+  else
+    echo "  lyrebird: missing"
+  fi
+  for transport in obfs4 webtunnel vanilla meek; do
+    file="$(bridge_file "${transport}")"
+    if has_lines "${file}"; then
+      echo "  ${transport} bridges: $(grep -Ec '^[[:space:]]*Bridge[[:space:]]+' "${file}")"
+    else
+      echo "  ${transport} bridges: 0"
+    fi
+  done
+  echo "Latest bootstrap: $(recent_bootstrap)"
+  systemctl --no-pager --full status "${service}" || true
+}
+
+switch_mode() {
+  local selected="$1"
+  local tmp
+
+  tmp="$(mktemp)"
+  if ! render_mode "${selected}" >"${tmp}"; then
+    rm -f "${tmp}"
+    echo "Mode '${selected}' is not ready on this host." >&2
+    return 1
+  fi
+
+  install -m 0644 "${tmp}" "${torrc}"
+  rm -f "${tmp}"
+  /usr/bin/tor --defaults-torrc /usr/share/tor/tor-service-defaults-torrc -f "${torrc}" --verify-config
+  restart_service
+  if wait_for_bootstrap >/tmp/tor-bootstrap-state 2>/dev/null; then
+    :
+  fi
+  echo "Switched to ${selected}"
+  show_status
+  if grep -q 'Bootstrapped 100% (done): Done' /tmp/tor-bootstrap-state 2>/dev/null; then
+    echo "Bootstrap result: ready"
+  else
+    echo "Bootstrap result: still progressing or timed out after ${wait_timeout}s"
+  fi
+  rm -f /tmp/tor-bootstrap-state
+}
+
+auto_switch() {
+  local order_file="${tor_dir}/bridge-order.conf"
+  local line
+  local candidate
+
+  if [[ -x /usr/local/bin/tor-bridge-refresh ]]; then
+    /usr/local/bin/tor-bridge-refresh --quiet || true
+  fi
+
+  while IFS= read -r line; do
+    candidate="${line%%#*}"
+    candidate="$(echo "${candidate}" | xargs || true)"
+    [[ -z "${candidate}" ]] && continue
+    if switch_mode "${candidate}" >/tmp/tor-bridge-switch.out 2>/tmp/tor-bridge-switch.err; then
+      if mode_ready; then
+        cat /tmp/tor-bridge-switch.out
+        rm -f /tmp/tor-bridge-switch.out /tmp/tor-bridge-switch.err
+        echo "Auto selected mode: ${candidate}"
+        return 0
+      fi
+    fi
+  done < "${order_file}"
+
+  cat /tmp/tor-bridge-switch.out 2>/dev/null || true
+  cat /tmp/tor-bridge-switch.err 2>/dev/null >&2 || true
+  rm -f /tmp/tor-bridge-switch.out /tmp/tor-bridge-switch.err
+  echo "No usable bridge mode was found." >&2
+  return 1
+}
+
+case "${mode}" in
+  snowflake|obfs4|webtunnel|vanilla|meek)
+    switch_mode "${mode}"
+    ;;
+  auto)
+    auto_switch
+    ;;
+  status)
+    show_status
+    ;;
+  *)
+    echo "Usage: sudo tor-bridge-switch <snowflake|obfs4|webtunnel|vanilla|meek|auto|status>" >&2
+    exit 1
+    ;;
+esac

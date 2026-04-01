@@ -1,0 +1,47 @@
+{
+  "site_name": "dragonforceblog",
+  "pages": [
+    {
+      "file": "list_page_1.html",
+      "expected_victim_count": 24,
+      "items": [
+        {
+          "name": "Aegis Project Controls",
+          "domain": "www.consultaegis.com",
+          "publicated_time": "28 February 2026"
+        },
+        {
+          "name": "Huffman Insurance Agency",
+          "domain": "www.huffmaninsurancegroup.com",
+          "publicated_time": "27 February 2026"
+        },
+        {
+          "name": "Audexia group",
+          "domain": "volkswagen-group-retail-france.fr",
+          "publicated_time": "27 February 2026"
+        }
+      ]
+    },
+    {
+      "file": "list_page_2.html",
+      "expected_victim_count": 24,
+      "items": [
+        {
+          "name": "Northern Family Farms",
+          "domain": "www.northernfamilyfarms.com",
+          "publicated_time": "7 March 2026"
+        },
+        {
+          "name": "R&C Fence, Inc.",
+          "domain": "www.randcfence.com",
+          "publicated_time": "6 March 2026"
+        },
+        {
+          "name": "Graham County Electric Cooperative",
+          "domain": "www.gce.coop",
+          "publicated_time": "6 March 2026"
+        }
+      ]
+    }
+  ]
+}
