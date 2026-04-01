@@ -1,0 +1,91 @@
+:root {
+  --ti-primary: #2d5dff;
+  --ti-primary-soft: #edf2ff;
+  --ti-primary-strong: #1f44cc;
+  --ti-accent: #e88a39;
+  --ti-accent-soft: #fff1de;
+  --ti-accent-strong: #b96521;
+  --ti-danger: #f6ded8;
+  --ti-danger-strong: #cf4432;
+  --ti-warning: #faead2;
+  --ti-warning-strong: #e88030;
+  --ti-success: #deefe5;
+  --ti-success-strong: #287a4f;
+  --ti-info: #dceaf9;
+
+  --ti-bg-page: #ffffff;
+  --ti-bg-secondary: #ffffff;
+  --ti-bg-grid: #f7f9fc;
+  --ti-surface-default: rgba(255, 255, 255, 0.98);
+  --ti-surface-raised: #ffffff;
+  --ti-surface-hover: #f8fbff;
+  --ti-surface-active: #f2f6fc;
+  --ti-panel-muted: rgba(247, 249, 252, 0.92);
+  --ti-panel-emphasis: linear-gradient(135deg, rgba(255, 255, 255, 1), rgba(247, 250, 255, 0.96));
+
+  --ti-text-primary: #1e2735;
+  --ti-text-secondary: #536074;
+  --ti-text-muted: #7f8898;
+  --ti-text-inverse: #ffffff;
+
+  --ti-border-default: rgba(63, 80, 104, 0.14);
+  --ti-border-soft: rgba(87, 97, 123, 0.08);
+  --ti-border-strong: rgba(62, 74, 92, 0.22);
+
+  --ti-shadow-card: 0 16px 40px rgba(53, 64, 86, 0.08);
+  --ti-shadow-card-hover: 0 20px 44px rgba(53, 64, 86, 0.12);
+  --ti-shadow-panel: 0 8px 24px rgba(52, 61, 79, 0.07);
+
+  --ti-spacing-xs: 4px;
+  --ti-spacing-sm: 8px;
+  --ti-spacing-md: 16px;
+  --ti-spacing-lg: 24px;
+  --ti-spacing-xl: 32px;
+  --ti-spacing-2xl: 48px;
+
+  --ti-radius-sm: 10px;
+  --ti-radius-md: 16px;
+  --ti-radius-lg: 22px;
+  --ti-radius-xl: 28px;
+  --ti-radius-full: 999px;
+
+  --ti-font-family: 'IBM Plex Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --ti-font-display: 'Source Serif 4', 'Noto Serif SC', serif;
+  --ti-font-mono: 'IBM Plex Mono', 'JetBrains Mono', monospace;
+
+  --ti-sidebar-width: 260px;
+  --ti-sidebar-collapsed: 78px;
+  --ti-header-height: 88px;
+
+  --ti-threat-critical: #c93a2d;
+  --ti-threat-high: #df7b22;
+  --ti-threat-medium: #d7a03c;
+  --ti-threat-low: #3f915d;
+
+  --ti-chart-1: #2d5dff;
+  --ti-chart-2: #e88030;
+  --ti-chart-3: #43a06e;
+  --ti-chart-4: #cf4432;
+  --ti-chart-5: #5d74d6;
+  --ti-chart-6: #7e8ca3;
+
+  --el-color-primary: #2d5dff;
+  --el-color-primary-light-3: #5f82ff;
+  --el-color-primary-light-5: #86a3ff;
+  --el-color-primary-light-8: #d9e3ff;
+  --el-color-primary-light-9: #edf2ff;
+  --el-border-radius-base: 14px;
+  --el-border-radius-small: 12px;
+  --el-fill-color-blank: #ffffff;
+  --el-bg-color: #ffffff;
+  --el-bg-color-overlay: #ffffff;
+  --el-text-color-primary: #1e2735;
+  --el-text-color-regular: #536074;
+  --el-text-color-secondary: #7f8898;
+  --el-border-color: rgba(63, 80, 104, 0.14);
+  --el-border-color-light: rgba(87, 97, 123, 0.08);
+  --el-fill-color-light: rgba(247, 249, 252, 0.92);
+  --el-fill-color-lighter: rgba(250, 252, 255, 0.9);
+  --el-fill-color-extra-light: rgba(255, 255, 255, 0.98);
+  --el-box-shadow-light: 0 14px 30px rgba(53, 64, 86, 0.08);
+}

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root: sudo wsl-sync-proxy-env" >&2
+  exit 1
+fi
+
+gateway="$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')"
+host="${gateway:-172.26.0.1}"
+port="${WSL_PROXY_PORT:-7892}"
+
+probe() {
+  timeout 1 bash -lc "</dev/tcp/${host}/${1}" >/dev/null 2>&1
+}
+
+for candidate in "${port}" 7892 7890 7897; do
+  if probe "${candidate}"; then
+    port="${candidate}"
+    break
+  fi
+done
+
+install -d -m 0755 /etc/tor
+
+cat > /etc/tor/proxy.env <<EOF
+HTTP_PROXY=http://${host}:${port}
+HTTPS_PROXY=http://${host}:${port}
+ALL_PROXY=socks5://${host}:${port}
+NO_PROXY=127.0.0.1,localhost,::1
+http_proxy=http://${host}:${port}
+https_proxy=http://${host}:${port}
+all_proxy=socks5://${host}:${port}
+no_proxy=127.0.0.1,localhost,::1
+EOF
+
+echo "Wrote /etc/tor/proxy.env with ${host}:${port}"

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+quiet=0
+if [[ "${1:-}" == "--quiet" ]]; then
+  quiet=1
+fi
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run as root: sudo tor-bridge-refresh [--quiet]" >&2
+  exit 1
+fi
+
+tor_dir="/etc/tor"
+updated=0
+
+refresh_mode() {
+  local mode="$1"
+  local hook="${tor_dir}/bridge-fetch.${mode}"
+  local target="${tor_dir}/bridges.${mode}"
+  local tmp
+
+  [[ -x "${hook}" ]] || return 0
+
+  tmp="$(mktemp)"
+  if "${hook}" >"${tmp}" && grep -Eq '^[[:space:]]*Bridge[[:space:]]+' "${tmp}"; then
+    install -m 0644 "${tmp}" "${target}"
+    updated=1
+    [[ "${quiet}" -eq 1 ]] || echo "Updated ${target} using ${hook}"
+  else
+    [[ "${quiet}" -eq 1 ]] || echo "Skipped ${mode}: hook returned no bridge lines" >&2
+  fi
+  rm -f "${tmp}"
+}
+
+refresh_mode obfs4
+refresh_mode webtunnel
+refresh_mode vanilla
+refresh_mode meek
+
+if [[ "${updated}" -eq 0 && "${quiet}" -ne 1 ]]; then
+  echo "No bridge files were refreshed."
+fi

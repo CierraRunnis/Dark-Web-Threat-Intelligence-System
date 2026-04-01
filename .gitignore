@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+darkweb_collector/venv/
+
+# Node / frontend build outputs
+node_modules/
+dist/
+threat-intelligence-dashboard/node_modules/
+threat-intelligence-dashboard/dist/
+
+# Runtime data and crawler artifacts
+darkweb_collector/data/
+darkweb_collector/output/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Archives and downloads
+*.tar.gz
+tor-downloads/
+
