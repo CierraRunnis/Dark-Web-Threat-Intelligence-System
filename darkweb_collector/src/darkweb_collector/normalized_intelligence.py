@@ -1094,6 +1094,7 @@ def _vulnerability_rows(connection) -> list[dict[str, Any]]:
 def _build_forum_base_event(row: dict[str, Any]) -> dict[str, Any]:
     title = _normalize_label(row.get("title")) or _normalize_label(row.get("topic_url")) or "未命名论坛帖子"
     content = _normalize_whitespace(row.get("content"))
+    topic_url = _normalize_label(row.get("topic_url"))
     raw_json = _parse_json(row.get("raw_json"))
     topic_url = _normalize_label(row.get("topic_url"))
     victim_names = [item for item in str(row.get("victim_names") or "").split("||") if _normalize_label(item)]
