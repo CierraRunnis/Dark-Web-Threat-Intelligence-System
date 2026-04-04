@@ -41,6 +41,7 @@ INDUSTRY_LABELS = {
     "finance": "金融",
     "healthcare": "医疗",
     "technology": "科技",
+    "military": "军事",
     "retail": "零售",
     "education": "教育",
     "telecommunications": "通信",
@@ -92,6 +93,13 @@ def _format_dt(value: str | None) -> str:
     if dt is None:
         return value or ""
     return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _format_date(value: str | None) -> str:
+    dt = _parse_dt(value)
+    if dt is None:
+        return (value or "").split(" ", 1)[0]
+    return dt.astimezone().strftime("%Y-%m-%d")
 
 
 def _weekday_cn(dt: datetime) -> str:
@@ -866,6 +874,120 @@ def _build_threat_heatmap(data_leak_events: list[dict[str, str]], ransomware_eve
     return {"regions": regions, "categories": categories, "values": values}
 
 
+def _safe_pct(current: int, previous: int) -> int:
+    if previous <= 0:
+        return 100 if current > 0 else 0
+    return round(((current - previous) / previous) * 100)
+
+
+def _last_n_days(days: int) -> list[datetime]:
+    today = datetime.now(timezone.utc).date()
+    return [datetime.combine(today - timedelta(days=offset), datetime.min.time(), tzinfo=timezone.utc) for offset in range(days - 1, -1, -1)]
+
+
+def _build_executive_trend(events: list[dict[str, Any]], days: int = 30) -> dict[str, list[Any]]:
+    dates = _last_n_days(days)
+    start = dates[0]
+    total_counter: Counter[str] = Counter()
+    high_counter: Counter[str] = Counter()
+    for event in events:
+        event_dt = _parse_dt(event.get("disclosure_time"))
+        if event_dt is None or event_dt < start:
+            continue
+        key = event_dt.date().isoformat()
+        total_counter[key] += 1
+        if int(event.get("risk_score") or 0) >= 60:
+            high_counter[key] += 1
+    labels = [item.strftime("%m-%d") for item in dates]
+    keys = [item.date().isoformat() for item in dates]
+    return {
+        "labels": labels,
+        "total": [int(total_counter.get(key, 0)) for key in keys],
+        "highRisk": [int(high_counter.get(key, 0)) for key in keys],
+    }
+
+
+def _build_executive_countries(events: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        country = (event.get("country") or "").strip()
+        if not country or country == "未知":
+            continue
+        grouped.setdefault(country, []).append(event)
+    rows: list[dict[str, Any]] = []
+    for country, country_events in grouped.items():
+        rows.append(
+            {
+                "name": country,
+                "eventCount": len(country_events),
+                "highRiskCount": sum(1 for item in country_events if int(item.get("risk_score") or 0) >= 60),
+                "averageRiskScore": round(sum(int(item.get("risk_score") or 0) for item in country_events) / len(country_events)),
+            }
+        )
+    rows.sort(key=lambda item: (item["eventCount"], item["highRiskCount"], item["averageRiskScore"]), reverse=True)
+    return rows[:limit]
+
+
+def _build_executive_priority_events(events: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    ranked = sorted(
+        (
+            item
+            for item in events
+            if (item.get("title") or "").strip() and len((item.get("title") or "").strip()) >= 4
+        ),
+        key=lambda item: (
+            int(item.get("risk_score") or 0),
+            _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    return [
+        {
+            "id": item["event_id"],
+            "disclosureDate": _format_date(item.get("disclosure_time")),
+            "title": item.get("title") or "未命名事件",
+            "attacker": item.get("attacker") or "未知",
+            "country": item.get("country") or "未知",
+            "industry": item.get("industry") or "未知",
+            "riskScore": int(item.get("risk_score") or 0),
+        }
+        for item in ranked[:limit]
+    ]
+
+
+def _build_executive_coverage(events: list[dict[str, Any]]) -> dict[str, int]:
+    total = len(events) or 1
+    return {
+        "countryCoverageRate": round(sum(1 for item in events if (item.get("country") or "").strip() not in {"", "未知"}) / total * 100),
+        "regionCoverageRate": round(sum(1 for item in events if (item.get("region") or "").strip() not in {"", "未知"}) / total * 100),
+        "industryCoverageRate": round(sum(1 for item in events if (item.get("industry") or "").strip() not in {"", "未知"}) / total * 100),
+    }
+
+
+def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[str, Any]]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    current_start = now - timedelta(days=30)
+    previous_start = now - timedelta(days=60)
+
+    current_events = [item for item in events if (_parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc)) >= current_start]
+    previous_events = [
+        item
+        for item in events
+        if previous_start <= (_parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc)) < current_start
+    ]
+    current_high = [item for item in current_events if int(item.get("risk_score") or 0) >= 60]
+    previous_high = [item for item in previous_events if int(item.get("risk_score") or 0) >= 60]
+    top_country = countries[0] if countries else {"name": "未知", "eventCount": 0}
+    return {
+        "totalEvents30d": len(current_events),
+        "totalEventsDeltaPct": _safe_pct(len(current_events), len(previous_events)),
+        "highRisk30d": len(current_high),
+        "highRiskDeltaPct": _safe_pct(len(current_high), len(previous_high)),
+        "topCountry": top_country["name"],
+        "topCountryEventCount": top_country["eventCount"],
+    }
+
+
 def build_intelligence_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
         normalized_events = ensure_normalized_intelligence(connection)
@@ -937,6 +1059,11 @@ def build_intelligence_payload() -> dict[str, Any]:
         "medium": data_leak_series["values"],
         "low": threat_alert_series["values"],
     }
+    executive_countries = _build_executive_countries(normalized_events)
+    executive_cards = _build_executive_cards(normalized_events, executive_countries)
+    executive_trend = _build_executive_trend(normalized_events)
+    executive_priority_events = _build_executive_priority_events(normalized_events)
+    executive_coverage = _build_executive_coverage(normalized_events)
 
     return {
         "monitoringStatus": _build_monitoring_status(
@@ -992,6 +1119,11 @@ def build_intelligence_payload() -> dict[str, Any]:
         "threatHeatmap": _build_threat_heatmap(data_leak_events, ransomware_events, crawl_jobs),
         "threatLevelTrend": threat_level_trend,
         "threatSituationBehavior": behavior_payload,
+        "threatExecutiveCards": executive_cards,
+        "threatExecutiveTrend": executive_trend,
+        "threatExecutiveCountries": executive_countries,
+        "threatExecutivePriorityEvents": executive_priority_events,
+        "threatExecutiveCoverage": executive_coverage,
     }
 
 
