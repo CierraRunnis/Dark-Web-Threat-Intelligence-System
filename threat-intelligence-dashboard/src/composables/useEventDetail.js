@@ -33,7 +33,10 @@ export function useEventDetail() {
     try {
       const controller = new AbortController()
       const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-      const response = await fetch(`/api/events/${encodeURIComponent(eventId)}`, {
+      const detailEndpoint = String(eventId).startsWith('vuln:')
+        ? `/api/vulnerabilities/${encodeURIComponent(eventId)}`
+        : `/api/events/${encodeURIComponent(eventId)}`
+      const response = await fetch(detailEndpoint, {
         signal: controller.signal,
       })
       window.clearTimeout(timeoutId)

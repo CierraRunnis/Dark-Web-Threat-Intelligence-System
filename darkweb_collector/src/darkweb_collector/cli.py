@@ -8,6 +8,7 @@ import time
 
 from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.orchestrator import enqueue_due_sites, run_site_once, show_runs
+from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
 from darkweb_collector.queueing import build_worker_command, queue_for_seed
 from darkweb_collector.state_store import get_state_store
 
@@ -31,6 +32,10 @@ def build_parser() -> ArgumentParser:
 
     show_runs_parser = subparsers.add_parser("show-runs")
     show_runs_parser.add_argument("--limit", type=int, default=20)
+
+    sync_vulns_parser = subparsers.add_parser("sync-public-vulns")
+    sync_vulns_parser.add_argument("--sample-file", default=None)
+    sync_vulns_parser.add_argument("--limit", type=int, default=20)
 
     return parser
 
@@ -107,6 +112,11 @@ def _show_runs(limit: int) -> int:
     return 0
 
 
+def _sync_public_vulns(sample_file: str | None, limit: int) -> int:
+    print(json.dumps(sync_public_vulnerability_feed(sample_file=sample_file, limit=limit), ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -127,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_worker(args.queue)
     if args.command == "show-runs":
         return _show_runs(args.limit)
+    if args.command == "sync-public-vulns":
+        return _sync_public_vulns(args.sample_file, args.limit)
     parser.error(f"unsupported command: {args.command}")
     return 2
 
