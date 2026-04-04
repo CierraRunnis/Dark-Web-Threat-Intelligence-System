@@ -96,7 +96,7 @@ function parseDisclosureTime(value) {
 
 const sortedEvents = computed(() => {
   return [...ransomwareEvents.value].sort((left, right) => {
-    return parseDisclosureTime(right.disclosureTime) - parseDisclosureTime(left.disclosureTime)
+    return parseDisclosureTime(right.disclosureTimeRaw || right.disclosureTime) - parseDisclosureTime(left.disclosureTimeRaw || left.disclosureTime)
   })
 })
 
