@@ -13,7 +13,7 @@
         <slot name="actions" />
       </div>
     </header>
-    <div class="chart-panel__body" :style="{ minHeight: height }">
+    <div class="chart-panel__body" :style="{ minHeight: height, height }">
       <slot />
     </div>
   </section>
