@@ -192,6 +192,64 @@
         </div>
       </div>
 
+      <template v-if="!isVulnerability">
+        <div class="resource-grid">
+          <div class="ti-card ti-reveal-up">
+            <div class="ti-card-header">
+              <div class="ti-card-title">截图资源</div>
+            </div>
+            <div class="ti-card-body">
+              <div v-if="screenshotResources.length" class="screenshot-gallery">
+                <a
+                  v-for="item in screenshotResources"
+                  :key="item.url"
+                  :href="item.url"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="screenshot-card"
+                  :title="item.label || item.url"
+                >
+                  <img
+                    v-if="isImageResource(item.url)"
+                    :src="item.url"
+                    :alt="item.label || '截图资源'"
+                    loading="lazy"
+                  />
+                  <div class="screenshot-card__meta">
+                    <strong>{{ item.label || '截图资源' }}</strong>
+                    <span>{{ item.url }}</span>
+                  </div>
+                </a>
+              </div>
+              <p v-else class="resource-empty">暂无截图资源。</p>
+            </div>
+          </div>
+
+          <div class="ti-card ti-reveal-up">
+            <div class="ti-card-header">
+              <div class="ti-card-title">镜像与预览资源</div>
+            </div>
+            <div class="ti-card-body">
+              <div v-if="previewResources.length" class="reference-list">
+                <a
+                  v-for="item in previewResources"
+                  :key="item.url"
+                  :href="item.url"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="reference-item"
+                  :title="item.url"
+                >
+                  <span class="reference-source">资源：{{ item.label || '镜像资源' }}</span>
+                  <strong>{{ item.url }}</strong>
+                </a>
+              </div>
+              <p v-else class="resource-empty">暂无镜像或预览资源。</p>
+            </div>
+          </div>
+        </div>
+      </template>
+
     </section>
   </div>
 </template>
@@ -211,6 +269,27 @@ const primarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.
 const secondarySubjectLabel = computed(() => isVulnerability.value ? '产品' : '受害实体')
 const secondarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.value?.product || '未知') : (eventDetail.value?.victim || '未知'))
 const affectedVersionItems = computed(() => eventDetail.value?.affected_version_items || [])
+const screenshotResources = computed(() => eventDetail.value?.screenshot_resources || [])
+const previewResources = computed(() => {
+  const resources = []
+  const seen = new Set()
+
+  if (eventDetail.value?.json_preview_url) {
+    const previewUrl = String(eventDetail.value.json_preview_url)
+    resources.push({ label: 'JSON 预览', url: previewUrl })
+    seen.add(previewUrl)
+  }
+
+  for (const item of eventDetail.value?.mirror_resources || []) {
+    if (!item?.url) continue
+    const url = String(item.url)
+    if (seen.has(url)) continue
+    seen.add(url)
+    resources.push(item)
+  }
+
+  return resources
+})
 const vulnerabilitySourcesText = computed(() => {
   const labels = eventDetail.value?.source_labels || []
   if (labels.length) {
@@ -235,6 +314,10 @@ function goBackToList() {
   const eventId = String(route.params.eventId || '')
   const backPath = sessionStorage.getItem(`event-back:${eventId}`) || (String(eventId).startsWith('vuln:') ? '/vulnerability-alerts' : '/data-leak')
   router.push(backPath)
+}
+
+function isImageResource(url) {
+  return /\.(png|jpe?g|webp|gif|bmp|svg)(\?.*)?$/i.test(String(url || ''))
 }
 
 watch(
@@ -330,6 +413,12 @@ watch(
   gap: 22px;
 }
 
+.resource-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 22px;
+}
+
 .key-grid,
 .link-grid {
   display: grid;
@@ -359,6 +448,44 @@ watch(
 .reference-list {
   display: grid;
   gap: 12px;
+}
+
+.screenshot-gallery {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.screenshot-card {
+  display: block;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid var(--ti-border-soft);
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.screenshot-card img {
+  display: block;
+  width: 100%;
+  height: 240px;
+  object-fit: cover;
+  background: #eef2f7;
+}
+
+.screenshot-card__meta {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+}
+
+.screenshot-card__meta strong {
+  color: var(--ti-text-primary);
+}
+
+.screenshot-card__meta span {
+  color: var(--ti-text-secondary);
+  font-size: 12px;
+  word-break: break-all;
 }
 
 .reference-item {
@@ -410,8 +537,13 @@ watch(
 
 @media (max-width: 1100px) {
   .detail-hero,
+  .resource-grid,
   .key-grid,
   .link-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .screenshot-gallery {
     grid-template-columns: 1fr;
   }
 }
