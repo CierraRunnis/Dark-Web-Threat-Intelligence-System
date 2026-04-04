@@ -18,6 +18,16 @@ from darkweb_collector.db import (
 )
 from darkweb_collector.runtime import project_root
 from darkweb_collector.utils import safe_stem
+from darkweb_collector.vulnerability_i18n import (
+    build_affected_version_items,
+    build_reference_link_entries,
+    humanize_raw_source_type,
+    humanize_source_type,
+    translate_product_name,
+    translate_vulnerability_summary,
+    translate_vulnerability_title,
+    translate_vulnerability_type,
+)
 
 
 DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
@@ -29,6 +39,11 @@ SOURCE_LABELS = {
     "dragonforceblog": "DragonForce",
     "chaos": "Chaos",
     "lynx": "Lynx",
+    "cisa_kev": "CISA KEV",
+    "nvd": "NVD",
+    "securityweek": "SecurityWeek",
+    "apache": "Apache Security",
+    "vendor_oracle": "Oracle Security",
 }
 
 STATUS_LABELS = {
@@ -296,7 +311,14 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_SCHEMA_VERSION = "2026-04-04-governance-v2"
+NORMALIZATION_VERSION = "2026-04-04-governance-v2+vuln-v4"
+NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
+SEVERITY_ORDER = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
 
 REGION_DOMAIN_SUFFIX_HINTS = {
     "fr": "欧洲",
@@ -431,6 +453,28 @@ def _parse_json(value: str | None) -> dict[str, Any]:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [_normalize_label(item) for item in value if _normalize_label(item)]
+    if isinstance(value, str):
+        parsed = _parse_json(value)
+        if isinstance(parsed, list):
+            return [_normalize_label(item) for item in parsed if _normalize_label(item)]
+        return [_normalize_label(part) for part in value.split("||") if _normalize_label(part)]
+    return []
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    lowered = str(value or "").strip().lower()
+    return lowered in {"1", "true", "yes", "y", "on"}
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -909,6 +953,22 @@ def _severity_from_status(status: str) -> str:
     return "medium"
 
 
+def _severity_from_vulnerability(severity: str, cvss: Any, is_exploited: bool) -> str:
+    normalized = _normalize_label(severity).lower()
+    try:
+        cvss_value = float(cvss) if cvss not in {None, ""} else None
+    except (TypeError, ValueError):
+        cvss_value = None
+
+    if normalized == "critical" or (cvss_value is not None and cvss_value >= 9.0):
+        return "critical"
+    if is_exploited or normalized == "high" or (cvss_value is not None and cvss_value >= 7.0):
+        return "high"
+    if normalized == "medium" or (cvss_value is not None and cvss_value >= 4.0):
+        return "medium"
+    return "low"
+
+
 def _recent_cutoff(hours: int = RECENT_EVENT_HOURS) -> datetime:
     return _now_utc() - timedelta(hours=hours)
 
@@ -932,10 +992,18 @@ def _source_signature_payload(connection) -> dict[str, Any]:
         FROM victim_details
         """
     ).fetchone()
+    vulnerability_stats = connection.execute(
+        """
+        SELECT COUNT(*) AS count, MAX(id) AS max_id, MAX(disclosure_time) AS latest_at, MAX(last_seen_at) AS latest_seen_at
+        FROM vulnerability_records
+        """
+    ).fetchone()
     return {
+        "normalization_version": NORMALIZATION_VERSION,
         "forum_details": dict(forum_stats),
         "victims": dict(victim_stats),
         "victim_details": dict(victim_detail_stats),
+        "vulnerability_records": dict(vulnerability_stats),
     }
 
 
@@ -1004,6 +1072,20 @@ def _victim_rows(connection) -> list[dict[str, Any]]:
               LIMIT 1
           )
         ORDER BY v.id DESC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _vulnerability_rows(connection) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT id, source_name, source_type, cve_id, title, vendor, product, vulnerability_type,
+               severity, cvss, is_exploited, has_poc, patch_available, wide_impact,
+               disclosure_time, affected_versions, summary, advisory_url, reference_urls_json,
+               raw_json, last_seen_at
+        FROM vulnerability_records
+        ORDER BY datetime(disclosure_time) DESC, id DESC
         """
     ).fetchall()
     return [dict(row) for row in rows]
@@ -1225,6 +1307,83 @@ def _build_victim_base_event(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_vulnerability_base_event(row: dict[str, Any]) -> dict[str, Any]:
+    raw_json = _parse_json(row.get("raw_json"))
+    source_name = _normalize_label(row.get("source_name")).lower()
+    source_label = _label_source(source_name)
+    vendor = _normalize_label(row.get("vendor")) or "未知厂商"
+    product = translate_product_name(_normalize_label(row.get("product")) or "未知产品")
+    cve_id = _normalize_label(row.get("cve_id")).upper()
+    vulnerability_type = translate_vulnerability_type(_normalize_label(row.get("vulnerability_type")) or "公开源漏洞")
+    original_title = _normalize_label(row.get("title")) or f"{cve_id} {vendor} {product}"
+    original_summary = _normalize_whitespace(row.get("summary"))
+    title = translate_vulnerability_title(original_title, vendor=vendor, product=product)
+    summary = translate_vulnerability_summary(original_summary)
+    affected_versions = _coerce_string_list(row.get("affected_versions"))
+    affected_version_items = build_affected_version_items(affected_versions)
+    raw_reference_urls = [item.get("url") for item in _coerce_resource_list(_parse_json(row.get("reference_urls_json"))) if item.get("url")]
+    advisory_url = _normalize_label(row.get("advisory_url"))
+    if advisory_url:
+        raw_reference_urls.insert(0, advisory_url)
+    reference_urls = build_reference_link_entries(raw_reference_urls, vendor=vendor)
+    severity = _severity_from_vulnerability(
+        str(row.get("severity") or ""),
+        row.get("cvss"),
+        _coerce_bool(row.get("is_exploited")),
+    )
+    return {
+        "event_id": f"vuln:{cve_id.lower()}",
+        "source_kind": "vulnerability",
+        "raw_source_type": "vulnerability_records",
+        "source_site_name": source_name,
+        "source_record_id": int(row["id"]),
+        "event_type": "vulnerability",
+        "category": vulnerability_type,
+        "leak_type": "漏洞预警",
+        "title": title,
+        "attacker": vendor,
+        "victim": product,
+        "victim_key": _canonical_key(product),
+        "industry": "基础设施软件",
+        "region": "全球",
+        "disclosure_time": row.get("disclosure_time") or "",
+        "severity": severity,
+        "source_url": advisory_url or next((item["url"] for item in reference_urls if item.get("url")), ""),
+        "detail_text": summary,
+        "mirror_resources": reference_urls,
+        "screenshot_resources": [],
+        "json_preview_url": "",
+        "metadata": {
+            "source": "多源聚合" if len(reference_urls) > 1 else source_label,
+            "source_name": source_name,
+            "source_label": source_label,
+            "source_labels": [source_label],
+            "source_names": [source_name] if source_name else [],
+            "source_type": _normalize_label(row.get("source_type")) or "public",
+            "source_type_label": humanize_source_type(row.get("source_type")),
+            "raw_source_type_label": humanize_raw_source_type("vulnerability_records"),
+            "cve_id": cve_id,
+            "vendor": vendor,
+            "product": product,
+            "original_title": original_title,
+            "original_summary": original_summary,
+            "summary": summary,
+            "cvss": row.get("cvss"),
+            "is_exploited": _coerce_bool(row.get("is_exploited")),
+            "has_poc": _coerce_bool(row.get("has_poc")),
+            "patch_available": _coerce_bool(row.get("patch_available")),
+            "wide_impact": _coerce_bool(row.get("wide_impact")),
+            "affected_versions": affected_versions,
+            "affected_version_items": affected_version_items,
+            "reference_urls": reference_urls,
+            "published_label": _format_dt(row.get("disclosure_time")),
+            "resource_count": len(reference_urls),
+            "risk_reasons": [],
+            "raw_json": raw_json,
+        },
+    }
+
+
 def _compute_spike_counters(events: list[dict[str, Any]], field: str) -> tuple[Counter[str], Counter[str]]:
     recent_cutoff = _now_utc() - timedelta(days=SPIKE_WINDOW_DAYS)
     previous_cutoff = _now_utc() - timedelta(days=SPIKE_WINDOW_DAYS * 2)
@@ -1264,32 +1423,54 @@ def _score_events(events: list[dict[str, Any]]) -> None:
         elif event["severity"] == "high":
             reasons.append("属于高风险事件类型")
 
-        if event["leak_type"] in {"凭证泄露", "源代码泄露", "数据库泄露", "勒索披露"}:
+        if event["event_type"] == "vulnerability":
+            metadata = event["metadata"]
+            cvss = metadata.get("cvss")
+            try:
+                cvss_value = float(cvss) if cvss not in {None, ""} else None
+            except (TypeError, ValueError):
+                cvss_value = None
+            if metadata.get("is_exploited"):
+                score += 22
+                reasons.append("漏洞已存在公开利用活动")
+            if metadata.get("has_poc"):
+                score += 10
+                reasons.append("已出现公开 PoC 或利用样例")
+            if metadata.get("wide_impact"):
+                score += 8
+                reasons.append("影响版本范围较广")
+            if not metadata.get("patch_available"):
+                score += 8
+                reasons.append("补丁暂不可用或仅有缓解方案")
+            if cvss_value is not None and cvss_value >= 9.5:
+                score += 6
+                reasons.append("CVSS 指标接近满分")
+        elif event["leak_type"] in {"凭证泄露", "源代码泄露", "数据库泄露", "勒索披露"}:
             score += 10
             reasons.append(f"命中重点情报类型：{event['leak_type']}")
 
         actor = event["attacker"]
         actor_count = actor_counter.get(actor, 0)
-        if actor_count >= 2:
+        if event["event_type"] != "vulnerability" and actor_count >= 2:
             score += min(18, actor_count * 4)
             reasons.append("同一主体近期重复出现")
 
-        if len(actor_sites.get(actor, set())) >= 2:
+        if event["event_type"] != "vulnerability" and len(actor_sites.get(actor, set())) >= 2:
             score += 12
             reasons.append("同一主体跨站点出现")
 
         victim_count = victim_counter.get(event["victim_key"], 0)
-        if victim_count >= 2:
+        if event["event_type"] != "vulnerability" and victim_count >= 2:
             score += min(15, victim_count * 4)
             reasons.append("同一受害实体重复暴露")
 
         industry = event["industry"]
-        if industry != "未知" and industry_recent.get(industry, 0) >= max(2, industry_previous.get(industry, 0) + 1):
+        if event["event_type"] != "vulnerability" and industry != "未知" and industry_recent.get(industry, 0) >= max(2, industry_previous.get(industry, 0) + 1):
             score += 8
             reasons.append("受影响行业近期活跃度上升")
 
         region = event["region"]
-        if region != "未知" and region_recent.get(region, 0) >= max(2, region_previous.get(region, 0) + 1):
+        if event["event_type"] != "vulnerability" and region != "未知" and region_recent.get(region, 0) >= max(2, region_previous.get(region, 0) + 1):
             score += 6
             reasons.append("受影响地区近期活跃度上升")
 
@@ -1323,6 +1504,102 @@ def _hydrate_event_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_unique_resources(left: list[dict[str, str]], right: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in left + right:
+        label = _normalize_label(item.get("label"))
+        url = _normalize_label(item.get("url"))
+        if not url:
+            continue
+        signature = (label, url)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        merged.append({"label": label or url, "url": url})
+    return merged
+
+
+def _merge_unique_strings(left: list[Any], right: list[Any]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in list(left) + list(right):
+        normalized = _normalize_label(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(normalized)
+    return merged
+
+
+def _merge_event_metadata(existing: dict[str, Any], current: dict[str, Any], *, mirror_resources: list[dict[str, str]]) -> dict[str, Any]:
+    existing_meta = existing.get("metadata") or {}
+    current_meta = current.get("metadata") or {}
+    merged = {
+        **existing_meta,
+        **current_meta,
+    }
+    merged["risk_reasons"] = _merge_unique_strings(existing_meta.get("risk_reasons") or [], current_meta.get("risk_reasons") or [])[:4]
+    merged["reference_urls"] = _merge_unique_resources(
+        existing_meta.get("reference_urls") or [],
+        current_meta.get("reference_urls") or [],
+    )
+    merged["source_labels"] = _merge_unique_strings(existing_meta.get("source_labels") or [], current_meta.get("source_labels") or [])
+    merged["source_names"] = _merge_unique_strings(existing_meta.get("source_names") or [], current_meta.get("source_names") or [])
+    merged["affected_versions"] = _merge_unique_strings(
+        existing_meta.get("affected_versions") or [],
+        current_meta.get("affected_versions") or [],
+    )
+    merged["affected_version_items"] = build_affected_version_items(merged.get("affected_versions") or [])
+    if merged.get("source_labels"):
+        merged["source"] = "多源聚合" if len(merged["source_labels"]) > 1 else merged["source_labels"][0]
+    merged["is_exploited"] = bool(existing_meta.get("is_exploited") or current_meta.get("is_exploited"))
+    merged["has_poc"] = bool(existing_meta.get("has_poc") or current_meta.get("has_poc"))
+    merged["patch_available"] = bool(existing_meta.get("patch_available") or current_meta.get("patch_available"))
+    merged["wide_impact"] = bool(existing_meta.get("wide_impact") or current_meta.get("wide_impact"))
+    existing_cvss = existing_meta.get("cvss")
+    current_cvss = current_meta.get("cvss")
+    try:
+        merged["cvss"] = max(float(existing_cvss or 0), float(current_cvss or 0))
+    except (TypeError, ValueError):
+        merged["cvss"] = current_cvss or existing_cvss
+    merged["resource_count"] = len(mirror_resources)
+    return merged
+
+
+def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    current_dt = _parse_dt(str(current.get("disclosure_time") or ""))
+    existing_dt = _parse_dt(str(existing.get("disclosure_time") or ""))
+    prefer_current = False
+    if current_dt and existing_dt:
+        prefer_current = current_dt >= existing_dt
+    elif current_dt and not existing_dt:
+        prefer_current = True
+    elif len(current.get("detail_text") or "") > len(existing.get("detail_text") or ""):
+        prefer_current = True
+
+    primary = current if prefer_current else existing
+    secondary = existing if prefer_current else current
+    merged_mirror_resources = _merge_unique_resources(existing.get("mirror_resources") or [], current.get("mirror_resources") or [])
+    merged_screenshot_resources = _merge_unique_resources(
+        existing.get("screenshot_resources") or [],
+        current.get("screenshot_resources") or [],
+    )
+    merged = {
+        **secondary,
+        **primary,
+    }
+    merged["mirror_resources"] = merged_mirror_resources
+    merged["screenshot_resources"] = merged_screenshot_resources
+    merged["metadata"] = _merge_event_metadata(existing, current, mirror_resources=merged_mirror_resources)
+    merged["severity"] = max(
+        (existing.get("severity"), current.get("severity")),
+        key=lambda value: SEVERITY_ORDER.get(str(value or "").lower(), 0),
+    )
+    merged["risk_score"] = max(int(existing.get("risk_score") or 0), int(current.get("risk_score") or 0))
+    return merged
+
+
 def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
     source_signature = _build_source_signature(connection)
     base_events: list[dict[str, Any]] = []
@@ -1330,6 +1607,8 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
         base_events.append(_build_forum_base_event(row))
     for row in _victim_rows(connection):
         base_events.append(_build_victim_base_event(row))
+    for row in _vulnerability_rows(connection):
+        base_events.append(_build_vulnerability_base_event(row))
 
     _propagate_entity_context(base_events)
     _score_events(base_events)
@@ -1339,31 +1618,7 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
         if existing is None:
             deduped_events[event["event_id"]] = event
             continue
-        current_dt = _parse_dt(str(event.get("disclosure_time") or ""))
-        existing_dt = _parse_dt(str(existing.get("disclosure_time") or ""))
-        should_replace = False
-        if current_dt and existing_dt:
-            should_replace = current_dt >= existing_dt
-        elif current_dt and not existing_dt:
-            should_replace = True
-        elif len(event.get("detail_text") or "") > len(existing.get("detail_text") or ""):
-            should_replace = True
-        if should_replace:
-            merged = {**existing, **event}
-            merged["mirror_resources"] = existing.get("mirror_resources", []) + [
-                item for item in event.get("mirror_resources", []) if item not in existing.get("mirror_resources", [])
-            ]
-            merged["screenshot_resources"] = existing.get("screenshot_resources", []) + [
-                item for item in event.get("screenshot_resources", []) if item not in existing.get("screenshot_resources", [])
-            ]
-            deduped_events[event["event_id"]] = merged
-        else:
-            existing["mirror_resources"] = existing.get("mirror_resources", []) + [
-                item for item in event.get("mirror_resources", []) if item not in existing.get("mirror_resources", [])
-            ]
-            existing["screenshot_resources"] = existing.get("screenshot_resources", []) + [
-                item for item in event.get("screenshot_resources", []) if item not in existing.get("screenshot_resources", [])
-            ]
+        deduped_events[event["event_id"]] = _merge_duplicate_events(existing, event)
 
     updated_at = _now_utc().isoformat()
     persisted_rows: list[dict[str, Any]] = []
@@ -1446,12 +1701,15 @@ def load_normalized_event_detail(connection, event_id: str, refresh: bool = Fals
 
 
 def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata") or {}
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
+        "normalized_event_type": event["event_type"],
         "raw_source_type": event["raw_source_type"],
         "disclosureTime": _format_date(event.get("disclosure_time")),
         "disclosureTimeRaw": event.get("disclosure_time") or "",
+        "rawSourceTypeLabel": metadata.get("raw_source_type_label") or humanize_raw_source_type(event["raw_source_type"]),
         "title": event["title"],
         "category": event["category"],
         "attacker": event["attacker"],
@@ -1466,14 +1724,24 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
         "riskReasons": event["risk_reasons"],
         "confidenceScore": int(event.get("confidence_score") or 0),
         "completenessScore": int(event.get("completeness_score") or 0),
+        "cveId": metadata.get("cve_id") or "",
+        "vendor": metadata.get("vendor") or "",
+        "product": metadata.get("product") or "",
+        "cvss": metadata.get("cvss"),
+        "isExploited": bool(metadata.get("is_exploited")),
+        "patchAvailable": bool(metadata.get("patch_available")),
+        "summary": metadata.get("summary") or event.get("detail_text") or "",
     }
 
 
 def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
+    metadata = event.get("metadata") or {}
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
+        "normalized_event_type": event["event_type"],
         "raw_source_type": event["raw_source_type"],
+        "raw_source_type_label": metadata.get("raw_source_type_label") or humanize_raw_source_type(event["raw_source_type"]),
         "title": event["title"],
         "disclosure_time": _format_date(event.get("disclosure_time")),
         "disclosure_time_raw": event.get("disclosure_time") or "",
@@ -1501,6 +1769,21 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "industry_source": event.get("industry_source") or "unknown",
         "tag_sources": event.get("tag_sources") or [],
         "entity_link_evidence": event.get("entity_link_evidence") or {},
+        "cve_id": metadata.get("cve_id") or "",
+        "vendor": metadata.get("vendor") or "",
+        "product": metadata.get("product") or "",
+        "cvss": metadata.get("cvss"),
+        "is_exploited": bool(metadata.get("is_exploited")),
+        "patch_available": bool(metadata.get("patch_available")),
+        "has_poc": bool(metadata.get("has_poc")),
+        "affected_versions": metadata.get("affected_versions") or [],
+        "affected_version_items": metadata.get("affected_version_items") or [],
+        "summary": metadata.get("summary") or event.get("detail_text") or "",
+        "reference_urls": metadata.get("reference_urls") or event.get("mirror_resources") or [],
+        "source_labels": metadata.get("source_labels") or [],
+        "source_type_label": metadata.get("source_type_label") or humanize_source_type(metadata.get("source_type")),
+        "original_title": metadata.get("original_title") or "",
+        "original_summary": metadata.get("original_summary") or "",
     }
 
 
@@ -1632,14 +1915,16 @@ def _build_behavior_signals(events: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def build_behavior_payload(connection, events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     normalized_events = events if events is not None else load_normalized_events(connection)
+    behavior_events = [item for item in normalized_events if item["event_type"] != "vulnerability"]
     data_leak_events = [item for item in normalized_events if item["event_type"] == "data_leak"]
     ransomware_events = [item for item in normalized_events if item["event_type"] == "ransomware"]
-    actor_ranking = _build_actor_ranking(normalized_events)
-    victim_ranking = _build_victim_ranking(normalized_events)
-    industry_focus = _aggregate_dimension(normalized_events, "industry")
-    region_focus = _aggregate_dimension(normalized_events, "region")
+    vulnerability_events = [item for item in normalized_events if item["event_type"] == "vulnerability"]
+    actor_ranking = _build_actor_ranking(behavior_events)
+    victim_ranking = _build_victim_ranking(behavior_events)
+    industry_focus = _aggregate_dimension(behavior_events, "industry")
+    region_focus = _aggregate_dimension(behavior_events, "region")
     anomaly_events = sorted(
-        normalized_events,
+        behavior_events,
         key=lambda item: (item["risk_score"], _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc)),
         reverse=True,
     )[:12]
@@ -1669,10 +1954,11 @@ def build_behavior_payload(connection, events: list[dict[str, Any]] | None = Non
             }
             for item in anomaly_events
         ],
-        "behaviorSignals": _build_behavior_signals(normalized_events),
+        "behaviorSignals": _build_behavior_signals(behavior_events),
         "extractionStats": {
             "dataLeakCount": len(data_leak_events),
             "ransomwareCount": len(ransomware_events),
+            "vulnerabilityCount": len(vulnerability_events),
             "updatedAt": _format_dt(_now_utc().isoformat()),
         },
     }

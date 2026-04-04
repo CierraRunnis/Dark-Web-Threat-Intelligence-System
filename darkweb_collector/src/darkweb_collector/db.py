@@ -121,6 +121,37 @@ ON crawl_jobs(site_name, job_type, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_finished_at
 ON crawl_jobs(finished_at);
 
+CREATE TABLE IF NOT EXISTS vulnerability_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    cve_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    vendor TEXT NOT NULL,
+    product TEXT NOT NULL,
+    vulnerability_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    cvss REAL,
+    is_exploited INTEGER NOT NULL DEFAULT 0,
+    has_poc INTEGER NOT NULL DEFAULT 0,
+    patch_available INTEGER NOT NULL DEFAULT 0,
+    wide_impact INTEGER NOT NULL DEFAULT 0,
+    disclosure_time TEXT NOT NULL,
+    affected_versions TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    advisory_url TEXT NOT NULL,
+    reference_urls_json TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    UNIQUE(source_name, cve_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_cve
+ON vulnerability_records(cve_id);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_time
+ON vulnerability_records(disclosure_time);
+
 CREATE TABLE IF NOT EXISTS normalized_intelligence_events (
     event_id TEXT PRIMARY KEY,
     source_kind TEXT NOT NULL,
@@ -587,6 +618,116 @@ def upsert_crawl_job(connection: sqlite3.Connection, **kwargs) -> None:
             kwargs.get("error_message"),
         ),
     )
+
+
+def upsert_vulnerability_record(connection: sqlite3.Connection, payload: dict) -> int:
+    raw_json = json.dumps(payload, ensure_ascii=False)
+    reference_urls_json = json.dumps(payload.get("reference_urls") or [], ensure_ascii=False)
+    affected_versions = payload.get("affected_versions") or []
+    if isinstance(affected_versions, list):
+        affected_versions_text = json.dumps(affected_versions, ensure_ascii=False)
+    else:
+        affected_versions_text = str(affected_versions)
+
+    cursor = connection.execute(
+        """
+        SELECT id
+        FROM vulnerability_records
+        WHERE source_name = ? AND cve_id = ?
+        """,
+        (
+            payload["source_name"],
+            payload["cve_id"],
+        ),
+    )
+    row = cursor.fetchone()
+    if row:
+        record_id = int(row[0])
+        connection.execute(
+            """
+            UPDATE vulnerability_records
+            SET source_type = ?, title = ?, vendor = ?, product = ?, vulnerability_type = ?, severity = ?,
+                cvss = ?, is_exploited = ?, has_poc = ?, patch_available = ?, wide_impact = ?,
+                disclosure_time = ?, affected_versions = ?, summary = ?, advisory_url = ?,
+                reference_urls_json = ?, raw_json = ?, last_seen_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.get("source_type", "public"),
+                payload.get("title", ""),
+                payload.get("vendor", ""),
+                payload.get("product", ""),
+                payload.get("vulnerability_type", ""),
+                payload.get("severity", ""),
+                payload.get("cvss"),
+                int(bool(payload.get("is_exploited"))),
+                int(bool(payload.get("has_poc"))),
+                int(bool(payload.get("patch_available"))),
+                int(bool(payload.get("wide_impact"))),
+                payload.get("disclosure_time", ""),
+                affected_versions_text,
+                payload.get("summary", ""),
+                payload.get("advisory_url", ""),
+                reference_urls_json,
+                raw_json,
+                payload.get("last_seen_at") or payload.get("disclosure_time") or "",
+                record_id,
+            ),
+        )
+        return record_id
+
+    cursor = connection.execute(
+        """
+        INSERT INTO vulnerability_records (
+            source_name, source_type, cve_id, title, vendor, product, vulnerability_type, severity,
+            cvss, is_exploited, has_poc, patch_available, wide_impact, disclosure_time,
+            affected_versions, summary, advisory_url, reference_urls_json, raw_json, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["source_name"],
+            payload.get("source_type", "public"),
+            payload["cve_id"],
+            payload.get("title", ""),
+            payload.get("vendor", ""),
+            payload.get("product", ""),
+            payload.get("vulnerability_type", ""),
+            payload.get("severity", ""),
+            payload.get("cvss"),
+            int(bool(payload.get("is_exploited"))),
+            int(bool(payload.get("has_poc"))),
+            int(bool(payload.get("patch_available"))),
+            int(bool(payload.get("wide_impact"))),
+            payload.get("disclosure_time", ""),
+            affected_versions_text,
+            payload.get("summary", ""),
+            payload.get("advisory_url", ""),
+            reference_urls_json,
+            raw_json,
+            payload.get("last_seen_at") or payload.get("disclosure_time") or "",
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_vulnerability_records(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, source_name, source_type, cve_id, title, vendor, product, vulnerability_type,
+               severity, cvss, is_exploited, has_poc, patch_available, wide_impact,
+               disclosure_time, affected_versions, summary, advisory_url, reference_urls_json,
+               raw_json, last_seen_at
+        FROM vulnerability_records
+        ORDER BY datetime(disclosure_time) DESC, id DESC
+        """
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def replace_vulnerability_records(connection: sqlite3.Connection, rows: list[dict]) -> None:
+    connection.execute("DELETE FROM vulnerability_records")
+    for row in rows:
+        upsert_vulnerability_record(connection, row)
 
 
 def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
