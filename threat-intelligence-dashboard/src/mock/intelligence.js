@@ -21,6 +21,10 @@ export const routeHeaderMeta = {
     kicker: '数据泄露情报',
     subtitle: '监控泄露事件、敏感类型、受影响实体与暗网暴露线索。'
   },
+  '/vulnerability-alerts': {
+    kicker: '漏洞预警',
+    subtitle: '聚焦公开源高危漏洞、利用状态、受影响厂商与产品热度。'
+  },
   '/threat-situation': {
     kicker: '威胁态势',
     subtitle: '集中展示跨模块趋势、排行与区域热区，承担图表深度展示。'
@@ -63,6 +67,14 @@ export const dashboardSummaryCards = [
     trend: '持续关注',
     tone: 'success',
     icon: 'MapLocation'
+  },
+  {
+    label: '高危漏洞',
+    value: '12',
+    description: '公开源新增高危和超高危漏洞',
+    trend: '5 条已被利用',
+    tone: 'danger',
+    icon: 'WarningFilled'
   }
 ]
 
@@ -94,6 +106,19 @@ export const modulePreviewCards = [
     ]
   },
   {
+    route: '/vulnerability-alerts',
+    eyebrow: '模块预览',
+    title: '漏洞预警',
+    summary: '聚合公开源高危漏洞、厂商与产品热度，突出已被利用和已公开 PoC 的重点事件。',
+    highlight: '今日新增 12 条高危漏洞',
+    tone: 'danger',
+    stats: [
+      { label: '已利用', value: '5' },
+      { label: '重点厂商', value: '6' },
+      { label: '重点产品', value: '8' }
+    ]
+  },
+  {
     route: '/threat-situation',
     eyebrow: '模块预览',
     title: '威胁态势',
@@ -112,6 +137,7 @@ export const dashboardTrendSeries = {
   labels: ['03-04', '03-05', '03-06', '03-07', '03-08', '03-09', '03-10'],
   ransomware: [26, 31, 28, 36, 39, 33, 42],
   dataLeak: [18, 20, 24, 22, 26, 29, 31],
+  vulnerability: [4, 5, 6, 7, 9, 10, 12],
   threatAlerts: [62, 68, 65, 71, 74, 78, 84]
 }
 
@@ -125,6 +151,13 @@ export const dashboardCountryFocus = [
 ]
 
 export const crossModuleTimeline = [
+  {
+    time: '09:31',
+    module: '漏洞预警',
+    title: 'Palo Alto Networks 边界设备高危漏洞进入已利用状态',
+    detail: '建议优先核查外网暴露面和补丁窗口',
+    tone: 'danger'
+  },
   {
     time: '09:18',
     module: '勒索情报',
@@ -164,6 +197,12 @@ export const crossModuleTimeline = [
 
 export const dashboardWatchlist = [
   {
+    module: '漏洞预警',
+    title: '边界设备类高危漏洞连续 2 日抬升',
+    note: '优先关注已被利用与补丁未覆盖的事件',
+    tone: 'danger'
+  },
+  {
     module: '勒索情报',
     title: 'Black Basta 对专业服务行业攻击频次连续 3 日上升',
     note: '需要补充人工研判',
@@ -181,6 +220,135 @@ export const dashboardWatchlist = [
     note: '区域热矩阵需持续观察',
     tone: 'primary'
   }
+]
+
+export const vulnerabilitySummary = [
+  {
+    label: '高危漏洞',
+    value: '12',
+    description: '过去 24 小时新增高危与超高危漏洞',
+    trend: '5 条已被利用',
+    tone: 'danger',
+    icon: 'WarningFilled'
+  },
+  {
+    label: '已被利用',
+    value: '5',
+    description: '公开源已确认存在利用活动',
+    trend: '边界设备最突出',
+    tone: 'warning',
+    icon: 'Bell'
+  },
+  {
+    label: '影响厂商',
+    value: '6',
+    description: '当前样本覆盖的重点厂商数量',
+    trend: '网络设备与中间件为主',
+    tone: 'primary',
+    icon: 'OfficeBuilding'
+  },
+  {
+    label: '可直接修复',
+    value: '9',
+    description: '已有补丁或官方修复方案',
+    trend: '3 条仅有缓解方案',
+    tone: 'success',
+    icon: 'CircleCheck'
+  }
+]
+
+export const vulnerabilityEvents = [
+  {
+    id: 'vuln:cve-2026-24001',
+    disclosureTime: '2026-03-10 09:31',
+    cveId: 'CVE-2026-24001',
+    title: 'Palo Alto PAN-OS GlobalProtect 网关未授权命令执行',
+    category: '远程代码执行',
+    vendor: 'Palo Alto Networks',
+    product: 'PAN-OS GlobalProtect',
+    severity: 'critical',
+    cvss: 10.0,
+    isExploited: true,
+    patchAvailable: true,
+    summary: '影响互联网暴露的边界设备，公开源已确认存在利用活动。'
+  },
+  {
+    id: 'vuln:cve-2026-18113',
+    disclosureTime: '2026-03-10 08:54',
+    cveId: 'CVE-2026-18113',
+    title: 'Apache Tomcat 反向代理链路请求走私漏洞',
+    category: '请求走私',
+    vendor: 'Apache',
+    product: 'Tomcat',
+    severity: 'high',
+    cvss: 8.8,
+    isExploited: false,
+    patchAvailable: true,
+    summary: '公开 PoC 已出现，适合优先核查反向代理与容器链路。'
+  },
+  {
+    id: 'vuln:cve-2026-17420',
+    disclosureTime: '2026-03-10 08:07',
+    cveId: 'CVE-2026-17420',
+    title: 'Ivanti Connect Secure 身份认证绕过',
+    category: '身份认证绕过',
+    vendor: 'Ivanti',
+    product: 'Connect Secure',
+    severity: 'critical',
+    cvss: 9.1,
+    isExploited: true,
+    patchAvailable: true,
+    summary: '边界接入设备受影响，公开源已提示真实利用迹象。'
+  },
+  {
+    id: 'vuln:cve-2026-20884',
+    disclosureTime: '2026-03-10 07:22',
+    cveId: 'CVE-2026-20884',
+    title: 'Oracle WebLogic 反序列化高危漏洞',
+    category: '反序列化漏洞',
+    vendor: 'Oracle',
+    product: 'WebLogic Server',
+    severity: 'critical',
+    cvss: 9.8,
+    isExploited: false,
+    patchAvailable: true,
+    summary: '中间件版本覆盖面较广，PoC 已公开。'
+  },
+  {
+    id: 'vuln:cve-2026-21101',
+    disclosureTime: '2026-03-10 06:41',
+    cveId: 'CVE-2026-21101',
+    title: 'FortiManager 任意文件写入漏洞',
+    category: '任意文件写入',
+    vendor: 'Fortinet',
+    product: 'FortiManager',
+    severity: 'high',
+    cvss: 8.7,
+    isExploited: true,
+    patchAvailable: false,
+    summary: '补丁尚未完全可用，当前仅有缓解方案。'
+  }
+]
+
+export const vulnerabilityTrend = {
+  labels: ['03-04', '03-05', '03-06', '03-07', '03-08', '03-09', '03-10'],
+  values: [4, 5, 6, 7, 9, 10, 12]
+}
+
+export const vulnerabilityVendorRanking = [
+  { name: 'Palo Alto Networks', value: 3 },
+  { name: 'Ivanti', value: 2 },
+  { name: 'Fortinet', value: 2 },
+  { name: 'Apache', value: 2 },
+  { name: 'Oracle', value: 1 }
+]
+
+export const vulnerabilityProductRanking = [
+  { name: 'PAN-OS GlobalProtect', value: 3 },
+  { name: 'Connect Secure', value: 2 },
+  { name: 'Tomcat', value: 2 },
+  { name: 'FortiManager', value: 2 },
+  { name: 'WebLogic Server', value: 1 }
 ]
 
 export const ransomwareSummary = [
@@ -439,12 +607,12 @@ export const dataLeakRanking = [
 
 export const threatSituationSummary = {
   title: '全球威胁态势总览',
-  description: '统一承接勒索与数据泄露模块的趋势、排行和分布图表，模块页则聚焦事件列表本身。',
+  description: '统一承接勒索、数据泄露与漏洞预警模块的趋势、排行和分布图表，模块页则聚焦事件列表本身。',
   stats: [
-    { label: '全球风险指数', value: '74/100' },
-    { label: '高危告警', value: '19' },
-    { label: '热点区域', value: '6' },
-    { label: '在线情报源', value: '126' }
+    { label: '泄露事件', value: '31' },
+    { label: '勒索受害者', value: '42' },
+    { label: '漏洞预警', value: '12' },
+    { label: '高危告警', value: '19' }
   ]
 }
 
@@ -501,6 +669,7 @@ export const threatSituationBehavior = {
   extractionStats: {
     dataLeakCount: 31,
     ransomwareCount: 42,
+    vulnerabilityCount: 12,
     updatedAt: '2026-03-10 09:40 CST'
   }
 }
@@ -521,9 +690,9 @@ export const threatHeatmap = {
 export const attackTypeShare = [
   { name: '勒索', value: 28 },
   { name: '数据泄露', value: 24 },
+  { name: '漏洞预警', value: 17 },
   { name: '钓鱼', value: 19 },
-  { name: '恶意软件', value: 16 },
-  { name: 'DDoS', value: 13 }
+  { name: '恶意软件', value: 16 }
 ]
 
 export const threatLevelTrend = {
@@ -543,6 +712,13 @@ export const regionalThreatComparison = [
 ]
 
 export const situationAlerts = [
+  {
+    level: 'critical',
+    title: '边界设备高危漏洞出现利用活动',
+    description: 'Palo Alto 与 Ivanti 相关漏洞已被公开源标记为已利用，适合纳入优先处置说明。',
+    time: '2026-03-10 09:31',
+    source: '漏洞预警'
+  },
   {
     level: 'critical',
     title: '北美制造业勒索告警持续上扬',

@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
@@ -96,7 +96,7 @@ function parseDisclosureTime(value) {
 
 const sortedEvents = computed(() => {
   return [...ransomwareEvents.value].sort((left, right) => {
-    return parseDisclosureTime(right.disclosureTime) - parseDisclosureTime(left.disclosureTime)
+    return parseDisclosureTime(right.disclosureTimeRaw || right.disclosureTime) - parseDisclosureTime(left.disclosureTimeRaw || left.disclosureTime)
   })
 })
 
@@ -145,6 +145,16 @@ const activeFilters = computed(() => {
   }
 
   return filters
+})
+
+watch([filteredEvents, pageSize], () => {
+  const maxPage = Math.max(1, Math.ceil(filteredEvents.value.length / pageSize.value))
+  if (currentPage.value > maxPage) {
+    currentPage.value = maxPage
+  }
+  if (currentPage.value < 1) {
+    currentPage.value = 1
+  }
 })
 
 onMounted(() => {

@@ -41,6 +41,7 @@ INDUSTRY_LABELS = {
     "finance": "金融",
     "healthcare": "医疗",
     "technology": "科技",
+    "military": "军事",
     "retail": "零售",
     "education": "教育",
     "telecommunications": "通信",
@@ -73,6 +74,7 @@ STALE_RUNNING_MINUTES = 30
 RANSOMWARE_EVENT_LIMIT = 300
 RANSOMWARE_SOURCE_QUERY_LIMIT = 500
 DATA_LEAK_EVENT_LIMIT = 3000
+VULNERABILITY_EVENT_LIMIT = 500
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -92,6 +94,13 @@ def _format_dt(value: str | None) -> str:
     if dt is None:
         return value or ""
     return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _format_date(value: str | None) -> str:
+    dt = _parse_dt(value)
+    if dt is None:
+        return (value or "").split(" ", 1)[0]
+    return dt.astimezone().strftime("%Y-%m-%d")
 
 
 def _weekday_cn(dt: datetime) -> str:
@@ -499,7 +508,7 @@ def _build_victim_event_records(connection) -> list[dict[str, Any]]:
 
 def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        normalized_events = load_normalized_events(connection)
+        normalized_events = ensure_normalized_intelligence(connection)
 
     events = [normalized_event_to_detail(item) for item in normalized_events]
     if limit is not None:
@@ -569,8 +578,55 @@ def _build_victim_event_detail_by_id(
 
 def build_event_detail(event_id: str) -> dict[str, Any] | None:
     with get_db_connection() as connection:
+        ensure_normalized_intelligence(connection)
         event = load_normalized_event_detail(connection, event_id)
     if event is None:
+        return None
+    return normalized_event_to_detail(event)
+
+
+def build_vulnerability_records(
+    *,
+    severity: str | None = None,
+    is_exploited: bool | None = None,
+    days: int | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    with get_db_connection() as connection:
+        normalized_events = ensure_normalized_intelligence(connection)
+
+    vulnerability_events = [
+        normalized_event_to_list_item(item)
+        for item in normalized_events
+        if item.get("event_type") == "vulnerability"
+    ]
+    filtered: list[dict[str, Any]] = []
+    cutoff = _now_utc() - timedelta(days=days) if days else None
+    severity_filter = (severity or "").strip().lower()
+    for item in vulnerability_events:
+        if severity_filter and str(item.get("severity") or "").lower() != severity_filter:
+            continue
+        if is_exploited is not None and bool(item.get("isExploited")) != bool(is_exploited):
+            continue
+        if cutoff is not None:
+            event_dt = _parse_dt(str(item.get("disclosureTime") or "").replace(" ", "T"))
+            if event_dt is None or event_dt < cutoff:
+                continue
+        filtered.append(item)
+    filtered.sort(
+        key=lambda item: _parse_dt(str(item.get("disclosureTime") or "").replace(" ", "T")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    if limit is not None:
+        return filtered[:limit]
+    return filtered
+
+
+def build_vulnerability_detail(event_id: str) -> dict[str, Any] | None:
+    with get_db_connection() as connection:
+        ensure_normalized_intelligence(connection)
+        event = load_normalized_event_detail(connection, event_id)
+    if event is None or event.get("event_type") != "vulnerability":
         return None
     return normalized_event_to_detail(event)
 
@@ -836,6 +892,95 @@ def _build_country_focus(forum_victims: list[dict[str, Any]]) -> list[dict[str, 
     return [{"name": name, "value": value} for name, value in counts.most_common(6)]
 
 
+def _build_vulnerability_summary(vulnerability_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    exploited_count = sum(1 for item in vulnerability_events if item.get("isExploited"))
+    patchable_count = sum(1 for item in vulnerability_events if item.get("patchAvailable"))
+    vendor_count = len({item.get("vendor") for item in vulnerability_events if item.get("vendor")})
+    return [
+        {
+            "label": "高危漏洞",
+            "value": str(len(vulnerability_events)),
+            "description": "已写入标准化事件表的公开源高危漏洞数量。",
+            "trend": f"{exploited_count} 条已被利用",
+            "tone": "danger",
+            "icon": "WarningFilled",
+        },
+        {
+            "label": "已被利用",
+            "value": str(exploited_count),
+            "description": "公开源披露中已确认存在利用活动的漏洞数量。",
+            "trend": "优先进入处置视图",
+            "tone": "warning",
+            "icon": "Bell",
+        },
+        {
+            "label": "影响厂商",
+            "value": str(vendor_count),
+            "description": "当前漏洞事件覆盖的重点厂商数量。",
+            "trend": "用于识别高频产品族",
+            "tone": "primary",
+            "icon": "OfficeBuilding",
+        },
+        {
+            "label": "可直接修复",
+            "value": str(patchable_count),
+            "description": "已明确有补丁或官方修复建议的漏洞数量。",
+            "trend": "用于展示修复可执行性",
+            "tone": "success",
+            "icon": "CircleCheck",
+        },
+    ]
+
+
+def _build_vulnerability_rankings(vulnerability_events: list[dict[str, Any]], field: str, limit: int = 6) -> list[dict[str, Any]]:
+    counter = Counter(item.get(field) or "未知" for item in vulnerability_events if item.get(field))
+    return [{"name": name, "value": value} for name, value in counter.most_common(limit)]
+
+
+def _build_vulnerability_watchlist(vulnerability_events: list[dict[str, Any]], limit: int = 3) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+    for item in vulnerability_events[:limit]:
+        alerts.append(
+            {
+                "module": "漏洞预警",
+                "title": item.get("title") or item.get("cveId") or "高危漏洞",
+                "note": "已被利用，建议优先核查补丁与暴露面。" if item.get("isExploited") else "存在公开 PoC 或高危利用条件，建议尽快研判。",
+                "tone": "danger" if item.get("isExploited") else "warning",
+            }
+        )
+    return alerts
+
+
+def _build_vulnerability_timeline(vulnerability_events: list[dict[str, Any]], limit: int = 2) -> list[dict[str, str]]:
+    timeline: list[dict[str, str]] = []
+    for item in vulnerability_events[:limit]:
+        timeline.append(
+            {
+                "time": (item.get("disclosureTime") or "--:--")[-5:],
+                "module": "漏洞预警",
+                "title": item.get("title") or item.get("cveId") or "公开源漏洞",
+                "detail": "已被利用" if item.get("isExploited") else (item.get("category") or "公开披露"),
+                "tone": "danger" if item.get("isExploited") else "primary",
+            }
+        )
+    return timeline
+
+
+def _build_vulnerability_alert_stream(vulnerability_events: list[dict[str, Any]], limit: int = 4) -> list[dict[str, str]]:
+    alerts: list[dict[str, str]] = []
+    for item in vulnerability_events[:limit]:
+        alerts.append(
+            {
+                "level": "critical" if item.get("isExploited") else "high",
+                "time": item.get("disclosureTime") or "",
+                "title": item.get("title") or item.get("cveId") or "公开源漏洞",
+                "description": item.get("summary") or "公开源披露了新的高危漏洞事件。",
+                "source": item.get("vendor") or "漏洞预警",
+            }
+        )
+    return alerts
+
+
 def _keyword_category(title: str, content: str) -> str:
     text = f"{title} {content}".lower()
     if any(keyword in text for keyword in ["password", "credential", "fullz", "account"]):
@@ -866,6 +1011,120 @@ def _build_threat_heatmap(data_leak_events: list[dict[str, str]], ransomware_eve
     return {"regions": regions, "categories": categories, "values": values}
 
 
+def _safe_pct(current: int, previous: int) -> int:
+    if previous <= 0:
+        return 100 if current > 0 else 0
+    return round(((current - previous) / previous) * 100)
+
+
+def _last_n_days(days: int) -> list[datetime]:
+    today = datetime.now(timezone.utc).date()
+    return [datetime.combine(today - timedelta(days=offset), datetime.min.time(), tzinfo=timezone.utc) for offset in range(days - 1, -1, -1)]
+
+
+def _build_executive_trend(events: list[dict[str, Any]], days: int = 30) -> dict[str, list[Any]]:
+    dates = _last_n_days(days)
+    start = dates[0]
+    total_counter: Counter[str] = Counter()
+    high_counter: Counter[str] = Counter()
+    for event in events:
+        event_dt = _parse_dt(event.get("disclosure_time"))
+        if event_dt is None or event_dt < start:
+            continue
+        key = event_dt.date().isoformat()
+        total_counter[key] += 1
+        if int(event.get("risk_score") or 0) >= 60:
+            high_counter[key] += 1
+    labels = [item.strftime("%m-%d") for item in dates]
+    keys = [item.date().isoformat() for item in dates]
+    return {
+        "labels": labels,
+        "total": [int(total_counter.get(key, 0)) for key in keys],
+        "highRisk": [int(high_counter.get(key, 0)) for key in keys],
+    }
+
+
+def _build_executive_countries(events: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        country = (event.get("country") or "").strip()
+        if not country or country == "未知":
+            continue
+        grouped.setdefault(country, []).append(event)
+    rows: list[dict[str, Any]] = []
+    for country, country_events in grouped.items():
+        rows.append(
+            {
+                "name": country,
+                "eventCount": len(country_events),
+                "highRiskCount": sum(1 for item in country_events if int(item.get("risk_score") or 0) >= 60),
+                "averageRiskScore": round(sum(int(item.get("risk_score") or 0) for item in country_events) / len(country_events)),
+            }
+        )
+    rows.sort(key=lambda item: (item["eventCount"], item["highRiskCount"], item["averageRiskScore"]), reverse=True)
+    return rows[:limit]
+
+
+def _build_executive_priority_events(events: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    ranked = sorted(
+        (
+            item
+            for item in events
+            if (item.get("title") or "").strip() and len((item.get("title") or "").strip()) >= 4
+        ),
+        key=lambda item: (
+            int(item.get("risk_score") or 0),
+            _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    return [
+        {
+            "id": item["event_id"],
+            "disclosureDate": _format_date(item.get("disclosure_time")),
+            "title": item.get("title") or "未命名事件",
+            "attacker": item.get("attacker") or "未知",
+            "country": item.get("country") or "未知",
+            "industry": item.get("industry") or "未知",
+            "riskScore": int(item.get("risk_score") or 0),
+        }
+        for item in ranked[:limit]
+    ]
+
+
+def _build_executive_coverage(events: list[dict[str, Any]]) -> dict[str, int]:
+    total = len(events) or 1
+    return {
+        "countryCoverageRate": round(sum(1 for item in events if (item.get("country") or "").strip() not in {"", "未知"}) / total * 100),
+        "regionCoverageRate": round(sum(1 for item in events if (item.get("region") or "").strip() not in {"", "未知"}) / total * 100),
+        "industryCoverageRate": round(sum(1 for item in events if (item.get("industry") or "").strip() not in {"", "未知"}) / total * 100),
+    }
+
+
+def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[str, Any]]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    current_start = now - timedelta(days=30)
+    previous_start = now - timedelta(days=60)
+
+    current_events = [item for item in events if (_parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc)) >= current_start]
+    previous_events = [
+        item
+        for item in events
+        if previous_start <= (_parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc)) < current_start
+    ]
+    current_high = [item for item in current_events if int(item.get("risk_score") or 0) >= 60]
+    previous_high = [item for item in previous_events if int(item.get("risk_score") or 0) >= 60]
+    top_country = countries[0] if countries else {"name": "未知", "eventCount": 0}
+    return {
+        "totalEvents30d": len(current_events),
+        "totalEventsDeltaPct": _safe_pct(len(current_events), len(previous_events)),
+        "highRisk30d": len(current_high),
+        "highRiskDeltaPct": _safe_pct(len(current_high), len(previous_high)),
+        "topCountry": top_country["name"],
+        "topCountryEventCount": top_country["eventCount"],
+    }
+
+
 def build_intelligence_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
         normalized_events = ensure_normalized_intelligence(connection)
@@ -882,18 +1141,19 @@ def build_intelligence_payload() -> dict[str, Any]:
             ).fetchall()
         ]
 
-    data_leak_source_events = sorted(
-        (item for item in normalized_events if item.get("event_type") == "data_leak"),
-        key=lambda item: _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
-    ransomware_source_events = sorted(
-        (item for item in normalized_events if item.get("event_type") == "ransomware"),
-        key=lambda item: _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
+    def sort_by_disclosure(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            items,
+            key=lambda item: _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+
+    data_leak_source_events = sort_by_disclosure([item for item in normalized_events if item.get("event_type") == "data_leak"])
+    ransomware_source_events = sort_by_disclosure([item for item in normalized_events if item.get("event_type") == "ransomware"])
+    vulnerability_source_events = sort_by_disclosure([item for item in normalized_events if item.get("event_type") == "vulnerability"])
     data_leak_events = [normalized_event_to_list_item(item) for item in data_leak_source_events[:DATA_LEAK_EVENT_LIMIT]]
     ransomware_events = [normalized_event_to_list_item(item) for item in ransomware_source_events[:RANSOMWARE_EVENT_LIMIT]]
+    vulnerability_events = [normalized_event_to_list_item(item) for item in vulnerability_source_events[:VULNERABILITY_EVENT_LIMIT]]
     forum_victims = [
         {
             "victim_name": item.get("victim"),
@@ -906,75 +1166,110 @@ def build_intelligence_payload() -> dict[str, Any]:
     dashboard_summary, data_leak_summary, ransomware_summary = _build_summary_cards(
         data_leak_events, ransomware_events, crawl_jobs, forum_victims
     )
+    vulnerability_summary = _build_vulnerability_summary(vulnerability_events)
 
     data_leak_counter = _count_by_day([row.get("disclosure_time") for row in data_leak_source_events])
     ransomware_counter = _count_by_day([row.get("disclosure_time") for row in ransomware_source_events])
+    vulnerability_counter = _count_by_day([row.get("disclosure_time") for row in vulnerability_source_events])
     job_counter = _count_by_day([row.get("finished_at") or row.get("started_at") for row in crawl_jobs])
     data_leak_series = _series_from_counter(data_leak_counter)
     ransomware_series = _series_from_counter(ransomware_counter)
+    vulnerability_series = _series_from_counter(vulnerability_counter)
     threat_alert_series = _series_from_counter(job_counter)
 
     section_counts = Counter(row.get("category") or "unknown" for row in data_leak_events)
+    failed_jobs = sum(
+        1
+        for site_name in sorted({row.get("site_name") for row in crawl_jobs if row.get("site_name")})
+        if _latest_unresolved_problem_row([row for row in crawl_jobs if row.get("site_name") == site_name]) is not None
+    )
     attack_type_share = [
         {"name": "数据泄露", "value": len(data_leak_events)},
         {"name": "勒索情报", "value": len(ransomware_events)},
+        {"name": "漏洞预警", "value": len(vulnerability_events)},
         {
             "name": "失败任务",
-            "value": sum(
-                1
-                for site_name in sorted({row.get("site_name") for row in crawl_jobs if row.get("site_name")})
-                if _latest_unresolved_problem_row([row for row in crawl_jobs if row.get("site_name") == site_name]) is not None
-            ),
+            "value": failed_jobs,
         },
     ]
     data_leak_keyword_counts = Counter(item.get("category") or "其他" for item in data_leak_events)
-    top_industries = Counter(item.get("industry") or "未知" for item in normalized_events if item.get("industry"))
-    top_regions = Counter(item.get("region") or "未知" for item in normalized_events if item.get("region"))
+    top_industries = Counter(item.get("industry") or "未知" for item in data_leak_source_events if item.get("industry"))
+    top_regions = Counter(
+        item.get("region") or "未知"
+        for item in data_leak_source_events + ransomware_source_events
+        if item.get("region")
+    )
     top_ransomware_actors = Counter(item.get("attacker") or "未知" for item in ransomware_events if item.get("attacker"))
+    top_ransomware_industries = Counter(item.get("industry") or "未知" for item in ransomware_source_events if item.get("industry"))
+    vulnerability_vendor_ranking = _build_vulnerability_rankings(vulnerability_events, "vendor")
+    vulnerability_product_ranking = _build_vulnerability_rankings(vulnerability_events, "product")
     threat_level_trend = {
         "labels": data_leak_series["labels"],
         "high": ransomware_series["values"],
         "medium": data_leak_series["values"],
         "low": threat_alert_series["values"],
     }
+    executive_countries = _build_executive_countries(normalized_events)
+    executive_cards = _build_executive_cards(normalized_events, executive_countries)
+    executive_trend = _build_executive_trend(normalized_events)
+    executive_priority_events = _build_executive_priority_events(normalized_events)
+    executive_coverage = _build_executive_coverage(normalized_events)
+    preview_cards = _build_preview_cards(data_leak_events, ransomware_events, crawl_jobs, behavior_payload)
+    preview_cards.insert(
+        2,
+        {
+            "route": "/vulnerability-alerts",
+            "eyebrow": "模块预览",
+            "title": "漏洞预警",
+            "summary": "聚合公开源高危漏洞、利用状态与受影响厂商/产品，适合演示应急研判入口。",
+            "highlight": f"{sum(1 for item in vulnerability_events if item.get('isExploited'))} 条已被利用",
+            "tone": "danger",
+            "stats": [
+                {"label": "漏洞数", "value": str(len(vulnerability_events))},
+                {"label": "厂商数", "value": str(len(vulnerability_vendor_ranking))},
+                {"label": "已利用", "value": str(sum(1 for item in vulnerability_events if item.get('isExploited')))},
+            ],
+        },
+    )
+    dashboard_watchlist = _build_vulnerability_watchlist(vulnerability_events, limit=2) + _build_watchlist(crawl_jobs, section_counts)
+    timeline = _build_vulnerability_timeline(vulnerability_events, limit=2) + _build_recent_timeline(data_leak_events, ransomware_events, crawl_jobs)
+    situation_alerts = _build_vulnerability_alert_stream(vulnerability_events, limit=4) + _build_situation_alerts(crawl_jobs)
+    dashboard_summary_cards = dashboard_summary + vulnerability_summary[:1]
 
     return {
         "monitoringStatus": _build_monitoring_status(
-            [{"fetched_at": item.get("disclosure_time")} for item in data_leak_source_events],
+            [{"fetched_at": item.get("disclosure_time")} for item in normalized_events],
             crawl_jobs,
         ),
-        "dashboardSummaryCards": dashboard_summary,
-        "modulePreviewCards": _build_preview_cards(data_leak_events, ransomware_events, crawl_jobs, behavior_payload),
+        "dashboardSummaryCards": dashboard_summary_cards,
+        "modulePreviewCards": preview_cards,
         "dashboardTrendSeries": {
             "labels": data_leak_series["labels"],
             "ransomware": ransomware_series["values"],
             "dataLeak": data_leak_series["values"],
+            "vulnerability": vulnerability_series["values"],
             "threatAlerts": threat_alert_series["values"],
         },
         "dashboardCountryFocus": _build_country_focus(forum_victims),
-        "crossModuleTimeline": _build_recent_timeline(data_leak_events, ransomware_events, crawl_jobs),
-        "dashboardWatchlist": _build_watchlist(crawl_jobs, section_counts),
+        "crossModuleTimeline": timeline[:8],
+        "dashboardWatchlist": dashboard_watchlist[:4],
         "ransomwareSummary": ransomware_summary,
         "ransomwareEvents": ransomware_events,
         "dataLeakSummary": data_leak_summary,
         "dataLeakEvents": data_leak_events,
+        "vulnerabilitySummary": vulnerability_summary,
+        "vulnerabilityEvents": vulnerability_events,
+        "vulnerabilityTrend": vulnerability_series,
+        "vulnerabilityVendorRanking": vulnerability_vendor_ranking,
+        "vulnerabilityProductRanking": vulnerability_product_ranking,
         "threatSituationSummary": {
             "title": "基于标准化情报事件的威胁态势总览",
-            "description": "从结构化情报事件、风险评分和爬虫任务日志中聚合生成当前态势视图。",
+            "description": "从数据泄露、勒索情报、公开源漏洞和爬虫任务日志中聚合生成当前态势视图。",
             "stats": [
                 {"label": "泄露事件", "value": str(len(data_leak_events))},
                 {"label": "勒索受害者", "value": str(len(ransomware_events))},
-                {
-                    "label": "失败任务",
-                    "value": str(
-                        sum(
-                            1
-                            for site_name in sorted({row.get("site_name") for row in crawl_jobs if row.get("site_name")})
-                            if _latest_unresolved_problem_row([row for row in crawl_jobs if row.get("site_name") == site_name]) is not None
-                        )
-                    ),
-                },
-                {"label": "地区数量", "value": str(len(top_regions))},
+                {"label": "漏洞预警", "value": str(len(vulnerability_events))},
+                {"label": "失败任务", "value": str(failed_jobs)},
             ],
         },
         "attackTypeShare": attack_type_share,
@@ -985,13 +1280,18 @@ def build_intelligence_payload() -> dict[str, Any]:
         ],
         "regionalThreatComparison": [{"name": name, "value": value} for name, value in top_regions.most_common(6)],
         "ransomwareActorRanking": [{"name": name, "value": value} for name, value in top_ransomware_actors.most_common(6)],
-        "ransomwareIndustryImpact": [{"name": name, "value": value} for name, value in top_industries.most_common(6)],
+        "ransomwareIndustryImpact": [{"name": name, "value": value} for name, value in top_ransomware_industries.most_common(6)],
         "ransomwareTrend": ransomware_series,
         "sensitiveTypeShare": [{"name": name, "value": value} for name, value in data_leak_keyword_counts.most_common(5)],
-        "situationAlerts": _build_situation_alerts(crawl_jobs),
+        "situationAlerts": situation_alerts[:12],
         "threatHeatmap": _build_threat_heatmap(data_leak_events, ransomware_events, crawl_jobs),
         "threatLevelTrend": threat_level_trend,
         "threatSituationBehavior": behavior_payload,
+        "threatExecutiveCards": executive_cards,
+        "threatExecutiveTrend": executive_trend,
+        "threatExecutiveCountries": executive_countries,
+        "threatExecutivePriorityEvents": executive_priority_events,
+        "threatExecutiveCoverage": executive_coverage,
     }
 
 

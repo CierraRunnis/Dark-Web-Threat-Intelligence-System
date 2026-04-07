@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import Dashboard from '@/views/Dashboard.vue'
 import Ransomware from '@/views/Ransomware.vue'
 import DataLeak from '@/views/DataLeak.vue'
+import VulnerabilityAlerts from '@/views/VulnerabilityAlerts.vue'
 import ThreatSituation from '@/views/ThreatSituation.vue'
 import CollectorControl from '@/views/CollectorControl.vue'
 import EventDetail from '@/views/EventDetail.vue'
@@ -24,6 +25,12 @@ const routes = [
     name: 'DataLeak',
     component: DataLeak,
     meta: { title: '数据泄露情报', icon: 'Document' }
+  },
+  {
+    path: '/vulnerability-alerts',
+    name: 'VulnerabilityAlerts',
+    component: VulnerabilityAlerts,
+    meta: { title: '漏洞预警', icon: 'WarningFilled' }
   },
   {
     path: '/threat-situation',
