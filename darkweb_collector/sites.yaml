@@ -2,7 +2,7 @@
   "sites": [
     {
       "site_name": "dragonforce",
-      "enabled": true,
+      "enabled": false,
       "seed_urls": [
         "http://dragonforxxbp3awc7mzs5dkswrua3znqyx5roefmi4smjrsdi22xwqd.onion/"
       ],
