@@ -417,6 +417,11 @@ class BehaviorAnalysisTests(unittest.TestCase):
         self.assertEqual("泰国", normalized_intelligence._infer_country_bundle(("title", 8, "Thailand Ministry of Finance"))["country"])
         self.assertEqual("越南", normalized_intelligence._infer_country_bundle(("title", 8, "Vietnam Fortress Tools JSC"))["country"])
         self.assertEqual("委内瑞拉", normalized_intelligence._infer_country_bundle(("title", 8, "VENEZUELA CORDIALITO leaks betting house"))["country"])
+        self.assertEqual("伊拉克", normalized_intelligence._infer_country_bundle(("title", 8, "Basra Transports"))["country"])
+
+    def test_domain_country_code_supports_ca_and_nz(self) -> None:
+        self.assertEqual("CA", normalized_intelligence._domain_country_code("emond.ca"))
+        self.assertEqual("NZ", normalized_intelligence._domain_country_code("elitefitness.co.nz"))
 
     def test_industry_inference_supports_rehabilitation_and_casino(self) -> None:
         self.assertEqual("医疗", normalized_intelligence._infer_industry("Advanced Rehabilitation Technology"))
