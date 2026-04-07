@@ -65,6 +65,7 @@ const navMeta = {
   '/': { note: '总览摘要与联动事件', badge: '今日', tone: 'primary' },
   '/ransomware': { note: '披露事件与团伙活跃度', badge: '高热', tone: 'danger' },
   '/data-leak': { note: '泄露规模与敏感类型', badge: '更新', tone: 'warning' },
+  '/vulnerability-alerts': { note: '公开源高危漏洞与利用状态', badge: '预警', tone: 'danger' },
   '/threat-situation': { note: '区域热区与告警流', badge: '态势', tone: 'success' },
   '/collector-control': { note: '任务触发与站点健康', badge: '控制', tone: 'primary' }
 }

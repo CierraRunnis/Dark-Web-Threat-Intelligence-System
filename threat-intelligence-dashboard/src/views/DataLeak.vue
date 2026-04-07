@@ -67,7 +67,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
@@ -132,6 +132,16 @@ const activeFilters = computed(() => {
   }
 
   return filters
+})
+
+watch([filteredEvents, pageSize], () => {
+  const maxPage = Math.max(1, Math.ceil(filteredEvents.value.length / pageSize.value))
+  if (currentPage.value > maxPage) {
+    currentPage.value = maxPage
+  }
+  if (currentPage.value < 1) {
+    currentPage.value = 1
+  }
 })
 
 onMounted(() => {

@@ -15,11 +15,13 @@ from darkweb_collector.api_actions import (
     update_site_enabled,
 )
 from darkweb_collector.api_data import build_behavior_payload, build_intelligence_payload, build_jobs_payload
-from darkweb_collector.api_data import build_event_detail, build_event_records
+from darkweb_collector.api_data import build_event_detail, build_event_records, build_vulnerability_detail, build_vulnerability_records
 from darkweb_collector.runtime import project_root
 
 
 app = FastAPI(title="Darkweb Collector API", version="1.0.0")
+collector_output_dir = (project_root() / "output").resolve()
+collector_output_dir.mkdir(parents=True, exist_ok=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,7 +33,7 @@ app.add_middleware(
 
 app.mount(
     "/collector-output",
-    StaticFiles(directory=str((project_root() / "output").resolve()), html=False),
+    StaticFiles(directory=str(collector_output_dir), html=False),
     name="collector-output",
 )
 
@@ -66,6 +68,29 @@ def event_detail(event_id: str) -> dict:
     payload = build_event_detail(event_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="event not found")
+    return payload
+
+
+@app.get("/api/vulnerabilities")
+def vulnerabilities(
+    severity: str | None = None,
+    is_exploited: bool | None = None,
+    days: int | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    return build_vulnerability_records(
+        severity=severity,
+        is_exploited=is_exploited,
+        days=days,
+        limit=limit,
+    )
+
+
+@app.get("/api/vulnerabilities/{event_id}")
+def vulnerability_detail(event_id: str) -> dict:
+    payload = build_vulnerability_detail(event_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="vulnerability event not found")
     return payload
 
 

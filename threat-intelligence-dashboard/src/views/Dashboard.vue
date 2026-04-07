@@ -53,7 +53,7 @@
     <section class="module-preview">
       <SectionHeader
         eyebrow="模块重点"
-        title="三大模块预览"
+        title="核心模块预览"
         description="首页只展示最值得展开查看的重点，深度内容留在各模块页完成。"
       />
 
@@ -134,12 +134,12 @@ const { data } = useIntelligenceData()
 const crossModuleTimeline = computed(() => data.value.crossModuleTimeline || [])
 const dashboardCountryFocus = computed(() => data.value.dashboardCountryFocus || [])
 const dashboardSummaryCards = computed(() => data.value.dashboardSummaryCards || [])
-const dashboardTrendSeries = computed(() => data.value.dashboardTrendSeries || { labels: [], ransomware: [], dataLeak: [], threatAlerts: [] })
+const dashboardTrendSeries = computed(() => data.value.dashboardTrendSeries || { labels: [], ransomware: [], dataLeak: [], vulnerability: [], threatAlerts: [] })
 const dashboardWatchlist = computed(() => data.value.dashboardWatchlist || [])
 const modulePreviewCards = computed(() => data.value.modulePreviewCards || [])
 
 const overviewTrendOption = computed(() => ({
-  color: ['#2d5dff', '#e88030', '#cf4432'],
+  color: ['#2d5dff', '#e88030', '#8a3ffc', '#cf4432'],
   tooltip: {
     trigger: 'axis',
     backgroundColor: 'rgba(255, 253, 250, 0.96)',
@@ -176,6 +176,15 @@ const overviewTrendOption = computed(() => ({
       smooth: true,
       symbolSize: 8,
       data: dashboardTrendSeries.value.dataLeak
+    },
+    {
+      name: '漏洞预警',
+      type: 'line',
+      smooth: true,
+      symbolSize: 8,
+      data: dashboardTrendSeries.value.vulnerability,
+      lineStyle: { color: '#8a3ffc' },
+      itemStyle: { color: '#8a3ffc' }
     },
     {
       name: '总体告警',

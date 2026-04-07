@@ -392,3 +392,60 @@ class BehaviorAnalysisTests(unittest.TestCase):
         self.assertEqual("欧洲", normalized_intelligence._infer_region("[FR] ministry breach", "https://example.fr"))
         self.assertEqual("中东", normalized_intelligence._infer_region("Iraq National Security Database", "Baghdad"))
         self.assertEqual("非洲", normalized_intelligence._infer_region("Morocco education leak", "casablanca"))
+
+    def test_country_inference_prefers_explicit_title_signal(self) -> None:
+        bundle = normalized_intelligence._infer_country_bundle(
+            ("title", 9, "China's National Super-computing Center (NSCC) Research Facility"),
+            ("content", 4, "Research facility database leak"),
+        )
+        self.assertEqual("中国", bundle["country"])
+        self.assertEqual("CN", bundle["country_code"])
+
+    def test_country_inference_detects_russia(self) -> None:
+        bundle = normalized_intelligence._infer_country_bundle(
+            ("title", 9, "Russia Business Leaders — Corporate Database"),
+            ("content", 5, "Corporate database with Moscow executive records"),
+        )
+        self.assertEqual("俄罗斯", bundle["country"])
+        self.assertEqual("RU", bundle["country_code"])
+
+    def test_industry_inference_supports_military(self) -> None:
+        self.assertEqual("军事", normalized_intelligence._infer_industry("military research facility", "defense systems"))
+
+    def test_intelligence_payload_includes_executive_threat_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, config_path), clear=False):
+                with get_db_connection() as connection:
+                    upsert_victim(
+                        connection,
+                        run_id=1,
+                        payload={
+                            "site_name": "dragonforce",
+                            "source_url": "http://dragon.onion/",
+                            "detail_url": "https://hms.com.au/",
+                            "name": "Health Management Systems",
+                            "display_label": "Health Management Systems (hms.com.au)",
+                            "domain": "hms.com.au",
+                            "status": "published",
+                            "published_at_utc": "2026-03-18T08:00:00+00:00",
+                            "claimed_size": "12G",
+                            "claimed_size_gb": 12.0,
+                            "content_hash": "hms-hash",
+                            "last_detail_fetch_status": "ok",
+                            "raw_json": json.dumps({"description": "Healthcare provider in Australia", "website_url": "https://hms.com.au/"}),
+                        },
+                    )
+                    connection.commit()
+
+                payload = build_intelligence_payload()
+                self.assertIn("threatExecutiveCards", payload)
+                self.assertIn("threatExecutiveTrend", payload)
+                self.assertIn("threatExecutiveCountries", payload)
+                self.assertIn("threatExecutivePriorityEvents", payload)
+                self.assertIn("threatExecutiveCoverage", payload)
+                self.assertTrue(payload["threatExecutiveCountries"])
