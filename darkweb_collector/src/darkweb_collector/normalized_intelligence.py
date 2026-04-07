@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from hashlib import sha1
 import json
 from pathlib import Path
 import re
+import socket
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from darkweb_collector.config import get_site_config
 from darkweb_collector.db import (
@@ -97,6 +101,8 @@ COUNTRY_LABELS = {
     "LI": "列支敦士登",
     "SE": "瑞典",
     "ET": "埃塞俄比亚",
+    "NZ": "新西兰",
+    "IQ": "伊拉克",
     "AU": "澳大利亚",
     "DE": "德国",
     "FR": "法国",
@@ -155,11 +161,13 @@ COUNTRY_REGION_MAP = {
     "ZA": "非洲",
     "EG": "非洲",
     "ET": "非洲",
+    "IQ": "中东",
     "AR": "南美",
     "BR": "南美",
     "CL": "南美",
     "VE": "南美",
     "AU": "大洋洲",
+    "NZ": "大洋洲",
 }
 
 COUNTRY_HINT_PATTERNS = {
@@ -199,6 +207,8 @@ COUNTRY_HINT_PATTERNS = {
     "LI": [r"\bliechtenstein\b"],
     "SE": [r"\bsweden\b", r"\bswedish\b", r"\bstockholm\b"],
     "ET": [r"\bethiopia\b", r"\bethiopian\b", r"\baddis ababa\b"],
+    "NZ": [r"\bnew zealand\b", r"\bnz\b", r"\bauckland\b", r"\bwellington\b"],
+    "IQ": [r"\biraq\b", r"\biraqi\b", r"\bbasra\b", r"\bbaghdad\b"],
     "RU": [r"\brussia\b", r"\brussian\b", r"\bmoscow\b", r"\bst\.?\s*petersburg\b"],
     "AU": [r"\baustralia\b", r"\baustralian\b", r"\bsydney\b", r"\bmelbourne\b", r"\bqueensland\b"],
     "DE": [r"\bgermany\b", r"\bgerman\b", r"\bberlin\b", r"\bmunich\b", r"\bhamburg\b", r"\bbruchsal\b"],
@@ -243,6 +253,9 @@ COUNTRY_DOMAIN_SUFFIX_HINTS = {
     "li": "LI",
     "se": "SE",
     "et": "ET",
+    "ca": "CA",
+    "co.nz": "NZ",
+    "nz": "NZ",
     "ru": "RU",
     "cn": "CN",
     "jp": "JP",
@@ -355,6 +368,8 @@ RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
 NORMALIZATION_VERSION = "2026-04-04-governance-v2+vuln-v4"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
+DOMAIN_ENRICHMENT_BUDGET = 20
+DOMAIN_ENRICHMENT_TIMEOUT = 2
 SEVERITY_ORDER = {
     "critical": 4,
     "high": 3,
@@ -633,6 +648,174 @@ def _domain_country_code(domain: str | None) -> str:
     return ""
 
 
+def _domain_enrichment_cache_path() -> Path:
+    return project_root() / "data" / "domain_enrichment_cache.json"
+
+
+def _load_domain_enrichment_cache() -> dict[str, Any]:
+    path = _domain_enrichment_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            key: value
+            for key, value in payload.items()
+            if not str(key).startswith("__") and _looks_like_domain(str(key))
+        }
+    except Exception:
+        return {}
+
+
+def _save_domain_enrichment_cache(cache: dict[str, Any]) -> None:
+    path = _domain_enrichment_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serializable = {
+        key: value
+        for key, value in cache.items()
+        if not str(key).startswith("__") and _looks_like_domain(str(key))
+    }
+    path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _http_fetch(url: str, timeout: int = DOMAIN_ENRICHMENT_TIMEOUT) -> str:
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0 Codex Governance Enricher"})
+    with urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="ignore")
+
+
+def _strip_html(html_text: str) -> str:
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", html_text)
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    return _normalize_whitespace(unescape(text))
+
+
+def _extract_html_title(html_text: str) -> str:
+    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", html_text)
+    return _normalize_whitespace(unescape(match.group(1))) if match else ""
+
+
+def _extract_meta_description(html_text: str) -> str:
+    match = re.search(r'(?is)<meta[^>]+name=["\\\']description["\\\'][^>]+content=["\\\'](.*?)["\\\']', html_text)
+    if match:
+        return _normalize_whitespace(unescape(match.group(1)))
+    match = re.search(r'(?is)<meta[^>]+property=["\\\']og:description["\\\'][^>]+content=["\\\'](.*?)["\\\']', html_text)
+    return _normalize_whitespace(unescape(match.group(1))) if match else ""
+
+
+def _extract_domain_from_url(value: str | None) -> str:
+    raw = _normalize_label(value)
+    if not raw:
+        return ""
+    if _looks_like_domain(raw):
+        return _normalize_domain(raw)
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    normalized = _normalize_domain(host)
+    return normalized if _looks_like_domain(normalized) else ""
+
+
+def _resolve_ip_country(domain: str) -> tuple[str, str]:
+    try:
+        ip = socket.gethostbyname(domain)
+    except Exception:
+        return "", ""
+    try:
+        payload = json.loads(_http_fetch(f"https://ipwho.is/{ip}", timeout=DOMAIN_ENRICHMENT_TIMEOUT))
+    except Exception:
+        return "", ""
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        return "", ""
+    country_code = _normalize_label(str(payload.get("country_code") or "")).upper()
+    return country_code, ip
+
+
+def _enrich_domain(domain: str, cache: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_domain(domain)
+    if not normalized or _is_noisy_domain(normalized):
+        return {}
+    cached = cache.get(normalized)
+    if isinstance(cached, dict):
+        return cached
+    if int(cache.get("__remaining__", DOMAIN_ENRICHMENT_BUDGET)) <= 0:
+        return {}
+    cache["__remaining__"] = int(cache.get("__remaining__", DOMAIN_ENRICHMENT_BUDGET)) - 1
+
+    html_text = ""
+    fetched_url = ""
+    for scheme in ("https://", "http://"):
+        candidate = f"{scheme}{normalized}"
+        try:
+            html_text = _http_fetch(candidate, timeout=DOMAIN_ENRICHMENT_TIMEOUT)
+            fetched_url = candidate
+            break
+        except Exception:
+            continue
+
+    title = _extract_html_title(html_text)
+    description = _extract_meta_description(html_text)
+    body = _strip_html(html_text)[:4000] if html_text else ""
+
+    geo_bundle = _infer_country_bundle(
+        ("domain", 6, normalized),
+        ("homepage_title", 6, title),
+        ("homepage_meta", 6, description),
+        ("homepage_body", 4, body),
+    )
+    industry_bundle = _infer_industry_bundle(
+        ("domain", 4, normalized),
+        ("homepage_title", 6, title),
+        ("homepage_meta", 6, description),
+        ("homepage_body", 4, body),
+    )
+
+    if geo_bundle["country"] == "未知":
+        country_code, ip = _resolve_ip_country(normalized)
+        if country_code:
+            geo_bundle = {
+                "country": _label_country(country_code),
+                "country_code": country_code,
+                "macro_region": _region_from_country_code(country_code),
+                "source": "ip_geo",
+                "score": 4,
+                "evidence": [ip],
+            }
+
+    enriched = {
+        "domain": normalized,
+        "fetched_url": fetched_url,
+        "country": geo_bundle.get("country") or "未知",
+        "country_code": geo_bundle.get("country_code") or "",
+        "macro_region": geo_bundle.get("macro_region") or "未知",
+        "country_source": geo_bundle.get("source") or "unknown",
+        "country_score": int(geo_bundle.get("score") or 0),
+        "country_evidence": geo_bundle.get("evidence") or [],
+        "industry": industry_bundle.get("industry") or "未知",
+        "industry_source": industry_bundle.get("source") or "unknown",
+        "industry_score": int(industry_bundle.get("score") or 0),
+    }
+    cache[normalized] = enriched
+    return enriched
+
+
+def _pick_primary_domain(*values: str) -> str:
+    for value in values:
+        extracted = _extract_domain_from_url(value)
+        if extracted and not _is_noisy_domain(extracted):
+            return extracted
+        for domain in _extract_domains(value):
+            if not _is_noisy_domain(domain):
+                return domain
+    return ""
+
+
 def _count_keyword_matches(text: str, keyword: str) -> int:
     escaped = re.escape(keyword.lower())
     pattern = rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
@@ -775,6 +958,52 @@ def _propagate_entity_context(events: list[dict[str, Any]]) -> None:
                 metadata.setdefault("tag_sources", []).append("victim_group:industry")
                 event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 6, 100)
                 event["completeness_score"] = min(int(event.get("completeness_score") or 0) + 8, 100)
+
+
+def _apply_domain_enrichment(events: list[dict[str, Any]], domain_cache: dict[str, Any]) -> None:
+    candidates = []
+    for event in events:
+        metadata = event.get("metadata") or {}
+        evidence = metadata.get("entity_link_evidence") or {}
+        domain = _normalize_domain(evidence.get("primary_domain") or "")
+        if not domain or _is_noisy_domain(domain):
+            continue
+        if event.get("country") != "未知" and event.get("industry") != "未知":
+            continue
+        candidates.append(event)
+
+    candidates.sort(
+        key=lambda item: (
+            _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
+            int(item.get("risk_score") or 0),
+        ),
+        reverse=True,
+    )
+
+    for event in candidates:
+        metadata = event.get("metadata") or {}
+        evidence = metadata.get("entity_link_evidence") or {}
+        domain = _normalize_domain(evidence.get("primary_domain") or "")
+        enrichment = _enrich_domain(domain, domain_cache)
+        if not enrichment:
+            continue
+        if event.get("country") == "未知" and enrichment.get("country") not in {"", "未知"}:
+            event["country"] = enrichment["country"]
+            event["country_code"] = enrichment.get("country_code") or ""
+            event["region"] = enrichment.get("macro_region") or event.get("region") or "未知"
+            metadata["country_source"] = enrichment.get("country_source") or "domain_cache"
+            metadata["country_score"] = int(enrichment.get("country_score") or 0)
+            metadata["country_evidence"] = enrichment.get("country_evidence") or [domain]
+            metadata.setdefault("tag_sources", []).append(metadata["country_source"])
+            event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 8, 100)
+            event["completeness_score"] = min(int(event.get("completeness_score") or 0) + 10, 100)
+        if event.get("industry") == "未知" and enrichment.get("industry") not in {"", "未知"}:
+            event["industry"] = enrichment["industry"]
+            metadata["industry_source"] = enrichment.get("industry_source") or "domain_cache"
+            metadata["industry_score"] = int(enrichment.get("industry_score") or 0)
+            metadata.setdefault("tag_sources", []).append(metadata["industry_source"])
+            event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 6, 100)
+            event["completeness_score"] = min(int(event.get("completeness_score") or 0) + 8, 100)
 def _coerce_resource_list(value: Any) -> list[dict[str, str]]:
     if not value:
         return []
@@ -1133,7 +1362,7 @@ def _vulnerability_rows(connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _build_forum_base_event(row: dict[str, Any]) -> dict[str, Any]:
+def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | None = None) -> dict[str, Any]:
     title = _normalize_label(row.get("title")) or _normalize_label(row.get("topic_url")) or "未命名论坛帖子"
     content = _normalize_whitespace(row.get("content"))
     topic_url = _normalize_label(row.get("topic_url"))
@@ -1174,6 +1403,26 @@ def _build_forum_base_event(row: dict[str, Any]) -> dict[str, Any]:
         ("url", 4, topic_url),
         ("domains", 4, " ".join(domain_candidates)),
     )
+    primary_domain = _pick_primary_domain(victim, topic_url, " ".join(domain_candidates))
+    if domain_cache is not None and primary_domain and (geo_bundle["country"] == "未知" or industry_bundle["industry"] == "未知"):
+        enrichment = _enrich_domain(primary_domain, domain_cache)
+        if enrichment and geo_bundle["country"] == "未知" and enrichment.get("country") not in {"", "未知"}:
+            geo_bundle = {
+                "country": enrichment["country"],
+                "country_code": enrichment.get("country_code") or "",
+                "macro_region": enrichment.get("macro_region") or "未知",
+                "source": enrichment.get("country_source") or "domain_cache",
+                "score": int(enrichment.get("country_score") or 0),
+                "evidence": enrichment.get("country_evidence") or [primary_domain],
+            }
+        if enrichment and industry_bundle["industry"] == "未知" and enrichment.get("industry") not in {"", "未知"}:
+            industry_bundle = {
+                "industry": enrichment["industry"],
+                "source": enrichment.get("industry_source") or "domain_cache",
+                "score": int(enrichment.get("industry_score") or 0),
+            }
+            if industry in {"未知", "其他", "政府"}:
+                industry = enrichment["industry"]
     region = geo_bundle["macro_region"] if geo_bundle["country"] != "未知" else (region_candidates[0] if region_candidates else geo_bundle["macro_region"])
     leak_type = _classify_forum_leak_type(str(row.get("section") or ""), title, content)
     severity = _severity_from_forum(str(row.get("section") or ""), leak_type)
@@ -1230,6 +1479,7 @@ def _build_forum_base_event(row: dict[str, Any]) -> dict[str, Any]:
                 "match_method": "domain_or_title",
                 "matched_fields": [name for name, value in {"title": title, "content": content, "victim": victim}.items() if value],
                 "domain_candidates": domain_candidates[:5],
+                "primary_domain": primary_domain,
             },
             "risk_reasons": [],
             "raw_json": raw_json,
@@ -1256,7 +1506,7 @@ def _pick_victim_from_row(row: dict[str, Any], raw_json: dict[str, Any]) -> tupl
     return "未知实体", "unknown"
 
 
-def _build_victim_base_event(row: dict[str, Any]) -> dict[str, Any]:
+def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | None = None) -> dict[str, Any]:
     raw_json = _parse_json(row.get("raw_json"))
     detail_raw_json = _parse_json(row.get("detail_raw_json"))
     victim, victim_key = _pick_victim_from_row(row, raw_json)
@@ -1287,6 +1537,26 @@ def _build_victim_base_event(row: dict[str, Any]) -> dict[str, Any]:
         ("detail", 5, detail_text),
         ("victim", 4, victim),
     )
+    primary_domain = _pick_primary_domain(domain, website_url, detail_url, victim)
+    if domain_cache is not None and primary_domain and (geo_bundle["country"] == "未知" or industry_bundle["industry"] == "未知"):
+        enrichment = _enrich_domain(primary_domain, domain_cache)
+        if enrichment and geo_bundle["country"] == "未知" and enrichment.get("country") not in {"", "未知"}:
+            geo_bundle = {
+                "country": enrichment["country"],
+                "country_code": enrichment.get("country_code") or "",
+                "macro_region": enrichment.get("macro_region") or "未知",
+                "source": enrichment.get("country_source") or "domain_cache",
+                "score": int(enrichment.get("country_score") or 0),
+                "evidence": enrichment.get("country_evidence") or [primary_domain],
+            }
+        if enrichment and industry_bundle["industry"] == "未知" and enrichment.get("industry") not in {"", "未知"}:
+            industry_bundle = {
+                "industry": enrichment["industry"],
+                "source": enrichment.get("industry_source") or "domain_cache",
+                "score": int(enrichment.get("industry_score") or 0),
+            }
+            if industry == "未知":
+                industry = enrichment["industry"]
     region = geo_bundle["macro_region"]
     severity = _severity_from_status(status)
     local_resources, local_screenshots = _victim_output_resources(row, raw_json)
@@ -1345,6 +1615,7 @@ def _build_victim_base_event(row: dict[str, Any]) -> dict[str, Any]:
                 "match_method": "display_label_or_domain",
                 "matched_fields": [name for name, value in {"display_label": row.get("display_label"), "domain": domain, "detail": detail_text}.items() if value],
                 "domain_candidates": [item for item in [domain, _normalize_domain(victim)] if item],
+                "primary_domain": primary_domain,
             },
             "risk_reasons": [],
             "raw_json": raw_json,
@@ -1647,15 +1918,19 @@ def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -
 
 def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
     source_signature = _build_source_signature(connection)
+    domain_cache = _load_domain_enrichment_cache()
+    domain_cache["__remaining__"] = DOMAIN_ENRICHMENT_BUDGET
     base_events: list[dict[str, Any]] = []
     for row in _forum_rows(connection):
-        base_events.append(_build_forum_base_event(row))
+        base_events.append(_build_forum_base_event(row, domain_cache=domain_cache))
     for row in _victim_rows(connection):
-        base_events.append(_build_victim_base_event(row))
+        base_events.append(_build_victim_base_event(row, domain_cache=domain_cache))
     for row in _vulnerability_rows(connection):
         base_events.append(_build_vulnerability_base_event(row))
 
     _propagate_entity_context(base_events)
+    domain_cache["__remaining__"] = DOMAIN_ENRICHMENT_BUDGET
+    _apply_domain_enrichment(base_events, domain_cache)
     _score_events(base_events)
     deduped_events: dict[str, dict[str, Any]] = {}
     for event in base_events:
@@ -1725,6 +2000,7 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
         event_count=len(persisted_rows),
         refreshed_at=updated_at,
     )
+    _save_domain_enrichment_cache(domain_cache)
     connection.commit()
     return load_normalized_events(connection, refresh=False)
 
