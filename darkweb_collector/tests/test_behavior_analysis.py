@@ -412,6 +412,16 @@ class BehaviorAnalysisTests(unittest.TestCase):
     def test_industry_inference_supports_military(self) -> None:
         self.assertEqual("军事", normalized_intelligence._infer_industry("military research facility", "defense systems"))
 
+    def test_country_inference_supports_hong_kong_thailand_vietnam_and_venezuela(self) -> None:
+        self.assertEqual("香港", normalized_intelligence._infer_country_bundle(("title", 8, "Hong Kong ha.org.hk leak"))["country"])
+        self.assertEqual("泰国", normalized_intelligence._infer_country_bundle(("title", 8, "Thailand Ministry of Finance"))["country"])
+        self.assertEqual("越南", normalized_intelligence._infer_country_bundle(("title", 8, "Vietnam Fortress Tools JSC"))["country"])
+        self.assertEqual("委内瑞拉", normalized_intelligence._infer_country_bundle(("title", 8, "VENEZUELA CORDIALITO leaks betting house"))["country"])
+
+    def test_industry_inference_supports_rehabilitation_and_casino(self) -> None:
+        self.assertEqual("医疗", normalized_intelligence._infer_industry("Advanced Rehabilitation Technology"))
+        self.assertEqual("文娱", normalized_intelligence._infer_industry("Brazil casino betting records"))
+
     def test_intelligence_payload_includes_executive_threat_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

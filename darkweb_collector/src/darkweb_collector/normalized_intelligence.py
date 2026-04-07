@@ -87,6 +87,16 @@ COUNTRY_LABELS = {
     "GB": "英国",
     "CN": "中国",
     "RU": "俄罗斯",
+    "HK": "香港",
+    "TW": "台湾",
+    "PK": "巴基斯坦",
+    "TH": "泰国",
+    "VN": "越南",
+    "VE": "委内瑞拉",
+    "AT": "奥地利",
+    "LI": "列支敦士登",
+    "SE": "瑞典",
+    "ET": "埃塞俄比亚",
     "AU": "澳大利亚",
     "DE": "德国",
     "FR": "法国",
@@ -125,20 +135,30 @@ COUNTRY_REGION_MAP = {
     "CH": "欧洲",
     "PL": "欧洲",
     "RU": "欧洲",
+    "AT": "欧洲",
+    "LI": "欧洲",
+    "SE": "欧洲",
     "CN": "亚洲",
+    "HK": "亚洲",
+    "TW": "亚洲",
     "IN": "亚洲",
     "ID": "亚洲",
     "JP": "亚洲",
     "KR": "亚洲",
     "SG": "亚洲",
     "MY": "亚洲",
+    "PK": "亚洲",
+    "TH": "亚洲",
+    "VN": "亚洲",
     "AE": "中东",
     "SA": "中东",
     "ZA": "非洲",
     "EG": "非洲",
+    "ET": "非洲",
     "AR": "南美",
     "BR": "南美",
     "CL": "南美",
+    "VE": "南美",
     "AU": "大洋洲",
 }
 
@@ -169,6 +189,16 @@ COUNTRY_HINT_PATTERNS = {
         r"\bmanchester\b",
     ],
     "CN": [r"\bchina\b", r"\bchinese\b", r"\bbeijing\b", r"\bshanghai\b", r"\bguangzhou\b", r"\bshenzhen\b"],
+    "HK": [r"\bhong kong\b", r"\bha\.org\.hk\b"],
+    "TW": [r"\btaiwan\b", r"\btaipei\b"],
+    "PK": [r"\bpakistan\b", r"\bpakistani\b", r"\bislamabad\b"],
+    "TH": [r"\bthailand\b", r"\bthai\b", r"\bsiam\b", r"\bbangkok\b"],
+    "VN": [r"\bvietnam\b", r"\bvietnamese\b", r"\bhanoi\b", r"\bho chi minh\b"],
+    "VE": [r"\bvenezuela\b", r"\bvenezuelan\b"],
+    "AT": [r"\baustria\b", r"\bvienna\b"],
+    "LI": [r"\bliechtenstein\b"],
+    "SE": [r"\bsweden\b", r"\bswedish\b", r"\bstockholm\b"],
+    "ET": [r"\bethiopia\b", r"\bethiopian\b", r"\baddis ababa\b"],
     "RU": [r"\brussia\b", r"\brussian\b", r"\bmoscow\b", r"\bst\.?\s*petersburg\b"],
     "AU": [r"\baustralia\b", r"\baustralian\b", r"\bsydney\b", r"\bmelbourne\b", r"\bqueensland\b"],
     "DE": [r"\bgermany\b", r"\bgerman\b", r"\bberlin\b", r"\bmunich\b", r"\bhamburg\b", r"\bbruchsal\b"],
@@ -200,7 +230,19 @@ COUNTRY_DOMAIN_SUFFIX_HINTS = {
     "com.au": "AU",
     "com.mx": "MX",
     "co.uk": "GB",
+    "org.hk": "HK",
+    "co.in": "IN",
     "uk": "GB",
+    "hk": "HK",
+    "tw": "TW",
+    "pk": "PK",
+    "th": "TH",
+    "vn": "VN",
+    "ve": "VE",
+    "at": "AT",
+    "li": "LI",
+    "se": "SE",
+    "et": "ET",
     "ru": "RU",
     "cn": "CN",
     "jp": "JP",
@@ -285,18 +327,18 @@ GENERIC_ENTITY_TERMS = {
 }
 
 INDUSTRY_KEYWORDS = {
-    "军事": ["military", "defense", "defence", "army", "navy", "air force", "missile", "weapon", "munitions", "warfare", "national security"],
+    "军事": ["military", "defense", "defence", "navy", "air force", "missile", "weapon", "munitions", "warfare", "national security", "armed forces"],
     "金融": ["bank", "banking", "finance", "financial", "fintech", "insurance", "payment", "investment", "capital management", "wealth management", "advisory", "retirement"],
-    "医疗": ["health", "healthcare", "medical", "hospital", "clinic", "pharma", "medical devices", "pain management"],
-    "科技": ["software", "saas", "cloud", "hosting", "tech", "technology", "digital", "electronics", "photo frame"],
+    "医疗": ["health", "healthcare", "medical", "hospital", "clinic", "pharma", "medical devices", "pain management", "rehabilitation", "ministry of health", "social works"],
+    "科技": ["software", "saas", "cloud", "hosting", "tech", "technology", "digital", "electronics", "photo frame", "logic", "semiconductor", "semi"],
     "制造业": ["manufacturing", "industrial", "factory", "equipment", "construction", "engineering", "manufacturer", "packaging", "hydraulic", "chemical", "materials", "furniture", "components", "architectural", "interior", "craftsmanship"],
     "零售": ["retail", "shop", "shopping", "ecommerce", "e-commerce", "store"],
     "教育": ["school", "college", "university", "education", "academy"],
-    "政府": ["government", "gov", "ministry", "municipal", "police", "public sector"],
+    "政府": ["government", "gov", "ministry", "municipal", "police", "public sector", "driver's license", "driver license", "citizenship"],
     "交通": ["transport", "logistics", "shipping", "airline", "airport", "rail", "freight", "trucking"],
     "能源": ["energy", "oil", "gas", "power", "electric", "utility"],
     "通信": ["telecom", "telecommunications", "mobile", "carrier", "broadband", "communications"],
-    "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency"],
+    "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency", "casino", "betting", "gaming", "sportsbook"],
 }
 
 REGION_KEYWORDS = {
@@ -1123,6 +1165,8 @@ def _build_forum_base_event(row: dict[str, Any]) -> dict[str, Any]:
         ("domains", 3, " ".join(domain_candidates)),
     )
     industry = industry_candidates[0] if industry_candidates else industry_bundle["industry"]
+    if industry_bundle["industry"] != "未知" and industry_bundle["score"] >= 8 and industry in {"未知", "其他", "政府"}:
+        industry = industry_bundle["industry"]
     geo_bundle = _infer_country_bundle(
         ("title", 9, title),
         ("content", 6, content),
@@ -1130,7 +1174,7 @@ def _build_forum_base_event(row: dict[str, Any]) -> dict[str, Any]:
         ("url", 4, topic_url),
         ("domains", 4, " ".join(domain_candidates)),
     )
-    region = region_candidates[0] if region_candidates else geo_bundle["macro_region"]
+    region = geo_bundle["macro_region"] if geo_bundle["country"] != "未知" else (region_candidates[0] if region_candidates else geo_bundle["macro_region"])
     leak_type = _classify_forum_leak_type(str(row.get("section") or ""), title, content)
     severity = _severity_from_forum(str(row.get("section") or ""), leak_type)
     mirror_resources = _coerce_resource_list(row.get("attachments"))
@@ -1621,9 +1665,22 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
             continue
         deduped_events[event["event_id"]] = _merge_duplicate_events(existing, event)
 
+    title_deduped_events: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for event in deduped_events.values():
+        title_key = (
+            str(event.get("source_site_name") or ""),
+            str(event.get("event_type") or ""),
+            _canonical_key(event.get("title") or ""),
+        )
+        existing = title_deduped_events.get(title_key)
+        if existing is None:
+            title_deduped_events[title_key] = event
+            continue
+        title_deduped_events[title_key] = _merge_duplicate_events(existing, event)
+
     updated_at = _now_utc().isoformat()
     persisted_rows: list[dict[str, Any]] = []
-    for event in deduped_events.values():
+    for event in title_deduped_events.values():
         metadata_payload = {
             **event["metadata"],
             "country": event.get("country") or "未知",
