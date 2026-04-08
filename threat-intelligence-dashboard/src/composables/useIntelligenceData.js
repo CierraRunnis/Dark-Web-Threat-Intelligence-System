@@ -5,14 +5,35 @@ const fallbackData = { ...fallbackModule }
 const intelligenceData = ref({ ...fallbackData })
 const loading = ref(false)
 const error = ref(null)
+const RETRY_DELAY_MS = 3000
 
 let hasLoaded = false
 let pendingRequest = null
+let retryTimer = null
+
+function clearRetryTimer() {
+  if (retryTimer) {
+    window.clearTimeout(retryTimer)
+    retryTimer = null
+  }
+}
+
+function scheduleRetry() {
+  if (hasLoaded || loading.value || pendingRequest || retryTimer) {
+    return
+  }
+  retryTimer = window.setTimeout(() => {
+    retryTimer = null
+    loadIntelligenceData()
+  }, RETRY_DELAY_MS)
+}
 
 async function loadIntelligenceData() {
   if (pendingRequest) {
     return pendingRequest
   }
+
+  clearRetryTimer()
 
   loading.value = true
   error.value = null
@@ -30,10 +51,12 @@ async function loadIntelligenceData() {
         ...payload,
       }
       hasLoaded = true
+      clearRetryTimer()
       return intelligenceData.value
     })
     .catch((requestError) => {
       error.value = requestError
+      scheduleRetry()
       return intelligenceData.value
     })
     .finally(() => {

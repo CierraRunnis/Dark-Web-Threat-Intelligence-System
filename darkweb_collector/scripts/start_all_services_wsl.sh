@@ -6,6 +6,8 @@ SCHEDULER_INTERVAL_SECONDS=60
 API_HEALTH_URL="http://127.0.0.1:8000/api/health"
 FRONTEND_URL="http://127.0.0.1:5173"
 SERVICE_WAIT_SECONDS=45
+VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
+VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-20}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -76,6 +78,7 @@ cleanup_stray_processes() {
   pkill -f "/threat-intelligence-dashboard/node_modules/.bin/vite" 2>/dev/null || true
   pkill -f "darkweb_collector.celery_app:app worker" 2>/dev/null || true
   pkill -f "scripts/crawl.py enqueue-due" 2>/dev/null || true
+  pkill -f "scripts/crawl.py sync-public-vulns" 2>/dev/null || true
 }
 
 tmux_new_window() {
@@ -214,15 +217,23 @@ while true; do
 done
 "
 
+  local vulnerability_sync_command
+  vulnerability_sync_command="
+set -euo pipefail
+cd \"$COLLECTOR_ROOT\"
+${env_exports}
+source \"$COLLECTOR_VENV/bin/activate\"
+while true; do
+  echo \"[\$(date '+%F %T')] sync-public-vulns --limit $VULN_SYNC_LIMIT\"
+  python scripts/crawl.py sync-public-vulns --limit $VULN_SYNC_LIMIT || true
+  sleep $VULN_SYNC_INTERVAL_SECONDS
+done
+"
+
   tmux new-session -d -s "$SESSION_NAME" -n "redis" "bash -lc $(printf '%q' "$redis_command")"
   tmux setw -t "$SESSION_NAME" remain-on-exit on
 
   tmux_new_window "api" "$api_command"
-  tmux_new_window "frontend" "$frontend_command"
-  tmux_new_window "worker-seed" "$seed_worker_command"
-  tmux_new_window "worker-detail" "$detail_worker_command"
-  tmux_new_window "worker-browser" "$browser_worker_command"
-  tmux_new_window "scheduler" "$scheduler_command"
 
   sleep 2
 
@@ -231,6 +242,13 @@ done
     describe_port_owner 8000
     capture_window_logs "api" 120
   fi
+
+  tmux_new_window "frontend" "$frontend_command"
+  tmux_new_window "worker-seed" "$seed_worker_command"
+  tmux_new_window "worker-detail" "$detail_worker_command"
+  tmux_new_window "worker-browser" "$browser_worker_command"
+  tmux_new_window "scheduler" "$scheduler_command"
+  tmux_new_window "vuln-sync" "$vulnerability_sync_command"
 
   if ! wait_for_http "$FRONTEND_URL" "$SERVICE_WAIT_SECONDS"; then
     warn "frontend did not become ready within ${SERVICE_WAIT_SECONDS}s"
@@ -241,6 +259,7 @@ done
   info "tmux session created: $SESSION_NAME"
   info "frontend: http://localhost:5173"
   info "api health: http://127.0.0.1:8000/api/health"
+  info "vulnerability sync interval: ${VULN_SYNC_INTERVAL_SECONDS}s (limit=${VULN_SYNC_LIMIT})"
   info "attach with: tmux attach -t $SESSION_NAME"
   echo
   show_status

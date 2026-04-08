@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from threading import Lock, Thread
 import time
 
 from fastapi import FastAPI
@@ -25,6 +26,8 @@ from darkweb_collector.runtime import project_root
 
 app = FastAPI(title="Darkweb Collector API", version="1.0.0")
 logger = logging.getLogger("darkweb_collector.api")
+_warmup_lock = Lock()
+_warmup_started = False
 collector_output_dir = (project_root() / "output").resolve()
 collector_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -43,11 +46,7 @@ app.mount(
 )
 
 
-@app.on_event("startup")
-def warm_payloads_on_startup() -> None:
-    if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
-        logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
-        return
+def _run_payload_warmup() -> None:
     started_at = time.perf_counter()
     try:
         warm_api_payloads()
@@ -55,6 +54,19 @@ def warm_payloads_on_startup() -> None:
         logger.exception("API warmup failed")
         return
     logger.info("API warmup completed in %.2fs", time.perf_counter() - started_at)
+
+
+@app.on_event("startup")
+def warm_payloads_on_startup() -> None:
+    global _warmup_started
+    if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
+        logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
+        return
+    with _warmup_lock:
+        if _warmup_started:
+            return
+        _warmup_started = True
+    Thread(target=_run_payload_warmup, name="api-payload-warmup", daemon=True).start()
 
 
 @app.get("/api/health")
