@@ -73,6 +73,8 @@ import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
+const DETAIL_CACHE_VERSION = '2026-04-08-rich-detail-v1'
+
 const { data } = useIntelligenceData()
 const ransomwareEvents = computed(() => data.value.ransomwareEvents || [])
 const ransomwareSummary = computed(() => data.value.ransomwareSummary || [])
@@ -128,7 +130,7 @@ function viewEventDetail(row) {
       searchValue: searchValue.value,
     })
   )
-  sessionStorage.setItem(`event-detail:${row.id}`, JSON.stringify(row))
+  sessionStorage.setItem(`event-detail:${row.id}`, JSON.stringify({ ...row, __cacheVersion: DETAIL_CACHE_VERSION }))
   sessionStorage.setItem(`event-back:${row.id}`, '/ransomware')
   router.push({ name: 'EventDetail', params: { eventId: row.id } })
 }

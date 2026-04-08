@@ -73,6 +73,8 @@ import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
+const DETAIL_CACHE_VERSION = '2026-04-08-rich-detail-v1'
+
 const { data } = useIntelligenceData()
 const dataLeakEvents = computed(() => data.value.dataLeakEvents || [])
 const dataLeakSummary = computed(() => data.value.dataLeakSummary || [])
@@ -115,7 +117,7 @@ function viewEventDetail(row) {
       searchValue: searchValue.value,
     })
   )
-  sessionStorage.setItem(`event-detail:${row.id}`, JSON.stringify(row))
+  sessionStorage.setItem(`event-detail:${row.id}`, JSON.stringify({ ...row, __cacheVersion: DETAIL_CACHE_VERSION }))
   sessionStorage.setItem(`event-back:${row.id}`, '/data-leak')
   router.push({ name: 'EventDetail', params: { eventId: row.id } })
 }

@@ -1,5 +1,7 @@
 import { ref } from 'vue'
 
+const DETAIL_CACHE_VERSION = '2026-04-08-rich-detail-v1'
+
 export function useEventDetail() {
   const detail = ref(null)
   const loading = ref(false)
@@ -37,7 +39,12 @@ export function useEventDetail() {
     try {
       const raw = sessionStorage.getItem(`event-detail:${eventId}`)
       if (!raw) return null
-      return JSON.parse(raw)
+      const parsed = JSON.parse(raw)
+      if (!parsed || parsed.__cacheVersion !== DETAIL_CACHE_VERSION) {
+        sessionStorage.removeItem(`event-detail:${eventId}`)
+        return null
+      }
+      return parsed
     } catch {
       return null
     }
@@ -73,7 +80,13 @@ export function useEventDetail() {
         detail.value = await response.json()
         clearRetryTimer()
         try {
-          sessionStorage.setItem(`event-detail:${eventId}`, JSON.stringify(detail.value))
+          sessionStorage.setItem(
+            `event-detail:${eventId}`,
+            JSON.stringify({
+              ...detail.value,
+              __cacheVersion: DETAIL_CACHE_VERSION,
+            }),
+          )
         } catch {}
         return detail.value
       }
