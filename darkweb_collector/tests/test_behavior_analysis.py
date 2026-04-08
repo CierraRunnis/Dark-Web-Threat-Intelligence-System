@@ -434,6 +434,22 @@ class BehaviorAnalysisTests(unittest.TestCase):
         self.assertEqual("文娱", normalized_intelligence._infer_industry("Elite Fitness"))
         self.assertEqual("制造业", normalized_intelligence._infer_industry("Matthew Allchurch Architects"))
 
+    def test_industry_inference_prefers_manufacturing_over_served_medical_markets(self) -> None:
+        snippet = (
+            "Anomatic is a full-service manufacturer of anodized aluminum and metalized packaging "
+            "for the automotive, beauty, personal care, consumer electronics, pharmaceutical, "
+            "medical devices, and spirits industries worldwide"
+        )
+        self.assertEqual("制造业", normalized_intelligence._infer_industry(snippet))
+
+    def test_industry_inference_identifies_agriculture_over_retail_context(self) -> None:
+        snippet = (
+            "Northern Family Farms Welcome to Northern Family Farms Growing Since 1955 "
+            "Nursery Plants Trees, Fruits, Topiaries, Roses, Perennials, Shrubs and more. "
+            "Christmas Tree Grower serving our retail or landscape business customers."
+        )
+        self.assertEqual("农业", normalized_intelligence._infer_industry(snippet))
+
     def test_intelligence_payload_includes_executive_threat_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

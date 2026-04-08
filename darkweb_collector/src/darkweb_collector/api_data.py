@@ -42,6 +42,7 @@ INDUSTRY_LABELS = {
     "healthcare": "医疗",
     "technology": "科技",
     "military": "军事",
+    "agriculture": "农业",
     "retail": "零售",
     "education": "教育",
     "telecommunications": "通信",
