@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+import os
+import time
+
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,12 +18,13 @@ from darkweb_collector.api_actions import (
     stop_continuous_dispatch,
     update_site_enabled,
 )
-from darkweb_collector.api_data import build_behavior_payload, build_intelligence_payload, build_jobs_payload
+from darkweb_collector.api_data import build_behavior_payload, build_intelligence_payload, build_jobs_payload, warm_api_payloads
 from darkweb_collector.api_data import build_event_detail, build_event_records, build_vulnerability_detail, build_vulnerability_records
 from darkweb_collector.runtime import project_root
 
 
 app = FastAPI(title="Darkweb Collector API", version="1.0.0")
+logger = logging.getLogger("darkweb_collector.api")
 collector_output_dir = (project_root() / "output").resolve()
 collector_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -36,6 +41,20 @@ app.mount(
     StaticFiles(directory=str(collector_output_dir), html=False),
     name="collector-output",
 )
+
+
+@app.on_event("startup")
+def warm_payloads_on_startup() -> None:
+    if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
+        logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
+        return
+    started_at = time.perf_counter()
+    try:
+        warm_api_payloads()
+    except Exception:
+        logger.exception("API warmup failed")
+        return
+    logger.info("API warmup completed in %.2fs", time.perf_counter() - started_at)
 
 
 @app.get("/api/health")
