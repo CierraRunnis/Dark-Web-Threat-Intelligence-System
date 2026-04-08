@@ -344,14 +344,14 @@ INDUSTRY_KEYWORDS = {
     "金融": ["bank", "banking", "finance", "financial", "fintech", "insurance", "payment", "investment", "capital management", "wealth management", "advisory", "retirement"],
     "医疗": ["health", "healthcare", "medical", "hospital", "clinic", "pharma", "medical devices", "pain management", "rehabilitation", "ministry of health", "social works"],
     "科技": ["software", "saas", "cloud", "hosting", "tech", "technology", "digital", "electronics", "photo frame", "logic", "semiconductor", "semi"],
-    "制造业": ["manufacturing", "industrial", "factory", "equipment", "construction", "engineering", "manufacturer", "packaging", "hydraulic", "chemical", "materials", "furniture", "components", "architectural", "interior", "craftsmanship"],
+    "制造业": ["manufacturing", "industrial", "factory", "equipment", "construction", "engineering", "manufacturer", "packaging", "hydraulic", "chemical", "materials", "furniture", "components", "architectural", "interior", "craftsmanship", "architect", "architects", "architecture", "design-build"],
     "零售": ["retail", "shop", "shopping", "ecommerce", "e-commerce", "store"],
     "教育": ["school", "college", "university", "education", "academy"],
     "政府": ["government", "gov", "ministry", "municipal", "police", "public sector", "driver's license", "driver license", "citizenship"],
     "交通": ["transport", "logistics", "shipping", "airline", "airport", "rail", "freight", "trucking"],
     "能源": ["energy", "oil", "gas", "power", "electric", "utility"],
     "通信": ["telecom", "telecommunications", "mobile", "carrier", "broadband", "communications"],
-    "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency", "casino", "betting", "gaming", "sportsbook"],
+    "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency", "casino", "betting", "gaming", "sportsbook", "fitness", "publishing", "publisher"],
 }
 
 REGION_KEYWORDS = {
@@ -722,6 +722,46 @@ def _extract_domain_from_url(value: str | None) -> str:
     return normalized if _looks_like_domain(normalized) else ""
 
 
+def _to_base_domain(domain: str | None) -> str:
+    normalized = _normalize_domain(domain)
+    if not _looks_like_domain(normalized):
+        return ""
+    parts = normalized.split(".")
+    if len(parts) <= 2:
+        return normalized
+    multi_suffixes = {"co.uk", "com.au", "co.nz", "com.mx", "co.in", "org.hk"}
+    tail = ".".join(parts[-2:])
+    if tail in {"uk", "au", "nz", "mx", "in", "hk"} and ".".join(parts[-3:]) in multi_suffixes:
+        return ".".join(parts[-3:])
+    if ".".join(parts[-2:]) in multi_suffixes:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def _extract_followup_links(html_text: str, base_domain: str) -> list[str]:
+    links: list[str] = []
+    for match in re.findall(r'(?is)href=["\\\'](.*?)["\\\']', html_text or ""):
+        candidate = _normalize_whitespace(unescape(match))
+        if not candidate or candidate.startswith("#") or candidate.startswith("mailto:") or candidate.startswith("javascript:"):
+            continue
+        lowered = candidate.lower()
+        if not any(token in lowered for token in ("about", "contact", "location", "office", "company", "who-we-are", "our-story")):
+            continue
+        if candidate.startswith("/"):
+            candidate = f"https://{base_domain}{candidate}"
+        domain = _extract_domain_from_url(candidate)
+        if domain and _to_base_domain(domain) == _to_base_domain(base_domain):
+            links.append(candidate)
+    deduped = []
+    seen: set[str] = set()
+    for item in links:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped[:3]
+
+
 def _resolve_ip_country(domain: str) -> tuple[str, str]:
     try:
         ip = socket.gethostbyname(domain)
@@ -748,10 +788,11 @@ def _enrich_domain(domain: str, cache: dict[str, Any]) -> dict[str, Any]:
         return {}
     cache["__remaining__"] = int(cache.get("__remaining__", DOMAIN_ENRICHMENT_BUDGET)) - 1
 
+    fetch_domain = normalized
     html_text = ""
     fetched_url = ""
     for scheme in ("https://", "http://"):
-        candidate = f"{scheme}{normalized}"
+        candidate = f"{scheme}{fetch_domain}"
         try:
             html_text = _http_fetch(candidate, timeout=DOMAIN_ENRICHMENT_TIMEOUT)
             fetched_url = candidate
@@ -759,21 +800,45 @@ def _enrich_domain(domain: str, cache: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             continue
 
+    if not html_text:
+        base_domain = _to_base_domain(normalized)
+        if base_domain and base_domain != normalized:
+            for scheme in ("https://", "http://"):
+                candidate = f"{scheme}{base_domain}"
+                try:
+                    html_text = _http_fetch(candidate, timeout=DOMAIN_ENRICHMENT_TIMEOUT)
+                    fetched_url = candidate
+                    fetch_domain = base_domain
+                    break
+                except Exception:
+                    continue
+
     title = _extract_html_title(html_text)
     description = _extract_meta_description(html_text)
     body = _strip_html(html_text)[:4000] if html_text else ""
+    followup_text = ""
+    for link in _extract_followup_links(html_text, fetch_domain):
+        try:
+            followup_html = _http_fetch(link, timeout=DOMAIN_ENRICHMENT_TIMEOUT)
+        except Exception:
+            continue
+        followup_text += " " + _extract_html_title(followup_html)
+        followup_text += " " + _extract_meta_description(followup_html)
+        followup_text += " " + _strip_html(followup_html)[:2500]
 
     geo_bundle = _infer_country_bundle(
         ("domain", 6, normalized),
         ("homepage_title", 6, title),
         ("homepage_meta", 6, description),
         ("homepage_body", 4, body),
+        ("followup_pages", 6, followup_text),
     )
     industry_bundle = _infer_industry_bundle(
         ("domain", 4, normalized),
         ("homepage_title", 6, title),
         ("homepage_meta", 6, description),
         ("homepage_body", 4, body),
+        ("followup_pages", 5, followup_text),
     )
 
     if geo_bundle["country"] == "未知":

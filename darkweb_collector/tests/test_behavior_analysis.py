@@ -423,9 +423,16 @@ class BehaviorAnalysisTests(unittest.TestCase):
         self.assertEqual("CA", normalized_intelligence._domain_country_code("emond.ca"))
         self.assertEqual("NZ", normalized_intelligence._domain_country_code("elitefitness.co.nz"))
 
+    def test_base_domain_reduces_subdomain_noise(self) -> None:
+        self.assertEqual("gray-adams.com", normalized_intelligence._to_base_domain("adm.gray-adams.com"))
+        self.assertEqual("example.co.nz", normalized_intelligence._to_base_domain("www.example.co.nz"))
+
     def test_industry_inference_supports_rehabilitation_and_casino(self) -> None:
         self.assertEqual("医疗", normalized_intelligence._infer_industry("Advanced Rehabilitation Technology"))
         self.assertEqual("文娱", normalized_intelligence._infer_industry("Brazil casino betting records"))
+        self.assertEqual("文娱", normalized_intelligence._infer_industry("Emond Publishing"))
+        self.assertEqual("文娱", normalized_intelligence._infer_industry("Elite Fitness"))
+        self.assertEqual("制造业", normalized_intelligence._infer_industry("Matthew Allchurch Architects"))
 
     def test_intelligence_payload_includes_executive_threat_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
