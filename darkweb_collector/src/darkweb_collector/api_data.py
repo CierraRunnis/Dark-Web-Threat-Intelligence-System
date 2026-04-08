@@ -514,7 +514,7 @@ def _build_victim_event_records(connection) -> list[dict[str, Any]]:
 
 def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        normalized_events = ensure_normalized_intelligence(connection)
+        normalized_events = load_normalized_events(connection)
 
     events = [normalized_event_to_detail(item) for item in normalized_events]
     if limit is not None:
@@ -584,7 +584,6 @@ def _build_victim_event_detail_by_id(
 
 def build_event_detail(event_id: str) -> dict[str, Any] | None:
     with get_db_connection() as connection:
-        ensure_normalized_intelligence(connection)
         event = load_normalized_event_detail(connection, event_id)
     if event is None:
         return None
@@ -599,7 +598,7 @@ def build_vulnerability_records(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        normalized_events = ensure_normalized_intelligence(connection)
+        normalized_events = load_normalized_events(connection)
 
     vulnerability_events = [
         normalized_event_to_list_item(item)
@@ -630,7 +629,6 @@ def build_vulnerability_records(
 
 def build_vulnerability_detail(event_id: str) -> dict[str, Any] | None:
     with get_db_connection() as connection:
-        ensure_normalized_intelligence(connection)
         event = load_normalized_event_detail(connection, event_id)
     if event is None or event.get("event_type") != "vulnerability":
         return None
@@ -1170,7 +1168,7 @@ def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[st
 
 def build_intelligence_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
-        normalized_events = ensure_normalized_intelligence(connection)
+        normalized_events = load_normalized_events(connection)
         cache_key = _payload_cache_key(connection, "intelligence")
         cached = _get_cached_payload("intelligence", cache_key)
         if cached is not None:
@@ -1346,7 +1344,7 @@ def build_intelligence_payload() -> dict[str, Any]:
 
 def build_behavior_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
-        normalized_events = ensure_normalized_intelligence(connection)
+        normalized_events = load_normalized_events(connection)
         cache_key = _payload_cache_key(connection, "behavior")
         cached = _get_cached_payload("behavior", cache_key)
         if cached is not None:
