@@ -106,7 +106,7 @@ const filteredEvents = computed(() => {
     const keyword = searchValue.value.trim().toLowerCase()
     const matchesKeyword =
       !keyword ||
-      [item.title, item.attacker, item.region].some((field) => String(field || '').toLowerCase().includes(keyword))
+      [item.title, item.originalTitle, item.attacker, item.region].some((field) => String(field || '').toLowerCase().includes(keyword))
 
     return matchesCategory && matchesKeyword
   })

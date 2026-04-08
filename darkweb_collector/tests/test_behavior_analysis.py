@@ -386,7 +386,10 @@ class BehaviorAnalysisTests(unittest.TestCase):
 
                 payload = build_intelligence_payload()
                 titles = [item["title"] for item in payload["ransomwareEvents"][:2]]
-                self.assertEqual(["Newer Victim", "Older Victim"], titles)
+                self.assertEqual(
+                    ["Newer Victim遭DragonForce勒索披露", "Older Victim遭DragonForce勒索披露"],
+                    titles,
+                )
 
     def test_region_inference_uses_domain_and_country_signals(self) -> None:
         self.assertEqual("欧洲", normalized_intelligence._infer_region("[FR] ministry breach", "https://example.fr"))
@@ -449,6 +452,30 @@ class BehaviorAnalysisTests(unittest.TestCase):
             "Christmas Tree Grower serving our retail or landscape business customers."
         )
         self.assertEqual("农业", normalized_intelligence._infer_industry(snippet))
+
+    def test_display_title_for_data_leak_is_explicit(self) -> None:
+        title = normalized_intelligence.build_display_title(
+            {
+                "event_type": "data_leak",
+                "title": "2M USA BOAT OWNERS",
+                "victim": "2M USA BOAT OWNERS",
+                "leak_type": "数据库泄露",
+                "category": "数据库泄露",
+            }
+        )
+        self.assertIn("疑似数据库泄露", title)
+
+    def test_display_title_for_ransomware_is_explicit(self) -> None:
+        title = normalized_intelligence.build_display_title(
+            {
+                "event_type": "ransomware",
+                "title": "Northern Family Farms",
+                "victim": "Northern Family Farms",
+                "attacker": "DragonForce",
+                "category": "已公开",
+            }
+        )
+        self.assertEqual("Northern Family Farms遭DragonForce勒索披露", title)
 
     def test_intelligence_payload_includes_executive_threat_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

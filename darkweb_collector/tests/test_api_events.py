@@ -167,7 +167,8 @@ class ApiEventsTests(unittest.TestCase):
                 forum_event = next(item for item in events if item["event_type"] == "forum")
                 detail = build_event_detail(forum_event["id"])
                 self.assertIsNotNone(detail)
-                self.assertEqual("Breach Record", detail["title"])
+                self.assertEqual("Breach Record", detail["original_title"])
+                self.assertIn("疑似", detail["title"])
                 self.assertEqual("darkforums", detail["source"])
                 self.assertIn("disclosure_url", detail)
                 self.assertIn("detail_text", detail)
@@ -219,4 +220,5 @@ class ApiEventsTests(unittest.TestCase):
                     detail = build_event_detail(event_id)
 
                 self.assertIsNotNone(detail)
-                self.assertEqual("Direct Lookup Event", detail["title"])
+                self.assertEqual("Direct Lookup Event", detail["original_title"])
+                self.assertIn("疑似", detail["title"])
