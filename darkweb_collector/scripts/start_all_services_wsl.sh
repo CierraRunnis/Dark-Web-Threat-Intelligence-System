@@ -3,6 +3,9 @@ set -euo pipefail
 
 SESSION_NAME="bishe-stack"
 SCHEDULER_INTERVAL_SECONDS=60
+API_HEALTH_URL="http://127.0.0.1:8000/api/health"
+FRONTEND_URL="http://127.0.0.1:5173"
+SERVICE_WAIT_SECONDS=45
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -17,6 +20,10 @@ die() {
 
 info() {
   echo "[INFO] $*"
+}
+
+warn() {
+  echo "[WARN] $*"
 }
 
 require_command() {
@@ -87,6 +94,41 @@ fi
 exec bash
 "
   tmux new-window -t "${SESSION_NAME}:" -n "$window_name" "bash -lc $(printf '%q' "$wrapped_command")"
+}
+
+wait_for_http() {
+  local url="$1"
+  local timeout_seconds="$2"
+  local started_at
+  started_at="$(date +%s)"
+  while true; do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+capture_window_logs() {
+  local window_name="$1"
+  local lines="${2:-120}"
+  if tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx "$window_name"; then
+    printf '\n[INFO] last %s lines from %s:\n' "$lines" "$window_name"
+    tmux capture-pane -pt "${SESSION_NAME}:${window_name}" -S "-${lines}" || true
+  fi
+}
+
+describe_port_owner() {
+  local port="$1"
+  local details
+  details="$(ss -ltnp 2>/dev/null | grep ":${port} " || true)"
+  if [[ -n "$details" ]]; then
+    warn "port ${port} is currently held by:"
+    echo "$details"
+  fi
 }
 
 start_services() {
@@ -182,7 +224,19 @@ done
   tmux_new_window "worker-browser" "$browser_worker_command"
   tmux_new_window "scheduler" "$scheduler_command"
 
-  sleep 8
+  sleep 2
+
+  if ! wait_for_http "$API_HEALTH_URL" "$SERVICE_WAIT_SECONDS"; then
+    warn "api health check did not become ready within ${SERVICE_WAIT_SECONDS}s"
+    describe_port_owner 8000
+    capture_window_logs "api" 120
+  fi
+
+  if ! wait_for_http "$FRONTEND_URL" "$SERVICE_WAIT_SECONDS"; then
+    warn "frontend did not become ready within ${SERVICE_WAIT_SECONDS}s"
+    describe_port_owner 5173
+    capture_window_logs "frontend" 120
+  fi
 
   info "tmux session created: $SESSION_NAME"
   info "frontend: http://localhost:5173"
@@ -219,16 +273,20 @@ show_status() {
     info "redis: down"
   fi
 
-  if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
-    info "api: up (http://127.0.0.1:8000/api/health)"
+  if curl -fsS "$API_HEALTH_URL" >/dev/null 2>&1; then
+    info "api: up ($API_HEALTH_URL)"
   else
     info "api: down"
+    describe_port_owner 8000
+    capture_window_logs "api" 80
   fi
 
-  if curl -fsS http://127.0.0.1:5173 >/dev/null 2>&1; then
+  if curl -fsS "$FRONTEND_URL" >/dev/null 2>&1; then
     info "frontend: up (http://localhost:5173)"
   else
     info "frontend: down"
+    describe_port_owner 5173
+    capture_window_logs "frontend" 80
   fi
 }
 
