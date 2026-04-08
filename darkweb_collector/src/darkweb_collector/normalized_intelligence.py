@@ -66,6 +66,7 @@ INDUSTRY_LABELS = {
     "healthcare": "医疗",
     "technology": "科技",
     "military": "军事",
+    "agriculture": "农业",
     "retail": "零售",
     "education": "教育",
     "telecommunications": "通信",
@@ -288,8 +289,9 @@ NOISY_VICTIM_DOMAINS = {
 INDUSTRY_PRIORITY = [
     "军事",
     "金融",
-    "医疗",
     "制造业",
+    "农业",
+    "医疗",
     "科技",
     "交通",
     "通信",
@@ -345,6 +347,7 @@ INDUSTRY_KEYWORDS = {
     "医疗": ["health", "healthcare", "medical", "hospital", "clinic", "pharma", "medical devices", "pain management", "rehabilitation", "ministry of health", "social works"],
     "科技": ["software", "saas", "cloud", "hosting", "tech", "technology", "digital", "electronics", "photo frame", "logic", "semiconductor", "semi"],
     "制造业": ["manufacturing", "industrial", "factory", "equipment", "construction", "engineering", "manufacturer", "packaging", "hydraulic", "chemical", "materials", "furniture", "components", "architectural", "interior", "craftsmanship", "architect", "architects", "architecture", "design-build"],
+    "农业": ["farm", "farming", "nursery", "grower", "growers", "christmas trees", "tree farm", "shrubs", "perennials", "fruits", "wholesale plant"],
     "零售": ["retail", "shop", "shopping", "ecommerce", "e-commerce", "store"],
     "教育": ["school", "college", "university", "education", "academy"],
     "政府": ["government", "gov", "ministry", "municipal", "police", "public sector", "driver's license", "driver license", "citizenship"],
@@ -352,6 +355,29 @@ INDUSTRY_KEYWORDS = {
     "能源": ["energy", "oil", "gas", "power", "electric", "utility"],
     "通信": ["telecom", "telecommunications", "mobile", "carrier", "broadband", "communications"],
     "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency", "casino", "betting", "gaming", "sportsbook", "fitness", "publishing", "publisher"],
+}
+
+INDUSTRY_PHRASE_BOOSTS = {
+    "制造业": [
+        r"\bmanufacturer of\b",
+        r"\bfull[- ]service manufacturer\b",
+        r"\bmetalized packaging\b",
+        r"\banodized aluminum\b",
+        r"\bpackaging\b",
+        r"\bindustrial installations\b",
+    ],
+    "农业": [
+        r"\bchristmas trees?\b",
+        r"\bwholesale plant nursery\b",
+        r"\bnursery plants?\b",
+        r"\bplant nursery\b",
+        r"\btrees?, fruits?, topiaries?, roses?, perennials?, shrubs?\b",
+        r"\bgrow(?:er|ing)\b",
+    ],
+    "交通": [
+        r"\btransport services\b",
+        r"\bdistribution systems\b",
+    ],
 }
 
 REGION_KEYWORDS = {
@@ -901,6 +927,21 @@ def _infer_industry_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
             if matches:
                 scores[industry] += matches * weight
                 sources[industry].append(source_name)
+        for industry, patterns in INDUSTRY_PHRASE_BOOSTS.items():
+            phrase_hits = sum(1 for pattern in patterns if re.search(pattern, normalized))
+            if phrase_hits:
+                scores[industry] += phrase_hits * (weight + 3)
+                sources[industry].append(f"{source_name}:phrase")
+
+        # When the text clearly says the company is a manufacturer or grower,
+        # downstream customer industries should not override the core business.
+        if any(token in normalized for token in ("manufacturer", "manufacturing", "grower", "nursery", "farm")):
+            if scores.get("制造业"):
+                scores["医疗"] = max(0, scores.get("医疗", 0) - weight * 2)
+                scores["零售"] = max(0, scores.get("零售", 0) - weight)
+            if scores.get("农业"):
+                scores["零售"] = max(0, scores.get("零售", 0) - weight * 2)
+                scores["医疗"] = max(0, scores.get("医疗", 0) - weight)
     if not scores:
         return {"industry": "未知", "source": "unknown", "score": 0}
     industry = max(scores.items(), key=lambda item: (item[1], -INDUSTRY_PRIORITY.index(item[0])))[0]
