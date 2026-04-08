@@ -1355,8 +1355,10 @@ def build_behavior_payload() -> dict[str, Any]:
 
 
 def warm_api_payloads() -> None:
-    # Prime the heavyweight normalized intelligence and top-level payloads
-    # once during startup so the first page load is not blocked on cold work.
+    # Prime normalized intelligence and top-level payloads once during startup
+    # so the first page load is not blocked on cold work or stale cache.
+    with get_db_connection() as connection:
+        ensure_normalized_intelligence(connection, force=False)
     build_intelligence_payload()
     build_behavior_payload()
 
