@@ -228,7 +228,7 @@ class BehaviorAnalysisTests(unittest.TestCase):
                 self.assertIsNotNone(detail)
                 self.assertEqual(event_id, events[0]["id"])
 
-    def test_intelligence_payload_refreshes_only_when_source_data_changes(self) -> None:
+    def test_intelligence_payload_uses_cached_normalized_events_during_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             db_path = tmp_path / "collector.db"
@@ -289,7 +289,7 @@ class BehaviorAnalysisTests(unittest.TestCase):
                         connection.commit()
 
                     build_intelligence_payload()
-                    self.assertEqual(2, mocked_refresh.call_count)
+                    self.assertEqual(1, mocked_refresh.call_count)
 
     def test_data_leak_events_are_not_capped_at_50_when_more_records_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
