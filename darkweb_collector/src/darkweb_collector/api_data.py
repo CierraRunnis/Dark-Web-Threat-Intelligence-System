@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 import json
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from darkweb_collector.config import get_site_config, load_site_configs
-from darkweb_collector.db import get_db_connection
+from darkweb_collector.db import get_db_connection, get_normalized_intelligence_cache_state
 from darkweb_collector.normalized_intelligence import (
     build_behavior_payload as build_behavior_payload_from_events,
     ensure_normalized_intelligence,
@@ -76,6 +77,9 @@ RANSOMWARE_EVENT_LIMIT = 300
 RANSOMWARE_SOURCE_QUERY_LIMIT = 500
 DATA_LEAK_EVENT_LIMIT = 3000
 VULNERABILITY_EVENT_LIMIT = 500
+
+_PAYLOAD_CACHE_LOCK = Lock()
+_PAYLOAD_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -1012,6 +1016,42 @@ def _build_threat_heatmap(data_leak_events: list[dict[str, str]], ransomware_eve
     return {"regions": regions, "categories": categories, "values": values}
 
 
+def _latest_job_marker(connection) -> str:
+    row = connection.execute(
+        """
+        SELECT MAX(COALESCE(finished_at, started_at, enqueued_at)) AS latest
+        FROM crawl_jobs
+        """
+    ).fetchone()
+    return str(row["latest"] or "") if row else ""
+
+
+def _payload_cache_key(connection, namespace: str) -> str:
+    cache_state = get_normalized_intelligence_cache_state(connection) or {}
+    latest_jobs = _latest_job_marker(connection) if namespace == "intelligence" else ""
+    payload = {
+        "namespace": namespace,
+        "source_signature": cache_state.get("source_signature") or "",
+        "refreshed_at": cache_state.get("refreshed_at") or "",
+        "event_count": int(cache_state.get("event_count") or 0),
+        "latest_jobs": latest_jobs,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _get_cached_payload(namespace: str, cache_key: str) -> Any | None:
+    with _PAYLOAD_CACHE_LOCK:
+        entry = _PAYLOAD_CACHE.get(namespace)
+        if entry and entry.get("key") == cache_key:
+            return entry.get("payload")
+    return None
+
+
+def _set_cached_payload(namespace: str, cache_key: str, payload: Any) -> None:
+    with _PAYLOAD_CACHE_LOCK:
+        _PAYLOAD_CACHE[namespace] = {"key": cache_key, "payload": payload}
+
+
 def _safe_pct(current: int, previous: int) -> int:
     if previous <= 0:
         return 100 if current > 0 else 0
@@ -1129,6 +1169,10 @@ def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[st
 def build_intelligence_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
         normalized_events = ensure_normalized_intelligence(connection)
+        cache_key = _payload_cache_key(connection, "intelligence")
+        cached = _get_cached_payload("intelligence", cache_key)
+        if cached is not None:
+            return cached
         behavior_payload = build_behavior_payload_from_events(connection, events=normalized_events)
         crawl_jobs = [
             dict(row)
@@ -1237,7 +1281,7 @@ def build_intelligence_payload() -> dict[str, Any]:
     situation_alerts = _build_vulnerability_alert_stream(vulnerability_events, limit=4) + _build_situation_alerts(crawl_jobs)
     dashboard_summary_cards = dashboard_summary + vulnerability_summary[:1]
 
-    return {
+    payload = {
         "monitoringStatus": _build_monitoring_status(
             [{"fetched_at": item.get("disclosure_time")} for item in normalized_events],
             crawl_jobs,
@@ -1294,12 +1338,27 @@ def build_intelligence_payload() -> dict[str, Any]:
         "threatExecutivePriorityEvents": executive_priority_events,
         "threatExecutiveCoverage": executive_coverage,
     }
+    _set_cached_payload("intelligence", cache_key, payload)
+    return payload
 
 
 def build_behavior_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
         normalized_events = ensure_normalized_intelligence(connection)
-        return build_behavior_payload_from_events(connection, events=normalized_events)
+        cache_key = _payload_cache_key(connection, "behavior")
+        cached = _get_cached_payload("behavior", cache_key)
+        if cached is not None:
+            return cached
+        payload = build_behavior_payload_from_events(connection, events=normalized_events)
+        _set_cached_payload("behavior", cache_key, payload)
+        return payload
+
+
+def warm_api_payloads() -> None:
+    # Prime the heavyweight normalized intelligence and top-level payloads
+    # once during startup so the first page load is not blocked on cold work.
+    build_intelligence_payload()
+    build_behavior_payload()
 
 
 def build_jobs_payload() -> dict[str, Any]:
