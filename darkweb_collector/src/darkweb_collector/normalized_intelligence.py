@@ -659,6 +659,66 @@ def _display_region(country: str | None, macro_region: str | None) -> str:
     return "未知"
 
 
+def _clean_display_subject(value: str | None) -> str:
+    subject = _normalize_whitespace(value)
+    if not subject:
+        return ""
+    subject = re.sub(r"^[^\w\u4e00-\u9fff]+", "", subject)
+    subject = re.sub(r"\s*\(.*$", "", subject)
+    subject = re.sub(r"\s*\([^)]*\)$", "", subject)
+    subject = subject.strip(" -_:,.;")
+    return subject[:80]
+
+
+def _pick_display_subject(event: dict[str, Any]) -> str:
+    victim = _clean_display_subject(event.get("victim"))
+    raw_title = _clean_display_subject(event.get("title"))
+    if victim and victim not in {"未知实体", "未知"}:
+        if _looks_like_domain(victim) and raw_title and not _looks_like_domain(raw_title) and len(raw_title) >= len(victim):
+            return raw_title
+        if _looks_like_domain(victim) and raw_title and len(raw_title.split()) >= 2:
+            return raw_title
+        return victim
+    return raw_title or "该目标"
+
+
+def build_display_title(event: dict[str, Any]) -> str:
+    raw_title = _normalize_label(event.get("title"))
+    event_type = str(event.get("event_type") or "")
+    subject = _pick_display_subject(event)
+
+    if event_type == "ransomware":
+        attacker = _normalize_label(event.get("attacker")) or "未知组织"
+        category = _normalize_label(event.get("category"))
+        if category == "已公开":
+            return f"{subject}遭{attacker}勒索披露"
+        if category == "协商中":
+            return f"{subject}遭{attacker}勒索攻击（协商中）"
+        if category == "传输中":
+            return f"{subject}遭{attacker}勒索攻击（传输中）"
+        if category == "已停止":
+            return f"{subject}遭{attacker}勒索攻击（已停止）"
+        return f"{subject}疑似遭{attacker}勒索攻击"
+
+    if event_type == "data_leak":
+        leak_type = _normalize_label(event.get("leak_type") or event.get("category"))
+        leak_title_map = {
+            "数据库泄露": "疑似数据库泄露",
+            "凭证泄露": "疑似凭证数据泄露",
+            "源代码泄露": "疑似源代码泄露",
+            "证件文档": "疑似证件文档泄露",
+            "交易售卖": "数据疑似被售卖",
+            "数据泄露": "疑似数据泄露",
+        }
+        suffix = leak_title_map.get(leak_type, "疑似数据泄露")
+        return f"{subject}{suffix}"
+
+    if event_type == "vulnerability":
+        return raw_title or "公开源漏洞预警"
+
+    return raw_title or subject or "未命名事件"
+
+
 def _is_noisy_domain(domain: str | None) -> bool:
     normalized = _normalize_domain(domain)
     return not normalized or normalized.endswith(".onion") or normalized in NOISY_VICTIM_DOMAINS
@@ -2142,6 +2202,7 @@ def load_normalized_event_detail(connection, event_id: str, refresh: bool = Fals
 
 def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
+    display_title = build_display_title(event)
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
@@ -2150,7 +2211,8 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
         "disclosureTime": _format_date(event.get("disclosure_time")),
         "disclosureTimeRaw": event.get("disclosure_time") or "",
         "rawSourceTypeLabel": metadata.get("raw_source_type_label") or humanize_raw_source_type(event["raw_source_type"]),
-        "title": event["title"],
+        "title": display_title,
+        "originalTitle": event["title"],
         "category": event["category"],
         "attacker": event["attacker"],
         "industry": event["industry"],
@@ -2176,13 +2238,15 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
 
 def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
+    display_title = build_display_title(event)
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
         "normalized_event_type": event["event_type"],
         "raw_source_type": event["raw_source_type"],
         "raw_source_type_label": metadata.get("raw_source_type_label") or humanize_raw_source_type(event["raw_source_type"]),
-        "title": event["title"],
+        "title": display_title,
+        "original_title": event["title"],
         "disclosure_time": _format_date(event.get("disclosure_time")),
         "disclosure_time_raw": event.get("disclosure_time") or "",
         "attacker": event["attacker"],
@@ -2222,7 +2286,7 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "reference_urls": metadata.get("reference_urls") or event.get("mirror_resources") or [],
         "source_labels": metadata.get("source_labels") or [],
         "source_type_label": metadata.get("source_type_label") or humanize_source_type(metadata.get("source_type")),
-        "original_title": metadata.get("original_title") or "",
+        "original_title": metadata.get("original_title") or event["title"],
         "original_summary": metadata.get("original_summary") or "",
     }
 
@@ -2383,7 +2447,8 @@ def build_behavior_payload(connection, events: list[dict[str, Any]] | None = Non
         "anomalyEvents": [
             {
                 "id": item["event_id"],
-                "title": item["title"],
+                "title": build_display_title(item),
+                "originalTitle": item["title"],
                 "attacker": item["attacker"],
                 "victim": item["victim"],
                 "category": item["category"],

@@ -12,6 +12,7 @@ from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.db import get_db_connection, get_normalized_intelligence_cache_state
 from darkweb_collector.normalized_intelligence import (
     build_behavior_payload as build_behavior_payload_from_events,
+    build_display_title,
     ensure_normalized_intelligence,
     load_normalized_event_detail,
     load_normalized_events,
@@ -1123,7 +1124,8 @@ def _build_executive_priority_events(events: list[dict[str, Any]], limit: int = 
         {
             "id": item["event_id"],
             "disclosureDate": _format_date(item.get("disclosure_time")),
-            "title": item.get("title") or "未命名事件",
+            "title": build_display_title(item),
+            "originalTitle": item.get("title") or "未命名事件",
             "attacker": item.get("attacker") or "未知",
             "country": item.get("country") or "未知",
             "industry": item.get("industry") or "未知",

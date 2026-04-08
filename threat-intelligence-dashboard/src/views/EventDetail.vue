@@ -54,6 +54,10 @@
             <span>标题</span>
             <strong>{{ eventDetail.title || '未知' }}</strong>
           </div>
+          <div v-if="eventDetail.original_title && eventDetail.original_title !== eventDetail.title">
+            <span>原始标题</span>
+            <strong>{{ eventDetail.original_title }}</strong>
+          </div>
           <div v-if="isVulnerability">
             <span>CVE</span>
             <strong>{{ eventDetail.cve_id || '未知' }}</strong>
