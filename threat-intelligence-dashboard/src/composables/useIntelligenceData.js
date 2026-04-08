@@ -1,8 +1,9 @@
 import { ref } from 'vue'
 import * as fallbackModule from '@/mock/intelligence'
 
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === '1'
 const fallbackData = { ...fallbackModule }
-const intelligenceData = ref({ ...fallbackData })
+const intelligenceData = ref(DEMO_MODE ? { ...fallbackData } : {})
 const loading = ref(false)
 const error = ref(null)
 const RETRY_DELAY_MS = 3000
@@ -46,10 +47,12 @@ async function loadIntelligenceData() {
       return response.json()
     })
     .then((payload) => {
-      intelligenceData.value = {
-        ...fallbackData,
-        ...payload,
-      }
+      intelligenceData.value = DEMO_MODE
+        ? {
+            ...fallbackData,
+            ...payload,
+          }
+        : { ...payload }
       hasLoaded = true
       clearRetryTimer()
       return intelligenceData.value
