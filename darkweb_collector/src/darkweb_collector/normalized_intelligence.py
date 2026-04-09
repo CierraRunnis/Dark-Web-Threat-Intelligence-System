@@ -596,6 +596,11 @@ def _format_date(value: str | None) -> str:
     return dt.astimezone().strftime("%Y-%m-%d")
 
 
+def _event_updated_time(event: dict[str, Any]) -> str:
+    metadata = event.get("metadata") or {}
+    return str(metadata.get("updated_time") or event.get("updated_at") or event.get("disclosure_time") or "")
+
+
 def _event_hash(*parts: str) -> str:
     payload = "|".join((part or "").strip() for part in parts)
     return sha1(payload.encode("utf-8")).hexdigest()[:16]
@@ -1208,6 +1213,47 @@ def _resource_entry(path: Path, label: str) -> dict[str, str]:
     return {"label": label, "url": _public_output_url(path)}
 
 
+def _artifact_candidate_stems(*values: str) -> list[str]:
+    seen: set[str] = set()
+    stems: list[str] = []
+    for value in values:
+        normalized = safe_stem(str(value or "").strip())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            stems.append(normalized)
+    return stems
+
+
+def _resolve_artifact_resources(details_dir: Path, stems: list[str], fallback_tokens: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    resources: list[dict[str, str]] = []
+    screenshots: list[dict[str, str]] = []
+    seen_files: set[Path] = set()
+
+    def add_if_exists(path: Path, label: str, bucket: list[dict[str, str]]) -> None:
+        if path.exists() and path not in seen_files:
+            seen_files.add(path)
+            bucket.append(_resource_entry(path, label))
+
+    for stem in stems:
+        add_if_exists(details_dir / f"{stem}.html", "本地HTML镜像", resources)
+        add_if_exists(details_dir / f"{stem}.json", "本地JSON镜像", resources)
+        add_if_exists(details_dir / f"{stem}.png", "详情截图", screenshots)
+
+    if not screenshots or not resources:
+        for token in fallback_tokens:
+            safe_token = safe_stem(token)
+            if not safe_token:
+                continue
+            for path in details_dir.glob(f"*{safe_token}*.html"):
+                add_if_exists(path, "本地HTML镜像", resources)
+            for path in details_dir.glob(f"*{safe_token}*.json"):
+                add_if_exists(path, "本地JSON镜像", resources)
+            for path in details_dir.glob(f"*{safe_token}*.png"):
+                add_if_exists(path, "详情截图", screenshots)
+
+    return resources, screenshots
+
+
 def _forum_output_resources(row_dict: dict[str, Any]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     output_dir = _site_output_dir(str(row_dict.get("site_name") or ""))
     topic_url = _normalize_label(row_dict.get("topic_url"))
@@ -1216,45 +1262,51 @@ def _forum_output_resources(row_dict: dict[str, Any]) -> tuple[list[dict[str, st
     section = _normalize_label(row_dict.get("section")) or "section"
     detail_dir = output_dir / section / "details"
     artifact_stem = _event_hash(topic_url)[:10]
-    html_path = detail_dir / f"{artifact_stem}.html"
-    json_path = detail_dir / f"{artifact_stem}.json"
-    png_path = detail_dir / f"{artifact_stem}.png"
-    resources: list[dict[str, str]] = []
-    screenshots: list[dict[str, str]] = []
-    if html_path.exists():
-        resources.append(_resource_entry(html_path, "本地HTML镜像"))
-    if json_path.exists():
-        resources.append(_resource_entry(json_path, "本地JSON镜像"))
-    if png_path.exists():
-        screenshots.append(_resource_entry(png_path, "详情截图"))
-    return resources, screenshots
+    return _resolve_artifact_resources(
+        detail_dir,
+        [artifact_stem],
+        [artifact_stem, _clean_display_subject(row_dict.get("title")), topic_url.rsplit("/", 1)[-1]],
+    )
 
 
-def _victim_output_resources(row_dict: dict[str, Any], raw_json: dict[str, Any]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def _victim_output_resources(
+    row_dict: dict[str, Any],
+    raw_json: dict[str, Any],
+    detail_raw_json: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     site_name = str(row_dict.get("site_name") or "")
     output_dir = _site_output_dir(site_name)
     if output_dir is None:
         return [], []
+    detail_raw_json = detail_raw_json or {}
     content_hash = str(raw_json.get("content_hash") or row_dict.get("content_hash") or "")
+    detail_content_hash = str(detail_raw_json.get("content_hash") or "")
     domain = str(raw_json.get("domain") or row_dict.get("domain") or "")
+    detail_domain = str(detail_raw_json.get("website") or "")
     name = str(raw_json.get("name") or row_dict.get("name") or "")
-    if site_name == "lynx":
-        artifact_stem = safe_stem(f"{content_hash[:10]}_{name[:30]}")
-    else:
-        artifact_stem = safe_stem(f"{content_hash[:10]}_{domain or name}")
+    detail_name = str(detail_raw_json.get("company_name") or detail_raw_json.get("page_title") or "")
+    detail_url = str(raw_json.get("detail_url") or row_dict.get("detail_url") or "")
+    artifact_stem = str(detail_raw_json.get("artifact_stem") or raw_json.get("artifact_stem") or "").strip()
     detail_dir = output_dir / "details"
-    html_path = detail_dir / f"{artifact_stem}.html"
-    json_path = detail_dir / f"{artifact_stem}.json"
-    png_path = detail_dir / f"{artifact_stem}.png"
-    resources: list[dict[str, str]] = []
-    screenshots: list[dict[str, str]] = []
-    if html_path.exists():
-        resources.append(_resource_entry(html_path, "本地HTML镜像"))
-    if json_path.exists():
-        resources.append(_resource_entry(json_path, "本地JSON镜像"))
-    if png_path.exists():
-        screenshots.append(_resource_entry(png_path, "详情截图"))
-    return resources, screenshots
+    stems = _artifact_candidate_stems(
+        artifact_stem,
+        safe_stem(f"{content_hash[:10]}_{name[:30]}"),
+        safe_stem(f"{content_hash[:10]}_{domain or name}"),
+        safe_stem(f"{detail_content_hash[:10]}_{detail_name[:30]}"),
+        safe_stem(f"{detail_content_hash[:10]}_{detail_domain or detail_name or name}"),
+        _event_hash(detail_url)[:10] if detail_url else "",
+        safe_stem(detail_url),
+    )
+    fallback_tokens = [
+        name[:30],
+        detail_name[:30],
+        domain,
+        detail_domain,
+        _extract_domain_from_url(detail_url),
+        _clean_display_subject(name),
+        _clean_display_subject(detail_name),
+    ]
+    return _resolve_artifact_resources(detail_dir, stems, [item for item in fallback_tokens if item])
 
 
 def _extract_domains(*texts: str) -> list[str]:
@@ -1631,6 +1683,7 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
             "section": str(row.get("section") or ""),
             "source": str(row.get("site_name") or ""),
             "source_label": _label_source(row.get("site_name")),
+            "updated_time": row.get("fetched_at") or "",
             "victim_candidates": _clean_entity_candidates(victim_candidates)[:8],
             "domain_candidates": domain_candidates[:8],
             "published_label": _format_date(row.get("fetched_at")),
@@ -1725,7 +1778,7 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
                 industry = enrichment["industry"]
     region = geo_bundle["macro_region"]
     severity = _severity_from_status(status)
-    local_resources, local_screenshots = _victim_output_resources(row, raw_json)
+    local_resources, local_screenshots = _victim_output_resources(row, raw_json, detail_raw_json)
     mirror_resources = _coerce_resource_list(detail_url)
     mirror_resources.extend(local_resources)
     screenshot_resources = _coerce_resource_list(raw_json.get("thumbnails"))
@@ -1769,6 +1822,7 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
             "claimed_size_gb": row.get("claimed_size_gb"),
             "source": str(row.get("site_name") or ""),
             "source_label": _label_source(row.get("site_name")),
+            "updated_time": row.get("fetched_at_utc") or detail_raw_json.get("fetched_at_utc") or disclosure_time,
             "published_label": _format_date(disclosure_time),
             "resource_count": len(mirror_resources),
             "country_source": geo_bundle["source"],
@@ -1841,6 +1895,7 @@ def _build_vulnerability_base_event(row: dict[str, Any]) -> dict[str, Any]:
             "source_label": source_label,
             "source_labels": [source_label],
             "source_names": [source_name] if source_name else [],
+            "updated_time": row.get("last_seen_at") or row.get("disclosure_time") or "",
             "source_type": _normalize_label(row.get("source_type")) or "public",
             "source_type_label": humanize_source_type(row.get("source_type")),
             "raw_source_type_label": humanize_raw_source_type("vulnerability_records"),
@@ -2203,6 +2258,7 @@ def load_normalized_event_detail(connection, event_id: str, refresh: bool = Fals
 def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
     display_title = build_display_title(event)
+    updated_time_raw = _event_updated_time(event)
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
@@ -2210,6 +2266,9 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
         "raw_source_type": event["raw_source_type"],
         "disclosureTime": _format_date(event.get("disclosure_time")),
         "disclosureTimeRaw": event.get("disclosure_time") or "",
+        "disclosureDate": _format_date(event.get("disclosure_time")),
+        "updatedTime": _format_dt(updated_time_raw),
+        "updatedTimeRaw": updated_time_raw,
         "rawSourceTypeLabel": metadata.get("raw_source_type_label") or humanize_raw_source_type(event["raw_source_type"]),
         "title": display_title,
         "originalTitle": event["title"],
@@ -2239,6 +2298,7 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
 def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
     display_title = build_display_title(event)
+    updated_time_raw = _event_updated_time(event)
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
@@ -2249,6 +2309,8 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "original_title": event["title"],
         "disclosure_time": _format_date(event.get("disclosure_time")),
         "disclosure_time_raw": event.get("disclosure_time") or "",
+        "updated_time": _format_dt(updated_time_raw),
+        "updated_time_raw": updated_time_raw,
         "attacker": event["attacker"],
         "disclosure_url": event.get("source_url") or "",
         "detail_text": event.get("detail_text") or "",

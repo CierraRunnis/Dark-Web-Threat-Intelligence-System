@@ -35,7 +35,8 @@
 
           <div class="ti-table-shell table-shell">
             <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="auto">
-              <el-table-column prop="disclosureTime" label="披露时间" width="170" />
+              <el-table-column prop="disclosureDate" label="披露日期" width="140" />
+              <el-table-column prop="updatedTime" label="最近更新" width="170" />
               <el-table-column prop="title" label="标题" min-width="420" show-overflow-tooltip />
               <el-table-column prop="category" label="事件分类" width="150" />
               <el-table-column prop="attacker" label="攻击者" width="160" show-overflow-tooltip />
@@ -98,7 +99,7 @@ function parseDisclosureTime(value) {
 
 const sortedEvents = computed(() => {
   return [...ransomwareEvents.value].sort((left, right) => {
-    return parseDisclosureTime(right.disclosureTimeRaw || right.disclosureTime) - parseDisclosureTime(left.disclosureTimeRaw || left.disclosureTime)
+    return parseDisclosureTime(right.updatedTimeRaw || right.disclosureTimeRaw || right.disclosureTime) - parseDisclosureTime(left.updatedTimeRaw || left.disclosureTimeRaw || left.disclosureTime)
   })
 })
 

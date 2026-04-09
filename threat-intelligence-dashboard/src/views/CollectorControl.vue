@@ -38,6 +38,74 @@
 
     <section class="ti-card ti-reveal-up">
       <div class="ti-card-header">
+        <div class="ti-card-title">公开源漏洞同步控制</div>
+        <div class="health-actions">
+          <el-select v-model="vulnerabilityIntervalHours" style="width: 150px">
+            <el-option label="每 1 小时" :value="1" />
+            <el-option label="每 4 小时" :value="4" />
+          </el-select>
+          <el-button plain :loading="vulnerabilityRunLoading" @click="runVulnerabilitySyncOnce">
+            同步一次
+          </el-button>
+          <el-button
+            type="success"
+            :loading="vulnerabilityContinuousLoading"
+            :disabled="vulnerabilitySync.enabled"
+            @click="startVulnerabilitySync"
+          >
+            开始自动同步
+          </el-button>
+          <el-button
+            type="danger"
+            plain
+            :loading="vulnerabilityContinuousLoading"
+            :disabled="!vulnerabilitySync.enabled"
+            @click="stopVulnerabilitySync"
+          >
+            停止自动同步
+          </el-button>
+          <StatusBadge
+            :label="vulnerabilitySync.running ? '同步中' : vulnerabilitySync.enabled ? '自动运行中' : '未运行'"
+            :tone="vulnerabilitySync.running ? 'warning' : vulnerabilitySync.enabled ? 'success' : 'muted'"
+            :dot="false"
+          />
+        </div>
+      </div>
+      <div class="ti-card-body">
+        <div class="vulnerability-sync-grid">
+          <div>
+            <span>自动同步</span>
+            <strong>{{ vulnerabilitySync.enabled ? '已开启' : '未开启' }}</strong>
+          </div>
+          <div>
+            <span>同步间隔</span>
+            <strong>{{ vulnerabilitySync.interval_seconds ? `${Math.round(vulnerabilitySync.interval_seconds / 3600)} 小时` : '未设置' }}</strong>
+          </div>
+          <div>
+            <span>漏洞记录数</span>
+            <strong>{{ vulnerabilitySync.record_count || 0 }}</strong>
+          </div>
+          <div>
+            <span>最近同步</span>
+            <strong>{{ vulnerabilitySync.last_success_at || '暂无' }}</strong>
+          </div>
+          <div>
+            <span>最新漏洞日期</span>
+            <strong>{{ vulnerabilitySync.latest_disclosure_time || '暂无' }}</strong>
+          </div>
+          <div>
+            <span>最近结果</span>
+            <strong>{{ vulnerabilitySync.last_ingested ? `同步 ${vulnerabilitySync.last_ingested} 条` : '暂无' }}</strong>
+          </div>
+        </div>
+        <div v-if="vulnerabilitySync.last_error" class="empty-state vulnerability-sync-error">
+          <p>最近错误：{{ vulnerabilitySync.last_error }}</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="ti-card ti-reveal-up">
+      <div class="ti-card-header">
         <div class="ti-card-title">站点健康表</div>
         <div class="health-actions">
           <el-button plain @click="refreshAllPanels">刷新状态</el-button>
@@ -89,7 +157,7 @@
                     size="small"
                     type="primary"
                     :loading="!!runningSiteMap[row.site_name]"
-                    :disabled="row.running_jobs > 0 || !row.enabled"
+                    :disabled="isSiteRunBlocked(row) || !row.enabled"
                     @click="runSiteOnce(row.site_name)"
                   >
                     运行一次
@@ -156,12 +224,20 @@ const jobsData = computed(() => jobsState.value || {})
 const continuousStatus = computed(() => continuousState.value || {})
 const siteHealth = computed(() => jobsData.value.site_health || [])
 const recentFailures = computed(() => jobsData.value.recent_failures || [])
+const vulnerabilitySync = computed(() => jobsData.value.vulnerability_sync || {})
 
 const runningAllSites = ref(false)
 const continuousLoading = ref(false)
+const vulnerabilityRunLoading = ref(false)
+const vulnerabilityContinuousLoading = ref(false)
+const vulnerabilityIntervalHours = ref(1)
 const runningSiteMap = ref({})
 const togglingSiteMap = ref({})
 let pollTimer = null
+
+function isSiteRunBlocked(row) {
+  return row?.blockingReason === 'active_seed_job' || row?.activeSeedJobStatus === 'running' || row?.activeSeedJobStatus === 'enqueued'
+}
 
 function setSiteRunning(siteName, value) {
   runningSiteMap.value = {
@@ -282,6 +358,67 @@ async function stopContinuousRun() {
   }
 }
 
+async function runVulnerabilitySyncOnce() {
+  vulnerabilityRunLoading.value = true
+  try {
+    const response = await fetch('/api/vulnerabilities/sync/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 300 }),
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败：${response.status}`)
+    }
+    const payload = await response.json()
+    ElMessage.success(payload.message || '已触发漏洞同步')
+    await refreshAllPanels()
+  } catch (error) {
+    ElMessage.error(error.message || '漏洞同步触发失败')
+  } finally {
+    vulnerabilityRunLoading.value = false
+  }
+}
+
+async function startVulnerabilitySync() {
+  vulnerabilityContinuousLoading.value = true
+  try {
+    const response = await fetch('/api/vulnerabilities/sync/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_seconds: vulnerabilityIntervalHours.value * 3600, limit: 300 }),
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败：${response.status}`)
+    }
+    const payload = await response.json()
+    ElMessage.success(payload.message || '已开始漏洞自动同步')
+    await refreshAllPanels()
+  } catch (error) {
+    ElMessage.error(error.message || '启动漏洞自动同步失败')
+  } finally {
+    vulnerabilityContinuousLoading.value = false
+  }
+}
+
+async function stopVulnerabilitySync() {
+  vulnerabilityContinuousLoading.value = true
+  try {
+    const response = await fetch('/api/vulnerabilities/sync/stop', {
+      method: 'POST',
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败：${response.status}`)
+    }
+    const payload = await response.json()
+    ElMessage.success(payload.message || '已停止漏洞自动同步')
+    await refreshAllPanels()
+  } catch (error) {
+    ElMessage.error(error.message || '停止漏洞自动同步失败')
+  } finally {
+    vulnerabilityContinuousLoading.value = false
+  }
+}
+
 onMounted(() => {
   pollTimer = window.setInterval(() => {
     refreshContinuous()
@@ -354,6 +491,36 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.vulnerability-sync-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.vulnerability-sync-grid div {
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--ti-border-soft);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.vulnerability-sync-grid span {
+  display: block;
+  color: var(--ti-text-muted);
+  font-size: 12px;
+}
+
+.vulnerability-sync-grid strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--ti-text-primary);
+  font-size: 22px;
+}
+
+.vulnerability-sync-error {
+  margin-top: 14px;
+}
+
 .row-actions {
   display: flex;
   gap: 8px;
@@ -403,6 +570,16 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1100px) {
   .control-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .vulnerability-sync-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .vulnerability-sync-grid {
     grid-template-columns: 1fr;
   }
 }

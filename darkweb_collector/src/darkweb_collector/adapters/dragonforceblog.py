@@ -217,6 +217,7 @@ class DragonforceblogAdapter(SiteAdapter):
                         detail_result.metadata.get("artifact_stem")
                         or safe_stem(detail_result.target_url)
                     )
+                    detail_result.payload["artifact_stem"] = artifact_stem
 
                     # Save raw HTML
                     if detail_result.raw_html is not None:
