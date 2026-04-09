@@ -7,7 +7,7 @@ from darkweb_collector.models import DetailResult, DetailTask, RunContext, SeedR
 from darkweb_collector.pipeline import persist_run
 from darkweb_collector.runtime import default_db_path
 from darkweb_collector.sites.lynx import parse_lynx_detail_page, parse_lynx_list_page
-from darkweb_collector.tor_fetch import fetch_url
+from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url
 from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
 
@@ -126,16 +126,22 @@ class LynxAdapter(SiteAdapter):
             DetailResult or None if failed
         """
         try:
-            html = self._fetch_html(
-                detail_task.target_url, config, config.detail_fetch_mode
+            html, screenshot_png = fetch_page_artifacts(
+                url=detail_task.target_url,
+                mode=config.detail_fetch_mode,
+                timeout_seconds=config.fetch_timeout_seconds,
+                render_wait_seconds=config.render_wait_seconds,
+                screenshot_selectors=(".chat__block", ".chat__block-title", ".chat__block-descr"),
             )
             detail = parse_lynx_detail_page(detail_task.target_url, html)
+            detail["artifact_stem"] = detail_task.metadata.get("artifact_stem") or ""
 
             return DetailResult(
                 site_name=self.site_name,
                 target_url=detail_task.target_url,
                 payload=detail,
                 raw_html=html,
+                screenshot_png=screenshot_png,
                 metadata=detail_task.metadata,
             )
         except Exception as e:
@@ -187,10 +193,13 @@ class LynxAdapter(SiteAdapter):
                         detail_result.metadata.get("artifact_stem")
                         or safe_stem(detail_result.target_url)
                     )
+                    detail_result.payload["artifact_stem"] = artifact_stem
 
                     # Save raw HTML
                     if detail_result.raw_html is not None:
                         dump_text(details_dir / f"{artifact_stem}.html", detail_result.raw_html)
+                    if detail_result.screenshot_png is not None:
+                        (details_dir / f"{artifact_stem}.png").write_bytes(detail_result.screenshot_png)
 
                     # Save parsed JSON
                     dump_json(details_dir / f"{artifact_stem}.json", detail_result.payload)

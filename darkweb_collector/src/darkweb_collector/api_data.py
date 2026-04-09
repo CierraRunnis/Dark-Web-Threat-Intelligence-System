@@ -74,6 +74,7 @@ JOB_STATUS_LABELS = {
 
 RECENT_FAILURE_WINDOW_HOURS = 24
 STALE_RUNNING_MINUTES = 30
+STALE_ENQUEUED_MINUTES = 10
 RANSOMWARE_EVENT_LIMIT = 300
 RANSOMWARE_SOURCE_QUERY_LIMIT = 500
 DATA_LEAK_EVENT_LIMIT = 3000
@@ -176,8 +177,19 @@ def _is_stale_running(started_at: str | None, finished_at: str | None) -> bool:
     return started < (_now_utc() - timedelta(minutes=STALE_RUNNING_MINUTES))
 
 
+def _is_stale_enqueued(enqueued_at: str | None, started_at: str | None, finished_at: str | None) -> bool:
+    if started_at or finished_at:
+        return False
+    enqueued = _parse_dt(enqueued_at)
+    if enqueued is None:
+        return False
+    return enqueued < (_now_utc() - timedelta(minutes=STALE_ENQUEUED_MINUTES))
+
+
 def _effective_job_status(row: dict[str, Any]) -> str:
     status = row.get("status") or ""
+    if status == "enqueued" and _is_stale_enqueued(row.get("enqueued_at"), row.get("started_at"), row.get("finished_at")):
+        return "stale"
     if status == "running" and _is_stale_running(row.get("started_at"), row.get("finished_at")):
         return "stale"
     return status
@@ -186,7 +198,7 @@ def _effective_job_status(row: dict[str, Any]) -> str:
 def _job_event_dt(row: dict[str, Any] | None) -> datetime | None:
     if row is None:
         return None
-    return _parse_dt(row.get("finished_at") or row.get("started_at"))
+    return _parse_dt(row.get("finished_at") or row.get("started_at") or row.get("enqueued_at"))
 
 
 def _last_days(days: int = 7) -> list[datetime]:
@@ -598,7 +610,7 @@ def build_vulnerability_records(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        normalized_events = load_normalized_events(connection)
+        normalized_events = ensure_normalized_intelligence(connection)
 
     vulnerability_events = [
         normalized_event_to_list_item(item)
@@ -629,6 +641,7 @@ def build_vulnerability_records(
 
 def build_vulnerability_detail(event_id: str) -> dict[str, Any] | None:
     with get_db_connection() as connection:
+        ensure_normalized_intelligence(connection)
         event = load_normalized_event_detail(connection, event_id)
     if event is None or event.get("event_type") != "vulnerability":
         return None
@@ -1178,7 +1191,7 @@ def build_intelligence_payload() -> dict[str, Any]:
             dict(row)
             for row in connection.execute(
                 """
-                SELECT site_name, job_type, status, target, started_at, finished_at, error_message
+                SELECT site_name, job_type, status, target, enqueued_at, started_at, finished_at, error_message
                 FROM crawl_jobs
                 ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
                 LIMIT 100
@@ -1189,7 +1202,7 @@ def build_intelligence_payload() -> dict[str, Any]:
     def sort_by_disclosure(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(
             items,
-            key=lambda item: _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
+            key=lambda item: _parse_dt(str((item.get("metadata") or {}).get("updated_time") or item.get("disclosure_time") or "")) or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
         )
 
@@ -1369,7 +1382,7 @@ def build_jobs_payload() -> dict[str, Any]:
             dict(row)
             for row in connection.execute(
                 """
-                SELECT site_name, job_type, status, queue_name, target, started_at, finished_at, error_message
+                SELECT site_name, job_type, status, queue_name, target, enqueued_at, started_at, finished_at, error_message
                 FROM crawl_jobs
                 ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
                 LIMIT 300
@@ -1388,6 +1401,11 @@ def build_jobs_payload() -> dict[str, Any]:
                 "SELECT site_name, COUNT(*) AS count FROM victims GROUP BY site_name"
             ).fetchall()
         }
+        vulnerability_count_row = connection.execute(
+            "SELECT COUNT(*) AS count, MAX(disclosure_time) AS latest_disclosure_time FROM vulnerability_records"
+        ).fetchone()
+
+    from darkweb_collector.api_actions import get_vulnerability_sync_status
 
     try:
         configured_configs = load_site_configs()
@@ -1415,6 +1433,10 @@ def build_jobs_payload() -> dict[str, Any]:
 
         latest_seed_dt = _job_event_dt(latest_seed)
         latest_detail_dt = _job_event_dt(latest_detail)
+        effective_seed_status = _effective_job_status(latest_seed) if latest_seed else ""
+        seed_age_minutes = None
+        if latest_seed_dt is not None:
+            seed_age_minutes = max(0, round((_now_utc() - latest_seed_dt).total_seconds() / 60))
         detail_status = _label_job_status(_effective_job_status(latest_detail)) if latest_detail else "未运行"
         if (
             latest_detail
@@ -1435,6 +1457,8 @@ def build_jobs_payload() -> dict[str, Any]:
                 "overall_status": (
                     "异常"
                     if latest_unresolved_problem
+                    else "陈旧任务"
+                    if effective_seed_status == "stale"
                     else "运行中"
                     if active_running
                     else "等待中"
@@ -1448,9 +1472,16 @@ def build_jobs_payload() -> dict[str, Any]:
                 "running_jobs": active_running,
                 "failed_jobs_24h": 1 if latest_unresolved_problem else 0,
                 "last_success_at": _format_dt(latest_success.get("finished_at") if latest_success else None),
-                "last_error": (latest_unresolved_problem.get("error_message") if latest_unresolved_problem else "") or "",
+                "last_error": (
+                    (latest_unresolved_problem.get("error_message") if latest_unresolved_problem else "")
+                    or ("stale seed task auto-cleared" if effective_seed_status == "stale" else "")
+                ),
                 "forum_details_count": forum_detail_counts.get(site_name, 0),
                 "victims_count": victim_counts.get(site_name, 0),
+                "activeSeedJobStatus": effective_seed_status or "",
+                "staleSeedDetected": effective_seed_status == "stale",
+                "latestSeedJobAgeMinutes": seed_age_minutes,
+                "blockingReason": "stale_seed_job" if effective_seed_status == "stale" else ("active_seed_job" if effective_seed_status in {"running", "enqueued"} else ""),
             }
         )
 
@@ -1472,6 +1503,11 @@ def build_jobs_payload() -> dict[str, Any]:
     failed_jobs_24h = len(recent_failures)
 
     overall_status = "采集中" if running_jobs > 0 else "部分失败" if failed_jobs_24h > 0 or stale_jobs > 0 else "正常"
+    vulnerability_sync = {
+        **get_vulnerability_sync_status(),
+        "record_count": int(vulnerability_count_row["count"]) if vulnerability_count_row else 0,
+        "latest_disclosure_time": _format_dt(vulnerability_count_row["latest_disclosure_time"]) if vulnerability_count_row else "",
+    }
     return {
         "overall_status": overall_status,
         "running_jobs": running_jobs,
@@ -1479,5 +1515,6 @@ def build_jobs_payload() -> dict[str, Any]:
         "failed_jobs_24h": failed_jobs_24h,
         "recent_failures": recent_failures,
         "site_health": site_health,
+        "vulnerability_sync": vulnerability_sync,
         "updated_at": _format_dt(_now_utc().isoformat()),
     }

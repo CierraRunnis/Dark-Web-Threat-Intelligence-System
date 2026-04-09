@@ -748,7 +748,7 @@ def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str
 def get_active_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
     cursor = connection.execute(
         """
-        SELECT job_id, status, started_at, enqueued_at
+        SELECT job_id, status, queue_name, target, started_at, enqueued_at, finished_at, error_message
         FROM crawl_jobs
         WHERE site_name = ? AND job_type = ? AND status IN ('enqueued', 'running')
         ORDER BY COALESCE(started_at, enqueued_at) DESC

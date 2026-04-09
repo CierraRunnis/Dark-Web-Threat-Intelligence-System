@@ -35,7 +35,8 @@
 
           <div class="ti-table-shell table-shell">
             <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="auto">
-              <el-table-column prop="disclosureTime" label="披露时间" width="170" />
+              <el-table-column prop="disclosureDate" label="披露日期" width="140" />
+              <el-table-column prop="updatedTime" label="最近更新" width="170" />
               <el-table-column prop="title" label="标题" min-width="420" show-overflow-tooltip />
               <el-table-column prop="category" label="事件分类" width="150" />
               <el-table-column prop="attacker" label="攻击者" width="160" show-overflow-tooltip />
@@ -89,8 +90,21 @@ const listStateKey = computed(() => `list-state:${route.path}`)
 
 const categoryOptions = computed(() => [...new Set(dataLeakEvents.value.map((item) => item.category))])
 
+function parseSortTime(value) {
+  if (!value) return Number.NEGATIVE_INFINITY
+  const normalized = String(value).trim().replace(' ', 'T')
+  const parsed = Date.parse(normalized)
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed
+}
+
+const sortedEvents = computed(() => {
+  return [...dataLeakEvents.value].sort((left, right) => {
+    return parseSortTime(right.updatedTimeRaw || right.disclosureTimeRaw || right.disclosureTime) - parseSortTime(left.updatedTimeRaw || left.disclosureTimeRaw || left.disclosureTime)
+  })
+})
+
 const filteredEvents = computed(() => {
-  return dataLeakEvents.value.filter((item) => {
+  return sortedEvents.value.filter((item) => {
     const matchesCategory = !categoryFilter.value || item.category === categoryFilter.value
     const keyword = searchValue.value.trim().toLowerCase()
     const matchesKeyword =
