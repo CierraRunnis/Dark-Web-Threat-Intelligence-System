@@ -39,7 +39,7 @@
     </section>
 
     <section v-if="eventDetail" class="detail-grid">
-      <div v-if="loading" class="ti-card ti-reveal-up">
+      <div v-if="refreshing" class="ti-card ti-reveal-up">
         <div class="ti-card-body loading-inline">
           <p>正在补充详细内容，请稍候...</p>
         </div>
@@ -53,6 +53,10 @@
           <div>
             <span>标题</span>
             <strong>{{ eventDetail.title || '未知' }}</strong>
+          </div>
+          <div v-if="eventDetail.identifier || eventDetail.id">
+            <span>识别号</span>
+            <strong class="detail-identifier">{{ eventDetail.identifier || eventDetail.id }}</strong>
           </div>
           <div v-if="eventDetail.original_title && eventDetail.original_title !== eventDetail.title">
             <span>原始标题</span>
@@ -165,24 +169,28 @@
         </div>
       </div>
 
-      <div v-if="isVulnerability && eventDetail.reference_urls?.length" class="ti-card ti-reveal-up">
+      <div v-if="isVulnerability && referenceUrls.length" class="ti-card ti-reveal-up">
         <div class="ti-card-header">
           <div class="ti-card-title">参考链接</div>
         </div>
         <div class="ti-card-body">
           <div class="reference-list">
-            <a
-              v-for="item in eventDetail.reference_urls"
+            <div
+              v-for="item in referenceUrls"
               :key="item.url"
-              :href="item.url"
-              target="_blank"
-              rel="noreferrer"
               class="reference-item"
-              :title="item.url"
             >
               <span class="reference-source">来源：{{ item.label || '参考链接' }}</span>
-              <strong>{{ item.url }}</strong>
-            </a>
+              <a
+                :href="item.url"
+                target="_blank"
+                rel="noreferrer"
+                class="reference-link"
+                :title="item.url"
+              >
+                {{ item.url }}
+              </a>
+            </div>
           </div>
         </div>
       </div>
@@ -191,8 +199,25 @@
         <div class="ti-card-header">
           <div class="ti-card-title">{{ isVulnerability ? '漏洞摘要与处置说明' : '事件详情' }}</div>
         </div>
+        <div v-if="canTranslateDetail" class="detail-translate-action">
+          <el-button
+            size="small"
+            plain
+            :loading="translatingDetail"
+            @click="toggleDetailTranslation"
+          >
+            {{ showTranslatedDetail ? '查看原文' : '翻译正文' }}
+          </el-button>
+        </div>
         <div class="ti-card-body detail-text">
-          <pre>{{ detailBody }}</pre>
+          <div class="detail-copy">
+            <p
+              v-for="(paragraph, index) in detailParagraphs"
+              :key="`${index}-${paragraph.slice(0, 24)}`"
+            >
+              {{ paragraph }}
+            </p>
+          </div>
         </div>
       </div>
 
@@ -233,13 +258,13 @@
 </template>
 
 <script setup>
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useEventDetail } from '@/composables/useEventDetail'
 
 const route = useRoute()
 const router = useRouter()
-const { detail, loading, error, load } = useEventDetail()
+const { detail, loading, refreshing, error, load } = useEventDetail()
 const eventDetail = computed(() => detail.value)
 const isVulnerability = computed(() => eventDetail.value?.normalized_event_type === 'vulnerability' || !!eventDetail.value?.cve_id)
 const primarySubjectLabel = computed(() => isVulnerability.value ? '厂商' : '攻击者')
@@ -248,6 +273,11 @@ const secondarySubjectLabel = computed(() => isVulnerability.value ? '产品' : 
 const secondarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.value?.product || '未知') : (eventDetail.value?.victim || '未知'))
 const affectedVersionItems = computed(() => eventDetail.value?.affected_version_items || [])
 const screenshotResources = computed(() => eventDetail.value?.screenshot_resources || [])
+const referenceUrls = computed(() => eventDetail.value?.reference_urls || [])
+const translatedDetailText = ref('')
+const showTranslatedDetail = ref(false)
+const translatingDetail = ref(false)
+const canTranslateDetail = computed(() => !isVulnerability.value && !!eventDetail.value?.detail_text)
 const vulnerabilitySourcesText = computed(() => {
   const labels = eventDetail.value?.source_labels || []
   if (labels.length) {
@@ -267,6 +297,77 @@ const detailBody = computed(() => {
   ]
   return lines.join('\n')
 })
+const renderedDetailBody = computed(() => {
+  if (!isVulnerability.value && showTranslatedDetail.value && translatedDetailText.value) {
+    return translatedDetailText.value
+  }
+  return detailBody.value
+})
+const detailParagraphs = computed(() => {
+  const raw = String(renderedDetailBody.value || '').trim()
+  if (!raw) return ['暂无事件详情。']
+
+  const blocks = raw
+    .split(/\n\s*\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  if (blocks.length > 1) {
+    return blocks.flatMap((block) =>
+      block
+        .split(/\n+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  }
+
+  if (raw.length <= 160) {
+    return [raw]
+  }
+
+  const sentences = raw
+    .split(/(?<=[。！？.!?])\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  if (sentences.length <= 2) {
+    return [raw]
+  }
+
+  const paragraphs = []
+  for (let index = 0; index < sentences.length; index += 2) {
+    paragraphs.push(sentences.slice(index, index + 2).join(' '))
+  }
+  return paragraphs
+})
+
+async function toggleDetailTranslation() {
+  if (!eventDetail.value || isVulnerability.value) return
+  if (showTranslatedDetail.value) {
+    showTranslatedDetail.value = false
+    return
+  }
+  if (translatedDetailText.value) {
+    showTranslatedDetail.value = true
+    return
+  }
+
+  translatingDetail.value = true
+  try {
+    const eventId = String(route.params.eventId || '')
+    const response = await fetch(`/api/events/${encodeURIComponent(eventId)}?translate_detail=true`)
+    if (!response.ok) {
+      throw new Error(`translate detail failed: ${response.status}`)
+    }
+    const payload = await response.json()
+    translatedDetailText.value = String(payload?.detail_text || '')
+    showTranslatedDetail.value = !!translatedDetailText.value
+  } catch (translateError) {
+    console.error(translateError)
+  } finally {
+    translatingDetail.value = false
+  }
+}
 
 function goBackToList() {
   const eventId = String(route.params.eventId || '')
@@ -281,6 +382,9 @@ function isImageResource(url) {
 watch(
   () => route.params.eventId,
   (eventId) => {
+    translatedDetailText.value = ''
+    showTranslatedDetail.value = false
+    translatingDetail.value = false
     load(String(eventId || ''))
   },
   { immediate: true }
@@ -366,6 +470,12 @@ watch(
   font-size: 18px;
 }
 
+.detail-identifier {
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
 .detail-grid {
   display: grid;
   gap: 22px;
@@ -378,18 +488,62 @@ watch(
   gap: 16px;
 }
 
-.detail-text pre {
+.detail-copy {
+  display: grid;
+  gap: 14px;
+}
+
+.detail-translate-action {
+  padding: 0 22px 12px;
+}
+
+.detail-copy p {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--ti-border-soft);
+  color: var(--ti-text-secondary);
+  line-height: 1.9;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--ti-text-secondary);
-  font-family: inherit;
-  line-height: 1.8;
-  margin: 0;
 }
 
 .link-grid a {
   color: var(--ti-primary);
   word-break: break-all;
+}
+
+.reference-list {
+  display: grid;
+  gap: 12px;
+}
+
+.reference-item {
+  display: block;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(47, 107, 255, 0.14);
+  background: rgba(47, 107, 255, 0.05);
+}
+
+.reference-link {
+  display: block;
+  margin-top: 8px;
+  color: #2f6bff;
+  font-weight: 600;
+  word-break: break-all;
+  text-decoration: none;
+}
+
+.reference-item:hover .reference-link {
+  text-decoration: underline;
+}
+
+.reference-source {
+  display: block;
+  color: var(--ti-text-secondary);
+  font-size: 12px;
 }
 
 .resource-empty,

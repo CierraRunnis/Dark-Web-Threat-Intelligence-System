@@ -14,9 +14,13 @@ from pydantic import BaseModel
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
     dispatch_run_site,
+    dispatch_run_vulnerability_sync_once,
     get_continuous_dispatch_status,
+    get_vulnerability_sync_status,
     start_continuous_dispatch,
+    start_vulnerability_sync_dispatch,
     stop_continuous_dispatch,
+    stop_vulnerability_sync_dispatch,
     update_site_enabled,
 )
 from darkweb_collector.api_data import build_behavior_payload, build_intelligence_payload, build_jobs_payload, warm_api_payloads
@@ -95,8 +99,8 @@ def events() -> list[dict]:
 
 
 @app.get("/api/events/{event_id}")
-def event_detail(event_id: str) -> dict:
-    payload = build_event_detail(event_id)
+def event_detail(event_id: str, translate_detail: bool = False) -> dict:
+    payload = build_event_detail(event_id, translate_detail=translate_detail)
     if payload is None:
         raise HTTPException(status_code=404, detail="event not found")
     return payload
@@ -138,6 +142,15 @@ class SetSiteEnabledRequest(BaseModel):
     enabled: bool
 
 
+class VulnerabilitySyncRunRequest(BaseModel):
+    limit: int = 300
+
+
+class VulnerabilitySyncStartRequest(BaseModel):
+    interval_seconds: int = 3600
+    limit: int = 300
+
+
 @app.post("/api/jobs/run-site")
 def run_site(payload: RunSiteRequest) -> dict:
     return dispatch_run_site(site_name=payload.site_name, force=payload.force)
@@ -166,6 +179,29 @@ def run_all_continuous_stop() -> dict:
 @app.get("/api/jobs/continuous-status")
 def continuous_status() -> dict:
     return get_continuous_dispatch_status()
+
+
+@app.get("/api/vulnerabilities/sync/status")
+def vulnerability_sync_status() -> dict:
+    return get_vulnerability_sync_status()
+
+
+@app.post("/api/vulnerabilities/sync/run")
+def vulnerability_sync_run(payload: VulnerabilitySyncRunRequest) -> dict:
+    return dispatch_run_vulnerability_sync_once(limit=payload.limit)
+
+
+@app.post("/api/vulnerabilities/sync/start")
+def vulnerability_sync_start(payload: VulnerabilitySyncStartRequest) -> dict:
+    return start_vulnerability_sync_dispatch(
+        interval_seconds=payload.interval_seconds,
+        limit=payload.limit,
+    )
+
+
+@app.post("/api/vulnerabilities/sync/stop")
+def vulnerability_sync_stop() -> dict:
+    return stop_vulnerability_sync_dispatch()
 
 
 @app.post("/api/sites/{site_name}/enabled")

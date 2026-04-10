@@ -10,6 +10,12 @@ from darkweb_collector.normalize import content_hash
 
 
 TITLE_RE = re.compile(r"<title>\s*(.*?)\s*</title>", re.IGNORECASE | re.DOTALL)
+LIST_BLOCK_RE = re.compile(
+    r'<div class="news__block chat__block">(?P<block>.*?)'
+    r'<a[^>]*href="(?P<href>[^"]+)"[^>]*>\s*Go to the publication\s*</a>\s*</div>\s*</div>',
+    re.IGNORECASE | re.DOTALL,
+)
+DOMAIN_RE = re.compile(r"(?:https?://)?(?:www\.)?([A-Za-z0-9.-]+\.[A-Za-z]{2,})", re.IGNORECASE)
 
 
 def _clean_html_text(value: str) -> str:
@@ -88,35 +94,89 @@ def _extract_list_item_from_context(context_before: str, views: str, html_after:
     }
 
 
+def _extract_domain_candidate(*values: str) -> str:
+    for value in values:
+        match = DOMAIN_RE.search(value or "")
+        if match:
+            return match.group(1).lower()
+    return ""
+
+
+def _extract_list_item_from_block(block_html: str, href: str, base_url: str) -> dict | None:
+    title_match = re.search(r'<h4[^>]*class="chat__block-title"[^>]*>(.*?)</h4>', block_html, re.IGNORECASE | re.DOTALL)
+    title = _clean_html_text(title_match.group(1)) if title_match else ""
+    if not title:
+        return None
+
+    published_at = ""
+    date_match = re.search(r"Date of publication:\s*<span>(.*?)</span>", block_html, re.IGNORECASE | re.DOTALL)
+    if date_match:
+        published_at = _clean_html_text(date_match.group(1))
+
+    category = ""
+    category_match = re.search(r"Category:\s*<span>(.*?)</span>", block_html, re.IGNORECASE | re.DOTALL)
+    if category_match:
+        category = _clean_html_text(category_match.group(1))
+
+    views_int = 0
+    views_match = re.search(r"Views:\s*<span>(\d+)</span>", block_html, re.IGNORECASE)
+    if views_match:
+        views_int = int(views_match.group(1))
+
+    description = ""
+    description_match = re.search(r'<p[^>]*class="chat__block-descr"[^>]*>(.*?)</p>', block_html, re.IGNORECASE | re.DOTALL)
+    if description_match:
+        description = _clean_html_text(description_match.group(1))
+
+    detail_url = urljoin(base_url, href)
+    if not detail_url:
+        return None
+
+    return {
+        "title": title,
+        "author": "",
+        "published_at": published_at,
+        "replies": 0,
+        "views": views_int,
+        "potential_victim": _extract_domain_candidate(title, description),
+        "detail_url": detail_url,
+        "content_hash": content_hash(title, published_at, category),
+    }
+
+
 def parse_lynx_list_page(url: str, html: str) -> dict:
     """Parse Lynx list page HTML and extract topic information."""
     title_match = TITLE_RE.search(html)
     page_title = _clean_html_text(title_match.group(1)) if title_match else ""
 
     topics = []
-    
-    # Find all Views: occurrences and extract context around each
-    views_matches = list(re.finditer(r'Views:\s*<span>(\d+)</span>', html, re.IGNORECASE))
-    
-    for i, match in enumerate(views_matches):
-        views_value = match.group(1)
-        views_pos = match.start()
-        
-        # Get context before (up to previous block or 1000 chars)
-        context_start = max(0, views_pos - 1000)
-        if i > 0:
-            context_start = max(context_start, views_matches[i-1].end())
-        context_before = html[context_start:views_pos]
-        
-        # Get context after (up to next block or 500 chars)
-        context_end = min(len(html), views_pos + 500)
-        if i < len(views_matches) - 1:
-            context_end = min(context_end, views_matches[i+1].start())
-        html_after = html[match.end():context_end]
-        
-        item = _extract_list_item_from_context(context_before, views_value, html_after, url)
+
+    for match in LIST_BLOCK_RE.finditer(html):
+        item = _extract_list_item_from_block(match.group("block"), match.group("href"), url)
         if item:
             topics.append(item)
+
+    if not topics:
+        # Fallback for older or abnormal pages that do not expose full chat block markup.
+        views_matches = list(re.finditer(r'Views:\s*<span>(\d+)</span>', html, re.IGNORECASE))
+
+        for i, match in enumerate(views_matches):
+            views_value = match.group(1)
+            views_pos = match.start()
+
+            context_start = max(0, views_pos - 1000)
+            if i > 0:
+                context_start = max(context_start, views_matches[i-1].end())
+            context_before = html[context_start:views_pos]
+
+            context_end = min(len(html), views_pos + 500)
+            if i < len(views_matches) - 1:
+                context_end = min(context_end, views_matches[i+1].start())
+            html_after = html[match.end():context_end]
+
+            item = _extract_list_item_from_context(context_before, views_value, html_after, url)
+            if item:
+                topics.append(item)
 
     # Transform topics to victims format for database compatibility
     victims = []
@@ -154,27 +214,52 @@ def parse_lynx_detail_page(url: str, html: str) -> dict:
     title_match = TITLE_RE.search(html)
     page_title = _clean_html_text(title_match.group(1)) if title_match else ""
 
-    # Extract content - look for description or main content
     content = ""
-    
-    # Try to find the main description/content
-    content_match = re.search(r'chat__block-descr>([^<]+)', html, re.IGNORECASE)
+    company_name = ""
+
+    title_in_panel_match = re.search(
+        r'<div class="chat__window-header-wrap"[^>]*>.*?<div class="chat__block-title"[^>]*>(.*?)</div>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if title_in_panel_match:
+        company_name = _clean_html_text(title_in_panel_match.group(1))
+
+    detail_block_match = re.search(
+        r'<div class="detailed">(.*?)</div>\s*</div>\s*</div>\s*</div>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    detail_block = detail_block_match.group(1) if detail_block_match else html
+
+    content_match = re.search(
+        r'<div class="detailed">.*?<span>\s*Description of the publication\s*</span>\s*<p>(.*?)</p>',
+        html,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not content_match:
+        content_match = re.search(
+            r'<p>(.*?)</p>\s*<div class="row">',
+            detail_block,
+            re.IGNORECASE | re.DOTALL,
+        )
+    if not content_match:
+        content_match = re.search(r'chat__block-descr>([^<]+)', html, re.IGNORECASE)
     if content_match:
         content = _clean_html_text(content_match.group(1))
-    else:
-        # Look for any substantial text content
-        text_matches = re.findall(r'>([^<]{50,500})<', html)
-        if text_matches:
-            # Filter out CSS and scripts
-            for text in text_matches:
-                cleaned = _clean_html_text(text)
-                if len(cleaned) > 50 and not any(x in cleaned.lower() for x in ['function', 'var ', 'const ', 'display:', 'margin:', 'padding:']):
-                    content = cleaned
-                    break
+    if not content:
+        text_matches = re.findall(r'>([^<]{50,800})<', detail_block)
+        for text in text_matches:
+            cleaned = _clean_html_text(text)
+            if len(cleaned) > 50 and not any(x in cleaned.lower() for x in ['function', 'var ', 'const ', 'display:', 'margin:', 'padding:']):
+                content = cleaned
+                break
 
     # Extract publication date
     timestamp = ""
-    date_match = re.search(r'publication:\s*<span>([^<]+)</span>', html, re.IGNORECASE)
+    date_match = re.search(r'Date of publication\s*</span>\s*<p>([^<]+)</p>', detail_block, re.IGNORECASE)
+    if not date_match:
+        date_match = re.search(r'publication:\s*<span>([^<]+)</span>', html, re.IGNORECASE)
     if date_match:
         timestamp = _clean_html_text(date_match.group(1))
 
@@ -184,9 +269,10 @@ def parse_lynx_detail_page(url: str, html: str) -> dict:
     if category_match:
         category = _clean_html_text(category_match.group(1))
 
-    # Extract views
     views = 0
-    views_match = re.search(r'Views:\s*<span>(\d+)</span>', html, re.IGNORECASE)
+    views_match = re.search(r'Views:\s*<span>(\d+)</span>', detail_block, re.IGNORECASE)
+    if not views_match:
+        views_match = re.search(r'Views:\s*<span>(\d+)</span>', html, re.IGNORECASE)
     if views_match:
         views = int(views_match.group(1))
 
@@ -198,7 +284,9 @@ def parse_lynx_detail_page(url: str, html: str) -> dict:
     attackers = []
     
     # Look for company/organization names in content
-    if content:
+    if company_name:
+        victims.append(company_name)
+    elif content:
         # First sentence often contains the company name
         first_sentence = content.split('.')[0] if '.' in content else content
         if len(first_sentence) > 10:
@@ -244,6 +332,7 @@ def parse_lynx_detail_page(url: str, html: str) -> dict:
         "outbound_link_count": len(outbound_links_sample),
         "outbound_links_sample": outbound_links_sample,
         "content": content,
+        "company_name": company_name,
         "author": author,
         "timestamp": timestamp,
         "victims": victims,

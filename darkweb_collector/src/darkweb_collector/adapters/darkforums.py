@@ -28,6 +28,17 @@ def _detail_artifact_stem(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
 
 
+def _detail_artifacts_exist(output_dir, section_name: str, topic_url: str) -> bool:
+    artifact_stem = _detail_artifact_stem(topic_url)
+    details_dir = output_dir / section_name / "details"
+    required = [
+        details_dir / f"{artifact_stem}.html",
+        details_dir / f"{artifact_stem}.json",
+        details_dir / f"{artifact_stem}.png",
+    ]
+    return all(path.exists() for path in required)
+
+
 class DarkforumsAdapter(SiteAdapter):
     site_name = "darkforums"
 
@@ -99,7 +110,12 @@ class DarkforumsAdapter(SiteAdapter):
                         topic_url=str(topic["full_url"]),
                     )
                     topic_changed = topic_snapshot is None or topic_snapshot["content_hash"] != topic["content_hash"]
-                    if not topic_changed and detail_snapshot is not None:
+                    detail_artifacts_ready = _detail_artifacts_exist(
+                        config.output_dir,
+                        section_name,
+                        str(topic["full_url"]),
+                    )
+                    if not topic_changed and detail_snapshot is not None and detail_artifacts_ready:
                         continue
                     section_tasks.append(
                         DetailTask(
@@ -232,3 +248,9 @@ class DarkforumsAdapter(SiteAdapter):
                         collected_at_utc=detail_result.payload.get("collected_at_utc", ""),
                     )
                 connection.commit()
+                try:
+                    from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
+
+                    ensure_normalized_intelligence(connection, force=True)
+                except Exception as exc:
+                    print(f"[darkforums] warning: failed to refresh normalized intelligence after detail persist: {exc}")

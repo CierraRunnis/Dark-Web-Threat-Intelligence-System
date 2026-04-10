@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 import sqlite3
+from threading import Lock
+import time
 
 from darkweb_collector.runtime import default_db_path
 
@@ -13,6 +16,33 @@ class ManagedConnection(sqlite3.Connection):
             return super().__exit__(exc_type, exc_val, exc_tb)
         finally:
             self.close()
+
+
+_SCHEMA_INIT_LOCK = Lock()
+_SCHEMA_INIT_FINGERPRINTS: set[tuple[str, int, int]] = set()
+
+
+def _has_core_schema(connection: sqlite3.Connection) -> bool:
+    required_tables = ("collection_runs", "victims", "victim_details", "normalized_intelligence_events")
+    for table_name in required_tables:
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if row is None:
+            return False
+    return True
+
+
+def _should_skip_wal(db_path: Path) -> bool:
+    resolved = db_path.resolve()
+    path_text = resolved.as_posix().lower()
+    return os.name != "nt" and path_text.startswith("/mnt/")
+
+
+def _is_transient_open_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "unable to open database file" in message or "disk i/o error" in message
 
 
 SCHEMA = """
@@ -200,11 +230,43 @@ CREATE TABLE IF NOT EXISTS normalized_intelligence_cache_state (
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path, factory=ManagedConnection)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.executescript(SCHEMA)
-    return connection
+    resolved = db_path.resolve()
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        connection = sqlite3.connect(db_path, factory=ManagedConnection)
+        connection.row_factory = sqlite3.Row
+        try:
+            skip_wsl_checks = _should_skip_wal(resolved)
+            if not skip_wsl_checks:
+                try:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError:
+                    # On WSL drvfs mounts, switching journal mode can fail even though the
+                    # database itself is readable and writable. Keep SQLite's existing
+                    # journal mode in that case so the shared workspace DB remains usable.
+                    pass
+            stat = resolved.stat()
+            fingerprint = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+            if skip_wsl_checks and stat.st_size > 0:
+                _SCHEMA_INIT_FINGERPRINTS.clear()
+                _SCHEMA_INIT_FINGERPRINTS.add(fingerprint)
+                return connection
+            if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
+                with _SCHEMA_INIT_LOCK:
+                    if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
+                        if not _has_core_schema(connection):
+                            connection.executescript(SCHEMA)
+                        _SCHEMA_INIT_FINGERPRINTS.clear()
+                        _SCHEMA_INIT_FINGERPRINTS.add(fingerprint)
+            return connection
+        except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+            last_error = exc
+            connection.close()
+            if not _is_transient_open_error(exc) or attempt == 5:
+                raise
+            time.sleep(0.2 * attempt)
+    assert last_error is not None
+    raise last_error
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -254,7 +316,7 @@ def upsert_victim(connection: sqlite3.Connection, run_id: int, payload: dict) ->
             UPDATE victims
             SET detail_url = ?, display_label = ?, published_at_utc = ?, claimed_size = ?,
                 claimed_size_gb = ?, content_hash = ?, last_seen_run_id = ?,
-                last_detail_fetch_status = ?, raw_json = ?
+                last_detail_fetch_status = COALESCE(?, last_detail_fetch_status), raw_json = ?
             WHERE id = ?
             """,
             (

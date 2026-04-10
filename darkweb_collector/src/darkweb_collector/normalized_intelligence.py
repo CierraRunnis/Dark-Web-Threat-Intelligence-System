@@ -7,12 +7,14 @@ from hashlib import sha1
 import json
 from pathlib import Path
 import re
+import sqlite3
 import socket
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from darkweb_collector.config import get_site_config
+from darkweb_collector.detail_i18n import translate_event_title_live
 from darkweb_collector.db import (
     get_normalized_intelligence_cache_state,
     get_normalized_intelligence_event,
@@ -343,18 +345,18 @@ GENERIC_ENTITY_TERMS = {
 
 INDUSTRY_KEYWORDS = {
     "军事": ["military", "defense", "defence", "navy", "air force", "missile", "weapon", "munitions", "warfare", "national security", "armed forces"],
-    "金融": ["bank", "banking", "finance", "financial", "fintech", "insurance", "payment", "investment", "capital management", "wealth management", "advisory", "retirement"],
+    "金融": ["bank", "banking", "finance", "financial", "fintech", "insurance", "payment", "investment", "capital management", "wealth management", "advisory", "retirement", "forex", "broker", "trading", "crypto", "cryptocurrency", "wallet", "exchange", "coinbase"],
     "医疗": ["health", "healthcare", "medical", "hospital", "clinic", "pharma", "medical devices", "pain management", "rehabilitation", "ministry of health", "social works"],
-    "科技": ["software", "saas", "cloud", "hosting", "tech", "technology", "digital", "electronics", "photo frame", "logic", "semiconductor", "semi"],
+    "科技": ["software", "saas", "cloud", "hosting", "tech", "technology", "digital", "electronics", "microelectronics", "photo frame", "logic", "semiconductor", "semi", "chip", "integrated circuit"],
     "制造业": ["manufacturing", "industrial", "factory", "equipment", "construction", "engineering", "manufacturer", "packaging", "hydraulic", "chemical", "materials", "furniture", "components", "architectural", "interior", "craftsmanship", "architect", "architects", "architecture", "design-build"],
     "农业": ["farm", "farming", "nursery", "grower", "growers", "christmas trees", "tree farm", "shrubs", "perennials", "fruits", "wholesale plant"],
     "零售": ["retail", "shop", "shopping", "ecommerce", "e-commerce", "store"],
-    "教育": ["school", "college", "university", "education", "academy"],
-    "政府": ["government", "gov", "ministry", "municipal", "police", "public sector", "driver's license", "driver license", "citizenship"],
+    "教育": ["school", "college", "university", "universidad", "education", "academy", "student", "faculty"],
+    "政府": ["government", "gov", "ministry", "municipal", "police", "public sector", "driver's license", "driver license", "identity card", "id card", "id cards", "passport", "citizenship", "national registry", "reniec"],
     "交通": ["transport", "logistics", "shipping", "airline", "airport", "rail", "freight", "trucking"],
     "能源": ["energy", "oil", "gas", "power", "electric", "utility"],
     "通信": ["telecom", "telecommunications", "mobile", "carrier", "broadband", "communications"],
-    "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency", "casino", "betting", "gaming", "sportsbook", "fitness", "publishing", "publisher"],
+    "文娱": ["media", "entertainment", "marketing", "destination marketing", "philharmonic", "orchestra", "concert", "advertising", "agency", "casino", "betting", "gaming", "sportsbook", "fitness", "publishing", "publisher", "onlyfans", "adult content", "creator content", "streaming"],
 }
 
 INDUSTRY_PHRASE_BOOSTS = {
@@ -392,7 +394,7 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-04-04-governance-v2+vuln-v4"
+NORMALIZATION_VERSION = "2026-04-10-darkforums-artifacts-industry-v1"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -598,7 +600,12 @@ def _format_date(value: str | None) -> str:
 
 def _event_updated_time(event: dict[str, Any]) -> str:
     metadata = event.get("metadata") or {}
-    return str(metadata.get("updated_time") or event.get("updated_at") or event.get("disclosure_time") or "")
+    explicit_updated = metadata.get("updated_time") or event.get("disclosure_time") or ""
+    if explicit_updated:
+        return str(explicit_updated)
+    if event.get("event_type") == "vulnerability":
+        return str(event.get("updated_at") or "")
+    return ""
 
 
 def _event_hash(*parts: str) -> str:
@@ -693,17 +700,7 @@ def build_display_title(event: dict[str, Any]) -> str:
     subject = _pick_display_subject(event)
 
     if event_type == "ransomware":
-        attacker = _normalize_label(event.get("attacker")) or "未知组织"
-        category = _normalize_label(event.get("category"))
-        if category == "已公开":
-            return f"{subject}遭{attacker}勒索披露"
-        if category == "协商中":
-            return f"{subject}遭{attacker}勒索攻击（协商中）"
-        if category == "传输中":
-            return f"{subject}遭{attacker}勒索攻击（传输中）"
-        if category == "已停止":
-            return f"{subject}遭{attacker}勒索攻击（已停止）"
-        return f"{subject}疑似遭{attacker}勒索攻击"
+        return raw_title or subject or "未命名勒索事件"
 
     if event_type == "data_leak":
         leak_type = _normalize_label(event.get("leak_type") or event.get("category"))
@@ -716,7 +713,10 @@ def build_display_title(event: dict[str, Any]) -> str:
             "数据泄露": "疑似数据泄露",
         }
         suffix = leak_title_map.get(leak_type, "疑似数据泄露")
-        return f"{subject}{suffix}"
+        translated_title = translate_event_title_live(raw_title, fallback=subject)
+        if any(token in translated_title for token in ("泄露", "售卖", "数据库", "凭证", "证件", "文档", "源代码", "源码")):
+            return translated_title
+        return f"{translated_title}{suffix}"
 
     if event_type == "vulnerability":
         return raw_title or "公开源漏洞预警"
@@ -1205,7 +1205,10 @@ def _site_output_dir(site_name: str) -> Path | None:
 
 def _public_output_url(path: Path) -> str:
     output_root = project_root() / "output"
-    relative_path = path.resolve().relative_to(output_root.resolve())
+    try:
+        relative_path = path.resolve().relative_to(output_root.resolve())
+    except ValueError:
+        return path.resolve().as_uri()
     return f"/collector-output/{relative_path.as_posix()}"
 
 
@@ -1224,7 +1227,13 @@ def _artifact_candidate_stems(*values: str) -> list[str]:
     return stems
 
 
-def _resolve_artifact_resources(details_dir: Path, stems: list[str], fallback_tokens: list[str]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def _resolve_artifact_resources(
+    details_dir: Path,
+    stems: list[str],
+    fallback_tokens: list[str],
+    *,
+    allow_fuzzy: bool = True,
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     resources: list[dict[str, str]] = []
     screenshots: list[dict[str, str]] = []
     seen_files: set[Path] = set()
@@ -1239,7 +1248,7 @@ def _resolve_artifact_resources(details_dir: Path, stems: list[str], fallback_to
         add_if_exists(details_dir / f"{stem}.json", "本地JSON镜像", resources)
         add_if_exists(details_dir / f"{stem}.png", "详情截图", screenshots)
 
-    if not screenshots or not resources:
+    if allow_fuzzy and (not screenshots or not resources):
         for token in fallback_tokens:
             safe_token = safe_stem(token)
             if not safe_token:
@@ -1286,14 +1295,17 @@ def _victim_output_resources(
     name = str(raw_json.get("name") or row_dict.get("name") or "")
     detail_name = str(detail_raw_json.get("company_name") or detail_raw_json.get("page_title") or "")
     detail_url = str(raw_json.get("detail_url") or row_dict.get("detail_url") or "")
+    detail_slug = detail_url.rstrip("/").rsplit("/", 1)[-1] if detail_url else ""
     artifact_stem = str(detail_raw_json.get("artifact_stem") or raw_json.get("artifact_stem") or "").strip()
     detail_dir = output_dir / "details"
     stems = _artifact_candidate_stems(
         artifact_stem,
         safe_stem(f"{content_hash[:10]}_{name[:30]}"),
         safe_stem(f"{content_hash[:10]}_{domain or name}"),
+        safe_stem(f"{content_hash[:10]}_{detail_slug}"),
         safe_stem(f"{detail_content_hash[:10]}_{detail_name[:30]}"),
         safe_stem(f"{detail_content_hash[:10]}_{detail_domain or detail_name or name}"),
+        safe_stem(f"{detail_content_hash[:10]}_{detail_slug}"),
         _event_hash(detail_url)[:10] if detail_url else "",
         safe_stem(detail_url),
     )
@@ -1306,7 +1318,28 @@ def _victim_output_resources(
         _clean_display_subject(name),
         _clean_display_subject(detail_name),
     ]
-    return _resolve_artifact_resources(detail_dir, stems, [item for item in fallback_tokens if item])
+    best_resources: list[dict[str, str]] = []
+    best_screenshots: list[dict[str, str]] = []
+    for stem in stems:
+        resources, screenshots = _resolve_artifact_resources(
+            detail_dir,
+            [stem],
+            [],
+            allow_fuzzy=False,
+        )
+        if resources and screenshots:
+            return resources, screenshots
+        if (resources or screenshots) and not (best_resources or best_screenshots):
+            best_resources = resources
+            best_screenshots = screenshots
+    if best_resources or best_screenshots:
+        return best_resources, best_screenshots
+    return _resolve_artifact_resources(
+        detail_dir,
+        stems,
+        [item for item in fallback_tokens if item],
+        allow_fuzzy=False,
+    )
 
 
 def _extract_domains(*texts: str) -> list[str]:
@@ -1462,6 +1495,54 @@ def _recent_cutoff(hours: int = RECENT_EVENT_HOURS) -> datetime:
     return _now_utc() - timedelta(hours=hours)
 
 
+def _forum_artifact_signature(connection) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT site_name, section, topic_url
+        FROM forum_details
+        """
+    ).fetchall()
+    mirror_count = 0
+    screenshot_count = 0
+    for row in rows:
+        try:
+            mirror_resources, screenshot_resources = _forum_output_resources(dict(row))
+        except Exception:
+            continue
+        mirror_count += len(mirror_resources)
+        screenshot_count += len(screenshot_resources)
+    return {
+        "mirror_count": mirror_count,
+        "screenshot_count": screenshot_count,
+    }
+
+
+def _forum_victim_signature(connection) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT forum_detail_id, victim_name, COALESCE(industry, '') AS industry, COALESCE(region, '') AS region
+        FROM forum_victims
+        ORDER BY forum_detail_id, victim_name, industry, region, id
+        """
+    ).fetchall()
+    digest = sha1()
+    tagged_industry_count = 0
+    tagged_region_count = 0
+    for row in rows:
+        payload = dict(row)
+        digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+        if payload["industry"] not in {"", "other", "unknown"}:
+            tagged_industry_count += 1
+        if payload["region"] not in {"", "unknown"}:
+            tagged_region_count += 1
+    return {
+        "count": len(rows),
+        "content_hash": digest.hexdigest(),
+        "tagged_industry_count": tagged_industry_count,
+        "tagged_region_count": tagged_region_count,
+    }
+
+
 def _source_signature_payload(connection) -> dict[str, Any]:
     forum_stats = connection.execute(
         """
@@ -1490,6 +1571,8 @@ def _source_signature_payload(connection) -> dict[str, Any]:
     return {
         "normalization_version": NORMALIZATION_VERSION,
         "forum_details": dict(forum_stats),
+        "forum_artifacts": _forum_artifact_signature(connection),
+        "forum_victims": _forum_victim_signature(connection),
         "victims": dict(victim_stats),
         "victim_details": dict(victim_detail_stats),
         "vulnerability_records": dict(vulnerability_stats),
@@ -1510,9 +1593,12 @@ def _normalized_event_count(connection) -> int:
 
 
 def should_refresh_normalized_intelligence(connection) -> bool:
-    cache_state = get_normalized_intelligence_cache_state(connection)
-    current_signature = _build_source_signature(connection)
-    current_event_count = _normalized_event_count(connection)
+    try:
+        cache_state = get_normalized_intelligence_cache_state(connection)
+        current_signature = _build_source_signature(connection)
+        current_event_count = _normalized_event_count(connection)
+    except sqlite3.DatabaseError:
+        return _normalized_event_count(connection) == 0
     if cache_state is None:
         return True
     if cache_state.get("source_signature") != current_signature:
@@ -2105,29 +2191,40 @@ def _merge_event_metadata(existing: dict[str, Any], current: dict[str, Any], *, 
 
 
 def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    current_dt = _parse_dt(str(current.get("disclosure_time") or ""))
-    existing_dt = _parse_dt(str(existing.get("disclosure_time") or ""))
-    prefer_current = False
-    if current_dt and existing_dt:
-        prefer_current = current_dt >= existing_dt
-    elif current_dt and not existing_dt:
-        prefer_current = True
-    elif len(current.get("detail_text") or "") > len(existing.get("detail_text") or ""):
-        prefer_current = True
+    def event_priority(event: dict[str, Any]) -> tuple[datetime, int, int, int, int]:
+        updated_dt = _parse_dt(_event_updated_time(event))
+        disclosure_dt = _parse_dt(str(event.get("disclosure_time") or ""))
+        return (
+            updated_dt or disclosure_dt or datetime.min.replace(tzinfo=timezone.utc),
+            int(event.get("source_record_id") or 0),
+            1 if event.get("screenshot_resources") else 0,
+            1 if event.get("mirror_resources") else 0,
+            len(event.get("detail_text") or ""),
+        )
+
+    prefer_current = event_priority(current) >= event_priority(existing)
 
     primary = current if prefer_current else existing
     secondary = existing if prefer_current else current
-    merged_mirror_resources = _merge_unique_resources(existing.get("mirror_resources") or [], current.get("mirror_resources") or [])
-    merged_screenshot_resources = _merge_unique_resources(
-        existing.get("screenshot_resources") or [],
-        current.get("screenshot_resources") or [],
-    )
+
+    if primary.get("event_type") == "vulnerability":
+        merged_mirror_resources = _merge_unique_resources(existing.get("mirror_resources") or [], current.get("mirror_resources") or [])
+        merged_screenshot_resources = _merge_unique_resources(
+            existing.get("screenshot_resources") or [],
+            current.get("screenshot_resources") or [],
+        )
+    else:
+        merged_mirror_resources = primary.get("mirror_resources") or secondary.get("mirror_resources") or []
+        merged_screenshot_resources = primary.get("screenshot_resources") or secondary.get("screenshot_resources") or []
+
     merged = {
         **secondary,
         **primary,
     }
     merged["mirror_resources"] = merged_mirror_resources
     merged["screenshot_resources"] = merged_screenshot_resources
+    merged["detail_text"] = primary.get("detail_text") or secondary.get("detail_text") or ""
+    merged["json_preview_url"] = primary.get("json_preview_url") or secondary.get("json_preview_url") or ""
     merged["metadata"] = _merge_event_metadata(existing, current, mirror_resources=merged_mirror_resources)
     merged["severity"] = max(
         (existing.get("severity"), current.get("severity")),
@@ -2299,8 +2396,24 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
     display_title = build_display_title(event)
     updated_time_raw = _event_updated_time(event)
+    mirror_resources = event["mirror_resources"]
+    screenshot_resources = event["screenshot_resources"]
+    json_preview_url = event.get("json_preview_url") or ""
+    if event.get("raw_source_type") == "forum_details":
+        local_mirror_resources, local_screenshot_resources = _forum_output_resources(
+            {
+                "site_name": event.get("source_site_name"),
+                "section": metadata.get("section"),
+                "topic_url": event.get("source_url"),
+                "title": event.get("title"),
+            }
+        )
+        mirror_resources = _merge_unique_resources(mirror_resources, local_mirror_resources)
+        screenshot_resources = _merge_unique_resources(screenshot_resources, local_screenshot_resources)
+        json_preview_url = json_preview_url or next((item["url"] for item in mirror_resources if item["url"].endswith(".json")), "")
     return {
         "id": event["event_id"],
+        "identifier": event["event_id"],
         "event_type": event["source_kind"],
         "normalized_event_type": event["event_type"],
         "raw_source_type": event["raw_source_type"],
@@ -2321,9 +2434,9 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "country_code": event.get("country_code") or "",
         "macro_region": event.get("region") or "未知",
         "region": _display_region(event.get("country"), event.get("region")),
-        "mirror_resources": event["mirror_resources"],
-        "screenshot_resources": event["screenshot_resources"],
-        "json_preview_url": event.get("json_preview_url") or "",
+        "mirror_resources": mirror_resources,
+        "screenshot_resources": screenshot_resources,
+        "json_preview_url": json_preview_url,
         "victim": event["victim"],
         "risk_score": event["risk_score"],
         "risk_reasons": event["risk_reasons"],

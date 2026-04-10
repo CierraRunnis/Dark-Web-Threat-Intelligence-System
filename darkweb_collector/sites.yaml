@@ -10,7 +10,7 @@
       "detail_fetch_mode": "tor_http",
       "profile": "hot",
       "max_topics_per_run": 25,
-      "max_detail_pages_per_run": 5,
+      "max_detail_pages_per_run": 15,
       "cooldown_seconds": 300,
       "output_dir": "output/dragonforce",
       "dedupe_window_minutes": 120
@@ -24,13 +24,14 @@
         "https://darkforums.su/Forum-Sellers-Place"
       ],
       "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "tor_http",
+      "detail_fetch_mode": "browser",
       "profile": "warm",
       "max_topics_per_run": 10,
       "max_detail_pages_per_run": 6,
       "cooldown_seconds": 900,
       "output_dir": "output/darkforums",
-      "dedupe_window_minutes": 180
+      "dedupe_window_minutes": 180,
+      "render_wait_seconds": 12
     },
     {
       "site_name": "chaos",
@@ -38,14 +39,15 @@
       "seed_urls": [
         "http://hptqq2o2qjva7lcaaq67w36jihzivkaitkexorauw7b2yul2z6zozpqd.onion/"
       ],
-      "seed_fetch_mode": "tor_http",
-      "detail_fetch_mode": "tor_http",
+      "seed_fetch_mode": "browser",
+      "detail_fetch_mode": "browser",
       "profile": "hot",
       "max_topics_per_run": 25,
-      "max_detail_pages_per_run": 5,
+      "max_detail_pages_per_run": 15,
       "cooldown_seconds": 300,
       "output_dir": "output/chao",
-      "dedupe_window_minutes": 120
+      "dedupe_window_minutes": 120,
+      "render_wait_seconds": 15
     },
     {
       "site_name": "lynx",

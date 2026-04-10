@@ -387,7 +387,7 @@ class BehaviorAnalysisTests(unittest.TestCase):
                 payload = build_intelligence_payload()
                 titles = [item["title"] for item in payload["ransomwareEvents"][:2]]
                 self.assertEqual(
-                    ["Newer Victim遭DragonForce勒索披露", "Older Victim遭DragonForce勒索披露"],
+                    ["Newer Victim", "Older Victim"],
                     titles,
                 )
 
@@ -437,6 +437,13 @@ class BehaviorAnalysisTests(unittest.TestCase):
         self.assertEqual("文娱", normalized_intelligence._infer_industry("Elite Fitness"))
         self.assertEqual("制造业", normalized_intelligence._infer_industry("Matthew Allchurch Architects"))
 
+    def test_industry_inference_covers_recent_darkforums_titles(self) -> None:
+        self.assertEqual("文娱", normalized_intelligence._infer_industry("VIEW ONLYFANS CONTENT FOR FREE"))
+        self.assertEqual("政府", normalized_intelligence._infer_industry("CHINA - 64 sets of ID cards - front back holding"))
+        self.assertEqual("金融", normalized_intelligence._infer_industry("AUJ Forex Australia"))
+        self.assertEqual("科技", normalized_intelligence._infer_industry("Fudan Microelectronics Breach Free Docs"))
+        self.assertEqual("教育", normalized_intelligence._infer_industry("Mexico - Universidad Autonoma de Sinaloa"))
+
     def test_industry_inference_prefers_manufacturing_over_served_medical_markets(self) -> None:
         snippet = (
             "Anomatic is a full-service manufacturer of anodized aluminum and metalized packaging "
@@ -454,28 +461,32 @@ class BehaviorAnalysisTests(unittest.TestCase):
         self.assertEqual("农业", normalized_intelligence._infer_industry(snippet))
 
     def test_display_title_for_data_leak_is_explicit(self) -> None:
-        title = normalized_intelligence.build_display_title(
-            {
-                "event_type": "data_leak",
-                "title": "2M USA BOAT OWNERS",
-                "victim": "2M USA BOAT OWNERS",
-                "leak_type": "数据库泄露",
-                "category": "数据库泄露",
-            }
-        )
-        self.assertIn("疑似数据库泄露", title)
+        with patch(
+            "darkweb_collector.normalized_intelligence.translate_event_title_live",
+            return_value="美国船主数据库",
+        ):
+            title = normalized_intelligence.build_display_title(
+                {
+                    "event_type": "data_leak",
+                    "title": "2M USA BOAT OWNERS",
+                    "victim": "2M USA BOAT OWNERS",
+                    "leak_type": "数据库泄露",
+                    "category": "数据库泄露",
+                }
+            )
+        self.assertEqual("美国船主数据库", title)
 
     def test_display_title_for_ransomware_is_explicit(self) -> None:
         title = normalized_intelligence.build_display_title(
             {
                 "event_type": "ransomware",
-                "title": "Northern Family Farms",
+                "title": "Northern Family Farms listed by DragonForce",
                 "victim": "Northern Family Farms",
                 "attacker": "DragonForce",
                 "category": "已公开",
             }
         )
-        self.assertEqual("Northern Family Farms遭DragonForce勒索披露", title)
+        self.assertEqual("Northern Family Farms listed by DragonForce", title)
 
     def test_intelligence_payload_includes_executive_threat_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

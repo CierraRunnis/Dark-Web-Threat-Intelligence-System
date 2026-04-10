@@ -106,6 +106,48 @@
 
     <section class="ti-card ti-reveal-up">
       <div class="ti-card-header">
+        <div class="ti-card-title">运行库状态</div>
+        <StatusBadge
+          :label="runtimeDbStatus.using_runtime_db ? 'WSL 运行库' : 'Windows 源库'"
+          :tone="runtimeDbStatus.using_runtime_db ? 'success' : 'warning'"
+          :dot="false"
+        />
+      </div>
+      <div class="ti-card-body">
+        <div class="vulnerability-sync-grid">
+          <div>
+            <span>当前数据库</span>
+            <strong>{{ runtimeDbStatus.runtime_db_path || '未知' }}</strong>
+          </div>
+          <div>
+            <span>源库路径</span>
+            <strong>{{ runtimeDbStatus.source_db_path || '未知' }}</strong>
+          </div>
+          <div>
+            <span>上次准备</span>
+            <strong>{{ runtimeDbStatus.prepared_at || '未知' }}</strong>
+          </div>
+          <div>
+            <span>运行库大小</span>
+            <strong>{{ runtimeDbStatus.runtime_db_size_mb ? `${runtimeDbStatus.runtime_db_size_mb} MB` : '未知' }}</strong>
+          </div>
+          <div>
+            <span>Victims 记录</span>
+            <strong>{{ runtimeDbStatus.copied_counts?.victims ?? '未知' }}</strong>
+          </div>
+          <div>
+            <span>标准化事件</span>
+            <strong>{{ runtimeDbStatus.copied_counts?.normalized_intelligence_events ?? '未知' }}</strong>
+          </div>
+        </div>
+        <div v-if="Object.keys(runtimeDbStatus.skipped_tables || {}).length" class="empty-state vulnerability-sync-error">
+          <p>运行库准备时跳过的表：{{ Object.keys(runtimeDbStatus.skipped_tables || {}).join(' / ') }}</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="ti-card ti-reveal-up">
+      <div class="ti-card-header">
         <div class="ti-card-title">站点健康表</div>
         <div class="health-actions">
           <el-button plain @click="refreshAllPanels">刷新状态</el-button>
@@ -225,6 +267,7 @@ const continuousStatus = computed(() => continuousState.value || {})
 const siteHealth = computed(() => jobsData.value.site_health || [])
 const recentFailures = computed(() => jobsData.value.recent_failures || [])
 const vulnerabilitySync = computed(() => jobsData.value.vulnerability_sync || {})
+const runtimeDbStatus = computed(() => jobsData.value.runtime_db || {})
 
 const runningAllSites = ref(false)
 const continuousLoading = ref(false)
