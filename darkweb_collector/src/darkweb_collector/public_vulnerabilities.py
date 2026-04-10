@@ -16,7 +16,7 @@ from darkweb_collector.vulnerability_i18n import translate_vulnerability_title_l
 
 
 DEFAULT_SAMPLE_FEED = project_root() / "samples" / "public_vulnerability_feed.json"
-DEFAULT_LIVE_LIMIT = 20
+DEFAULT_LIVE_LIMIT = 300
 KEV_FEED_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 HTTP_HEADERS = {

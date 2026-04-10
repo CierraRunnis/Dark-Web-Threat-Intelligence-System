@@ -17,6 +17,7 @@ threat-intelligence-dashboard/dist/
 # Runtime data and crawler artifacts
 darkweb_collector/data/
 darkweb_collector/output/
+darkweb_collector/C*/
 
 # OS / editor
 .DS_Store
@@ -25,4 +26,3 @@ Thumbs.db
 # Archives and downloads
 *.tar.gz
 tor-downloads/
-

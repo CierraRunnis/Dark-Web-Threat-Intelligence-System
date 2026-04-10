@@ -234,7 +234,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     # Build victim information with industry and region
     victim_info = []
     for victim in victims:
-        industry = determine_industry(victim)
+        industry = determine_industry(victim, f"{title} {content}")
         region = determine_region(victim)
         victim_info.append({
             'name': victim,
@@ -363,21 +363,21 @@ def extract_attackers_from_content(content: str) -> list:
     return unique_attackers[:5]  # Limit to top 5 attackers
 
 
-def determine_industry(victim: str) -> str:
+def determine_industry(victim: str, context: str = "") -> str:
     """Determine industry based on victim name/description"""
-    victim_lower = victim.lower()
+    victim_lower = f"{victim} {context}".lower()
     
     industries = {
-        'finance': ['bank', 'financial', 'banking', 'credit', 'insurance', 'payment', 'finance', 'investment', 'capital'],
+        'finance': ['bank', 'financial', 'banking', 'credit', 'insurance', 'payment', 'finance', 'investment', 'capital', 'forex', 'broker', 'trading', 'crypto', 'cryptocurrency', 'wallet', 'exchange', 'coinbase'],
         'healthcare': ['health', 'hospital', 'medical', 'healthcare', 'pharmaceutical', 'clinic', 'patient'],
-        'government': ['government', 'military', 'army', 'navy', 'air force', 'police', 'fbi', 'cia', 'federal', 'state', 'ministry', 'agency', 'department', 'gov', 'public', 'tsa', 'transportation security'],
-        'technology': ['tech', 'technology', 'software', 'hardware', 'internet', 'social media', 'cloud', 'cyber', 'digital', 'app', 'platform'],
+        'government': ['government', 'military', 'army', 'navy', 'air force', 'police', 'fbi', 'cia', 'federal', 'state', 'ministry', 'agency', 'department', 'gov', 'public', 'tsa', 'transportation security', 'identity card', 'id card', 'id cards', 'passport', 'national registry', 'reniec'],
+        'technology': ['tech', 'technology', 'software', 'hardware', 'internet', 'social media', 'cloud', 'cyber', 'digital', 'app', 'platform', 'electronics', 'microelectronics', 'semiconductor', 'chip'],
         'retail': ['retail', 'ecommerce', 'shop', 'store', 'market', 'commerce', 'mall'],
-        'education': ['university', 'college', 'school', 'education', 'academy', 'institute', 'student'],
+        'education': ['university', 'universidad', 'college', 'school', 'education', 'academy', 'institute', 'student', 'faculty'],
         'telecommunications': ['telecom', 'telecommunication', 'mobile', 'phone', 'wireless', 'isp', 'internet service', 'broadband'],
         'energy': ['energy', 'oil', 'gas', 'electric', 'power', 'utility', 'renewable'],
         'transportation': ['airline', 'airport', 'transport', 'logistics', 'shipping', 'railway', 'aviation'],
-        'entertainment': ['entertainment', 'gaming', 'game', 'media', 'streaming', 'movie', 'music'],
+        'entertainment': ['entertainment', 'gaming', 'game', 'media', 'streaming', 'movie', 'music', 'onlyfans', 'adult content', 'creator content'],
     }
     
     for industry, keywords in industries.items():

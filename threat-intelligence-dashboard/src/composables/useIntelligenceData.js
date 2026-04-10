@@ -7,10 +7,12 @@ const intelligenceData = ref(DEMO_MODE ? { ...fallbackData } : {})
 const loading = ref(false)
 const error = ref(null)
 const RETRY_DELAY_MS = 3000
+const AUTO_REFRESH_TTL_MS = 15000
 
 let hasLoaded = false
 let pendingRequest = null
 let retryTimer = null
+let lastLoadedAt = 0
 
 function clearRetryTimer() {
   if (retryTimer) {
@@ -54,6 +56,7 @@ async function loadIntelligenceData() {
           }
         : { ...payload }
       hasLoaded = true
+      lastLoadedAt = Date.now()
       clearRetryTimer()
       return intelligenceData.value
     })
@@ -71,7 +74,7 @@ async function loadIntelligenceData() {
 }
 
 export function useIntelligenceData() {
-  if (!hasLoaded && !loading.value) {
+  if ((!hasLoaded || (Date.now() - lastLoadedAt) > AUTO_REFRESH_TTL_MS) && !loading.value) {
     loadIntelligenceData()
   }
 

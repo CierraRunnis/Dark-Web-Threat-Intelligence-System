@@ -68,15 +68,15 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
-const DETAIL_CACHE_VERSION = '2026-04-08-rich-detail-v1'
+const DETAIL_CACHE_VERSION = '2026-04-09-rich-detail-v4'
 
-const { data } = useIntelligenceData()
+const { data, refresh: refreshIntelligence } = useIntelligenceData()
 const dataLeakEvents = computed(() => data.value.dataLeakEvents || [])
 const dataLeakSummary = computed(() => data.value.dataLeakSummary || [])
 const route = useRoute()
@@ -87,6 +87,7 @@ const pageSize = ref(10)
 const categoryFilter = ref('')
 const searchValue = ref('')
 const listStateKey = computed(() => `list-state:${route.path}`)
+let refreshTimer = null
 
 const categoryOptions = computed(() => [...new Set(dataLeakEvents.value.map((item) => item.category))])
 
@@ -131,7 +132,6 @@ function viewEventDetail(row) {
       searchValue: searchValue.value,
     })
   )
-  sessionStorage.setItem(`event-detail:${row.id}`, JSON.stringify({ ...row, __cacheVersion: DETAIL_CACHE_VERSION }))
   sessionStorage.setItem(`event-back:${row.id}`, '/data-leak')
   router.push({ name: 'EventDetail', params: { eventId: row.id } })
 }
@@ -161,16 +161,28 @@ watch([filteredEvents, pageSize], () => {
 })
 
 onMounted(() => {
+  refreshIntelligence()
   const raw = sessionStorage.getItem(listStateKey.value)
-  if (!raw) return
-  try {
-    const payload = JSON.parse(raw)
-    currentPage.value = Number(payload.currentPage) || 1
-    pageSize.value = Number(payload.pageSize) || 10
-    categoryFilter.value = String(payload.categoryFilter || '')
-    searchValue.value = String(payload.searchValue || '')
-  } catch {
-    sessionStorage.removeItem(listStateKey.value)
+  if (raw) {
+    try {
+      const payload = JSON.parse(raw)
+      currentPage.value = Number(payload.currentPage) || 1
+      pageSize.value = Number(payload.pageSize) || 10
+      categoryFilter.value = String(payload.categoryFilter || '')
+      searchValue.value = String(payload.searchValue || '')
+    } catch {
+      sessionStorage.removeItem(listStateKey.value)
+    }
+  }
+  refreshTimer = window.setInterval(() => {
+    refreshIntelligence()
+  }, 15000)
+})
+
+onBeforeUnmount(() => {
+  if (refreshTimer) {
+    window.clearInterval(refreshTimer)
+    refreshTimer = null
   }
 })
 </script>

@@ -4,11 +4,13 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 import json
+import os
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from darkweb_collector.config import get_site_config, load_site_configs
+from darkweb_collector.detail_i18n import translate_event_detail_text_live
 from darkweb_collector.db import get_db_connection, get_normalized_intelligence_cache_state
 from darkweb_collector.normalized_intelligence import (
     build_behavior_payload as build_behavior_payload_from_events,
@@ -19,7 +21,7 @@ from darkweb_collector.normalized_intelligence import (
     normalized_event_to_detail,
     normalized_event_to_list_item,
 )
-from darkweb_collector.runtime import project_root
+from darkweb_collector.runtime import default_db_path, project_root
 from darkweb_collector.utils import safe_stem
 
 
@@ -359,7 +361,10 @@ def _site_output_dir(site_name: str) -> Path | None:
 
 def _public_output_url(path: Path) -> str:
     output_root = project_root() / "output"
-    relative_path = path.resolve().relative_to(output_root.resolve())
+    try:
+        relative_path = path.resolve().relative_to(output_root.resolve())
+    except ValueError:
+        return path.resolve().as_uri()
     return f"/collector-output/{relative_path.as_posix()}"
 
 
@@ -594,12 +599,60 @@ def _build_victim_event_detail_by_id(
     return None
 
 
-def build_event_detail(event_id: str) -> dict[str, Any] | None:
+def _build_raw_event_detail_by_id(connection, event_id: str) -> dict[str, Any] | None:
+    parsed = _parse_event_id(event_id)
+    if parsed is None:
+        return None
+    if parsed["event_type"] == "forum":
+        return _build_forum_event_detail_by_id(
+            connection,
+            site_name=parsed["site_name"],
+            section=parsed["section"],
+            hash_value=parsed["hash"],
+        )
+    if parsed["event_type"] == "victim":
+        return _build_victim_event_detail_by_id(
+            connection,
+            site_name=parsed["site_name"],
+            hash_value=parsed["hash"],
+        )
+    return None
+
+
+def _merge_event_detail_payload(base: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key in ("disclosure_url", "detail_text", "victim"):
+        if not merged.get(key) and fallback.get(key):
+            merged[key] = fallback[key]
+    for key in ("industry", "region"):
+        if merged.get(key) in {"", "未知"} and fallback.get(key) not in {"", "未知", None}:
+            merged[key] = fallback[key]
+    if not merged.get("mirror_resources") and fallback.get("mirror_resources"):
+        merged["mirror_resources"] = fallback["mirror_resources"]
+    if not merged.get("screenshot_resources") and fallback.get("screenshot_resources"):
+        merged["screenshot_resources"] = fallback["screenshot_resources"]
+    if not merged.get("json_preview_url") and fallback.get("json_preview_url"):
+        merged["json_preview_url"] = fallback["json_preview_url"]
+    merged.setdefault("identifier", merged.get("id") or fallback.get("id") or "")
+    return merged
+
+
+def build_event_detail(event_id: str, *, translate_detail: bool = False) -> dict[str, Any] | None:
     with get_db_connection() as connection:
         event = load_normalized_event_detail(connection, event_id)
+        fallback_payload = _build_raw_event_detail_by_id(connection, event_id)
     if event is None:
-        return None
-    return normalized_event_to_detail(event)
+        payload = fallback_payload
+        if payload is None:
+            return None
+    else:
+        payload = normalized_event_to_detail(event)
+        if fallback_payload is not None:
+            payload = _merge_event_detail_payload(payload, fallback_payload)
+    payload.setdefault("identifier", payload.get("id") or event_id)
+    if translate_detail and payload.get("normalized_event_type") != "vulnerability":
+        payload["detail_text"] = translate_event_detail_text_live(payload.get("detail_text"))
+    return payload
 
 
 def build_vulnerability_records(
@@ -641,8 +694,10 @@ def build_vulnerability_records(
 
 def build_vulnerability_detail(event_id: str) -> dict[str, Any] | None:
     with get_db_connection() as connection:
-        ensure_normalized_intelligence(connection)
         event = load_normalized_event_detail(connection, event_id)
+        if event is None:
+            ensure_normalized_intelligence(connection, force=True)
+            event = load_normalized_event_detail(connection, event_id)
     if event is None or event.get("event_type") != "vulnerability":
         return None
     return normalized_event_to_detail(event)
@@ -1376,6 +1431,37 @@ def warm_api_payloads() -> None:
     build_behavior_payload()
 
 
+def _runtime_db_status() -> dict[str, Any]:
+    runtime_db_path = default_db_path()
+    source_db_path = Path(os.environ.get("DARKWEB_COLLECTOR_SOURCE_DB_PATH", project_root() / "data" / "collector.db")).expanduser()
+    meta_path = Path(os.environ.get("DARKWEB_RUNTIME_DB_META_PATH", f"{runtime_db_path}.meta.json")).expanduser()
+
+    runtime_exists = runtime_db_path.exists()
+    source_exists = source_db_path.exists()
+    status = {
+        "runtime_db_path": str(runtime_db_path),
+        "source_db_path": str(source_db_path),
+        "using_runtime_db": runtime_db_path.resolve() != source_db_path.resolve() if runtime_exists and source_exists else str(runtime_db_path) != str(source_db_path),
+        "runtime_db_exists": runtime_exists,
+        "source_db_exists": source_exists,
+        "runtime_db_updated_at": _format_dt(datetime.fromtimestamp(runtime_db_path.stat().st_mtime, tz=timezone.utc).isoformat()) if runtime_exists else "",
+        "runtime_db_size_mb": round(runtime_db_path.stat().st_size / 1024 / 1024, 2) if runtime_exists else 0,
+        "meta_exists": meta_path.exists(),
+        "prepared_at": "",
+        "copied_counts": {},
+        "skipped_tables": {},
+    }
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        status["prepared_at"] = _format_dt(meta.get("prepared_at"))
+        status["copied_counts"] = meta.get("copied_counts") or {}
+        status["skipped_tables"] = meta.get("skipped_tables") or {}
+    return status
+
+
 def build_jobs_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
         crawl_jobs = [
@@ -1516,5 +1602,6 @@ def build_jobs_payload() -> dict[str, Any]:
         "recent_failures": recent_failures,
         "site_health": site_health,
         "vulnerability_sync": vulnerability_sync,
+        "runtime_db": _runtime_db_status(),
         "updated_at": _format_dt(_now_utc().isoformat()),
     }

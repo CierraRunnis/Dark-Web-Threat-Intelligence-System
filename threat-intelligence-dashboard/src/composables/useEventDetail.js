@@ -1,21 +1,13 @@
 import { ref } from 'vue'
 
-const DETAIL_CACHE_VERSION = '2026-04-08-rich-detail-v1'
+const DETAIL_CACHE_VERSION = '2026-04-09-rich-detail-v4'
 
 export function useEventDetail() {
   const detail = ref(null)
   const loading = ref(false)
+  const refreshing = ref(false)
   const error = ref(null)
-  const REQUEST_TIMEOUT_MS = 15000
-  const RETRY_DELAY_MS = 2500
-  let retryTimer = null
-
-  function clearRetryTimer() {
-    if (retryTimer) {
-      window.clearTimeout(retryTimer)
-      retryTimer = null
-    }
-  }
+  const REQUEST_TIMEOUT_MS = 8000
 
   function hasRichResources(payload) {
     if (!payload || typeof payload !== 'object') return false
@@ -25,14 +17,6 @@ export function useEventDetail() {
       (payload.mirror_resources && payload.mirror_resources.length) ||
       payload.json_preview_url
     )
-  }
-
-  function scheduleRetry(eventId) {
-    if (!eventId || retryTimer) return
-    retryTimer = window.setTimeout(() => {
-      retryTimer = null
-      load(eventId)
-    }, RETRY_DELAY_MS)
   }
 
   function loadFromSession(eventId) {
@@ -53,18 +37,22 @@ export function useEventDetail() {
   async function load(eventId) {
     if (!eventId) {
       detail.value = null
+      loading.value = false
+      refreshing.value = false
       return null
     }
 
-    clearRetryTimer()
-
-    const sessionDetail = loadFromSession(eventId)
+    const allowSessionPrefill = String(eventId).startsWith('vuln:')
+    const sessionDetail = allowSessionPrefill ? loadFromSession(eventId) : null
     const hasSessionDetail = !!sessionDetail
     if (sessionDetail) {
       detail.value = sessionDetail
+    } else if (!allowSessionPrefill) {
+      detail.value = null
     }
 
-    loading.value = true
+    loading.value = !hasSessionDetail
+    refreshing.value = hasSessionDetail
     error.value = null
     try {
       const controller = new AbortController()
@@ -78,7 +66,6 @@ export function useEventDetail() {
       window.clearTimeout(timeoutId)
       if (response.ok) {
         detail.value = await response.json()
-        clearRetryTimer()
         try {
           sessionStorage.setItem(
             `event-detail:${eventId}`,
@@ -102,18 +89,18 @@ export function useEventDetail() {
           : requestError
       if (!hasSessionDetail) {
         detail.value = null
-      } else if (!hasRichResources(sessionDetail)) {
-        scheduleRetry(eventId)
       }
       return detail.value
     } finally {
       loading.value = false
+      refreshing.value = false
     }
   }
 
   return {
     detail,
     loading,
+    refreshing,
     error,
     load,
   }

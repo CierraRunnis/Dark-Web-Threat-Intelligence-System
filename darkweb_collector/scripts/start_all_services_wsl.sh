@@ -7,13 +7,16 @@ API_HEALTH_URL="http://127.0.0.1:8000/api/health"
 FRONTEND_URL="http://127.0.0.1:5173"
 SERVICE_WAIT_SECONDS=45
 VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
-VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-20}"
+VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-300}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_ROOT="$(cd "$COLLECTOR_ROOT/../threat-intelligence-dashboard" && pwd)"
 COLLECTOR_VENV="$COLLECTOR_ROOT/venv"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+COLLECTOR_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
+COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$HOME/.local/share/bishe/collector.db}"
+COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_DB}.meta.json}"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -37,6 +40,9 @@ build_env_exports() {
   local exports=()
   exports+=("export REDIS_URL=$(printf '%q' "$REDIS_URL")")
   exports+=("export PYTHONPATH=$(printf '%q' "$COLLECTOR_ROOT/src"):\${PYTHONPATH:-}")
+  exports+=("export DARKWEB_COLLECTOR_DB_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB")")
+  exports+=("export DARKWEB_COLLECTOR_SOURCE_DB_PATH=$(printf '%q' "$COLLECTOR_SOURCE_DB")")
+  exports+=("export DARKWEB_RUNTIME_DB_META_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB_META")")
   for var_name in TOR_SOCKS_HOST TOR_SOCKS_PORT PROXY_HOST PROXY_PORT; do
     if [[ -n "${!var_name:-}" ]]; then
       exports+=("export ${var_name}=$(printf '%q' "${!var_name}")")
@@ -62,6 +68,15 @@ ensure_environment() {
     (
       cd "$DASHBOARD_ROOT"
       npm install
+    )
+  fi
+
+  if [[ ! -f "$COLLECTOR_RUNTIME_DB" ]]; then
+    info "runtime db missing, preparing stable WSL-local SQLite database"
+    (
+      cd "$COLLECTOR_ROOT"
+      source "$COLLECTOR_VENV/bin/activate"
+      python scripts/prepare_runtime_db.py --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
     )
   fi
 }
