@@ -182,6 +182,34 @@ ON vulnerability_records(cve_id);
 CREATE INDEX IF NOT EXISTS idx_vulnerability_records_time
 ON vulnerability_records(disclosure_time);
 
+CREATE TABLE IF NOT EXISTS ransomware_live_victims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    victim_id TEXT NOT NULL UNIQUE,
+    group_name TEXT NOT NULL,
+    victim_name TEXT NOT NULL,
+    website TEXT NOT NULL,
+    country_code TEXT NOT NULL,
+    activity TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    attacked_at TEXT NOT NULL,
+    post_url TEXT NOT NULL,
+    permalink TEXT NOT NULL,
+    screenshot_url TEXT NOT NULL,
+    description TEXT NOT NULL,
+    press_url TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ransomware_live_victims_attacked_at
+ON ransomware_live_victims(attacked_at);
+
+CREATE INDEX IF NOT EXISTS idx_ransomware_live_victims_discovered_at
+ON ransomware_live_victims(discovered_at);
+
+CREATE INDEX IF NOT EXISTS idx_ransomware_live_victims_last_seen_at
+ON ransomware_live_victims(last_seen_at);
+
 CREATE TABLE IF NOT EXISTS normalized_intelligence_events (
     event_id TEXT PRIMARY KEY,
     source_kind TEXT NOT NULL,
@@ -228,14 +256,29 @@ CREATE TABLE IF NOT EXISTS normalized_intelligence_cache_state (
 """
 
 
+def _ensure_schema(connection: sqlite3.Connection) -> None:
+    for statement in [item.strip() for item in SCHEMA.split(";") if item.strip()]:
+        try:
+            connection.execute(statement)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            # Older databases in the workspace may have pre-existing tables with
+            # narrower schemas. Ignore index-creation failures that only stem from
+            # missing legacy columns so we can still create newly added tables.
+            if "no such column" in message:
+                continue
+            raise
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = db_path.resolve()
     last_error: Exception | None = None
     for attempt in range(1, 6):
-        connection = sqlite3.connect(db_path, factory=ManagedConnection)
+        connection = sqlite3.connect(db_path, factory=ManagedConnection, timeout=30.0)
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA busy_timeout=30000")
             skip_wsl_checks = _should_skip_wal(resolved)
             if not skip_wsl_checks:
                 try:
@@ -254,8 +297,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
             if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
                 with _SCHEMA_INIT_LOCK:
                     if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
-                        if not _has_core_schema(connection):
-                            connection.executescript(SCHEMA)
+                        _ensure_schema(connection)
                         _SCHEMA_INIT_FINGERPRINTS.clear()
                         _SCHEMA_INIT_FINGERPRINTS.add(fingerprint)
             return connection
@@ -554,6 +596,7 @@ def upsert_forum_detail(connection: sqlite3.Connection, **kwargs) -> int:
         "content": kwargs.get("content", ""),
         "authors": kwargs.get("authors", ""),
         "timestamps": kwargs.get("timestamps", ""),
+        "published_at_utc": kwargs.get("published_at_utc", ""),
         "attachments": kwargs.get("attachments", ""),
         "victims": victims_str,
         "attackers": attackers_str,
@@ -790,6 +833,112 @@ def replace_vulnerability_records(connection: sqlite3.Connection, rows: list[dic
     connection.execute("DELETE FROM vulnerability_records")
     for row in rows:
         upsert_vulnerability_record(connection, row)
+
+
+def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict) -> int:
+    raw_json = payload.get("raw_json")
+    if isinstance(raw_json, str):
+        raw_json_text = raw_json
+    else:
+        raw_json_text = json.dumps(raw_json if raw_json is not None else payload, ensure_ascii=False)
+
+    cursor = connection.execute(
+        """
+        SELECT id
+        FROM ransomware_live_victims
+        WHERE victim_id = ?
+        """,
+        (payload["victim_id"],),
+    )
+    row = cursor.fetchone()
+    if row:
+        record_id = int(row[0])
+        connection.execute(
+            """
+            UPDATE ransomware_live_victims
+            SET group_name = ?, victim_name = ?, website = ?, country_code = ?, activity = ?,
+                discovered_at = ?, attacked_at = ?, post_url = ?, permalink = ?, screenshot_url = ?,
+                description = ?, press_url = ?, raw_json = ?, last_seen_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.get("group_name", ""),
+                payload.get("victim_name", ""),
+                payload.get("website", ""),
+                payload.get("country_code", ""),
+                payload.get("activity", ""),
+                payload.get("discovered_at", ""),
+                payload.get("attacked_at", ""),
+                payload.get("post_url", ""),
+                payload.get("permalink", ""),
+                payload.get("screenshot_url", ""),
+                payload.get("description", ""),
+                payload.get("press_url", ""),
+                raw_json_text,
+                payload.get("last_seen_at", ""),
+                record_id,
+            ),
+        )
+        return record_id
+
+    cursor = connection.execute(
+        """
+        INSERT INTO ransomware_live_victims (
+            victim_id, group_name, victim_name, website, country_code, activity,
+            discovered_at, attacked_at, post_url, permalink, screenshot_url,
+            description, press_url, raw_json, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["victim_id"],
+            payload.get("group_name", ""),
+            payload.get("victim_name", ""),
+            payload.get("website", ""),
+            payload.get("country_code", ""),
+            payload.get("activity", ""),
+            payload.get("discovered_at", ""),
+            payload.get("attacked_at", ""),
+            payload.get("post_url", ""),
+            payload.get("permalink", ""),
+            payload.get("screenshot_url", ""),
+            payload.get("description", ""),
+            payload.get("press_url", ""),
+            raw_json_text,
+            payload.get("last_seen_at", ""),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_ransomware_live_victims(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, victim_id, group_name, victim_name, website, country_code, activity,
+               discovered_at, attacked_at, post_url, permalink, screenshot_url,
+               description, press_url, raw_json, last_seen_at
+        FROM ransomware_live_victims
+        ORDER BY datetime(COALESCE(attacked_at, discovered_at)) DESC, id DESC
+        """
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_ransomware_live_sync_state(connection: sqlite3.Connection) -> dict[str, object]:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count,
+               MAX(last_seen_at) AS latest_seen_at,
+               MAX(COALESCE(attacked_at, discovered_at)) AS latest_disclosure_time
+        FROM ransomware_live_victims
+        """
+    ).fetchone()
+    if row is None:
+        return {
+            "count": 0,
+            "latest_seen_at": "",
+            "latest_disclosure_time": "",
+        }
+    return dict(row)
 
 
 def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:

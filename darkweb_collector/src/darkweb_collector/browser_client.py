@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+from threading import Lock, get_ident
 import traceback
 import time
 from dataclasses import dataclass
@@ -73,11 +74,11 @@ class BrowserClient:
                 # networkidle never triggers. Fall back to DOM readiness.
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
+            html = _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
             if hide_selectors:
                 selector_rules = ", ".join(hide_selectors)
                 page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
                 page.wait_for_timeout(500)
-            html = page.content()
             screenshot_png = None
             if screenshot_selectors:
                 try:
@@ -146,6 +147,7 @@ class BrowserClient:
             rendered_html = _inject_base_href(html, base_url)
             page.set_content(rendered_html, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
+            _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
             if hide_selectors:
                 selector_rules = ", ".join(hide_selectors)
                 page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
@@ -204,6 +206,17 @@ class BrowserClient:
 
 _GLOBAL_CLIENT: BrowserClient | None = None
 _GLOBAL_PROXY: BrowserProxyConfig | None = None
+_GLOBAL_CLIENT_THREAD_ID: int | None = None
+_GLOBAL_CLIENT_LOCK = Lock()
+
+_BROWSER_CHECK_MARKERS = (
+    "checking your browser",
+    "cf-browser-verification",
+    "security verification",
+    "verify you are human",
+    "please move your mouse or press a key",
+    "please wait while we verify",
+)
 
 
 def _inject_base_href(html: str, base_url: str) -> str:
@@ -215,19 +228,76 @@ def _inject_base_href(html: str, base_url: str) -> str:
     return f"<head>{base_tag}</head>{html}"
 
 
+def _looks_like_browser_check_page(html: str | None) -> bool:
+    content = str(html or "").lower()
+    return any(marker in content for marker in _BROWSER_CHECK_MARKERS)
+
+
+def _clear_browser_check_interstitial(
+    page,
+    *,
+    timeout_ms: int,
+    settle_wait_ms: int = 750,
+) -> str:
+    html = page.content()
+    if not _looks_like_browser_check_page(html):
+        return html
+
+    deadline = time.monotonic() + max(timeout_ms, settle_wait_ms) / 1000
+    viewport = getattr(page, "viewport_size", None) or {"width": 1440, "height": 960}
+    center_x = int(viewport.get("width", 1440) * 0.5)
+    center_y = int(viewport.get("height", 960) * 0.38)
+
+    while time.monotonic() < deadline:
+        page.mouse.move(center_x, center_y, steps=12)
+        page.wait_for_timeout(120)
+        page.mouse.click(center_x, center_y, delay=80)
+        page.wait_for_timeout(120)
+        page.mouse.wheel(0, 420)
+        page.wait_for_timeout(120)
+        for key in ("Tab", "Space"):
+            page.keyboard.press(key)
+            page.wait_for_timeout(120)
+            html = page.content()
+            if not _looks_like_browser_check_page(html):
+                page.wait_for_timeout(settle_wait_ms)
+                return page.content()
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(1500, timeout_ms))
+        except Exception:
+            pass
+        html = page.content()
+        if not _looks_like_browser_check_page(html):
+            page.wait_for_timeout(settle_wait_ms)
+            return page.content()
+    return html
+
+
+def _get_or_create_client(requested_proxy: BrowserProxyConfig) -> BrowserClient:
+    global _GLOBAL_CLIENT, _GLOBAL_PROXY, _GLOBAL_CLIENT_THREAD_ID
+    current_thread_id = get_ident()
+    with _GLOBAL_CLIENT_LOCK:
+        if (
+            _GLOBAL_CLIENT is None
+            or _GLOBAL_PROXY != requested_proxy
+            or _GLOBAL_CLIENT_THREAD_ID != current_thread_id
+        ):
+            close_browser_client()
+            _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
+            _GLOBAL_PROXY = requested_proxy
+            _GLOBAL_CLIENT_THREAD_ID = current_thread_id
+        return _GLOBAL_CLIENT
+
+
 def fetch_html_with_browser(
     url: str,
     wait_seconds: int,
     timeout_seconds: int,
     proxy_server: str | None = None,
 ) -> str:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
     requested_proxy = BrowserProxyConfig(server=proxy_server)
-    if _GLOBAL_CLIENT is None or _GLOBAL_PROXY != requested_proxy:
-        close_browser_client()
-        _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
-        _GLOBAL_PROXY = requested_proxy
-    html, _ = _GLOBAL_CLIENT.fetch_page_artifacts(
+    client = _get_or_create_client(requested_proxy)
+    html, _ = client.fetch_page_artifacts(
         url=url,
         wait_seconds=wait_seconds,
         timeout_seconds=timeout_seconds,
@@ -244,13 +314,9 @@ def fetch_page_artifacts_with_browser(
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
 ) -> tuple[str, bytes]:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
     requested_proxy = BrowserProxyConfig(server=proxy_server)
-    if _GLOBAL_CLIENT is None or _GLOBAL_PROXY != requested_proxy:
-        close_browser_client()
-        _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
-        _GLOBAL_PROXY = requested_proxy
-    return _GLOBAL_CLIENT.fetch_page_artifacts(
+    client = _get_or_create_client(requested_proxy)
+    return client.fetch_page_artifacts(
         url=url,
         wait_seconds=wait_seconds,
         timeout_seconds=timeout_seconds,
@@ -270,13 +336,9 @@ def screenshot_html_with_browser(
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
 ) -> bytes:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
     requested_proxy = BrowserProxyConfig(server=proxy_server)
-    if _GLOBAL_CLIENT is None or _GLOBAL_PROXY != requested_proxy:
-        close_browser_client()
-        _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
-        _GLOBAL_PROXY = requested_proxy
-    return _GLOBAL_CLIENT.screenshot_html_content(
+    client = _get_or_create_client(requested_proxy)
+    return client.screenshot_html_content(
         html=html,
         base_url=base_url,
         wait_seconds=wait_seconds,
@@ -288,11 +350,12 @@ def screenshot_html_with_browser(
 
 
 def close_browser_client() -> None:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
+    global _GLOBAL_CLIENT, _GLOBAL_PROXY, _GLOBAL_CLIENT_THREAD_ID
     if _GLOBAL_CLIENT is not None:
         _GLOBAL_CLIENT.close()
         _GLOBAL_CLIENT = None
     _GLOBAL_PROXY = None
+    _GLOBAL_CLIENT_THREAD_ID = None
 
 
 atexit.register(close_browser_client)

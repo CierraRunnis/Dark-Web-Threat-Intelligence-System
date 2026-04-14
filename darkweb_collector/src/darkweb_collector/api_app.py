@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from threading import Lock, Thread
@@ -13,18 +14,23 @@ from pydantic import BaseModel
 
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
+    dispatch_run_ransomware_sync_once,
     dispatch_run_site,
     dispatch_run_vulnerability_sync_once,
     get_continuous_dispatch_status,
+    get_ransomware_sync_status,
     get_vulnerability_sync_status,
+    start_ransomware_sync_dispatch,
     start_continuous_dispatch,
     start_vulnerability_sync_dispatch,
+    stop_ransomware_sync_dispatch,
     stop_continuous_dispatch,
     stop_vulnerability_sync_dispatch,
     update_site_enabled,
 )
-from darkweb_collector.api_data import build_behavior_payload, build_intelligence_payload, build_jobs_payload, warm_api_payloads
-from darkweb_collector.api_data import build_event_detail, build_event_records, build_vulnerability_detail, build_vulnerability_records
+import darkweb_collector.api_data as api_data_module
+import darkweb_collector.normalized_intelligence as normalized_intelligence_module
+from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
 from darkweb_collector.runtime import project_root
 
 
@@ -34,6 +40,11 @@ _warmup_lock = Lock()
 _warmup_started = False
 collector_output_dir = (project_root() / "output").resolve()
 collector_output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _reload_api_modules():
+    importlib.reload(normalized_intelligence_module)
+    return importlib.reload(api_data_module)
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,7 +64,7 @@ app.mount(
 def _run_payload_warmup() -> None:
     started_at = time.perf_counter()
     try:
-        warm_api_payloads()
+        _reload_api_modules().warm_api_payloads()
     except Exception:
         logger.exception("API warmup failed")
         return
@@ -80,27 +91,27 @@ def health() -> dict[str, str]:
 
 @app.get("/api/intelligence")
 def intelligence() -> dict:
-    return build_intelligence_payload()
+    return _reload_api_modules().build_intelligence_payload()
 
 
 @app.get("/api/jobs")
 def jobs() -> dict:
-    return build_jobs_payload()
+    return _reload_api_modules().build_jobs_payload()
 
 
 @app.get("/api/behavior")
 def behavior() -> dict:
-    return build_behavior_payload()
+    return _reload_api_modules().build_behavior_payload()
 
 
 @app.get("/api/events")
 def events() -> list[dict]:
-    return build_event_records()
+    return _reload_api_modules().build_event_records()
 
 
 @app.get("/api/events/{event_id}")
 def event_detail(event_id: str, translate_detail: bool = False) -> dict:
-    payload = build_event_detail(event_id, translate_detail=translate_detail)
+    payload = _reload_api_modules().build_event_detail(event_id, translate_detail=translate_detail)
     if payload is None:
         raise HTTPException(status_code=404, detail="event not found")
     return payload
@@ -113,7 +124,7 @@ def vulnerabilities(
     days: int | None = None,
     limit: int | None = None,
 ) -> list[dict]:
-    return build_vulnerability_records(
+    return _reload_api_modules().build_vulnerability_records(
         severity=severity,
         is_exploited=is_exploited,
         days=days,
@@ -123,7 +134,7 @@ def vulnerabilities(
 
 @app.get("/api/vulnerabilities/{event_id}")
 def vulnerability_detail(event_id: str) -> dict:
-    payload = build_vulnerability_detail(event_id)
+    payload = _reload_api_modules().build_vulnerability_detail(event_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="vulnerability event not found")
     return payload
@@ -149,6 +160,19 @@ class VulnerabilitySyncRunRequest(BaseModel):
 class VulnerabilitySyncStartRequest(BaseModel):
     interval_seconds: int = 3600
     limit: int = 300
+
+
+class RansomwareSyncRunRequest(BaseModel):
+    limit: int = 100
+
+
+class RansomwareSyncStartRequest(BaseModel):
+    interval_seconds: int = 3600
+    limit: int = 100
+
+
+class RansomwareConfigRequest(BaseModel):
+    api_key: str
 
 
 @app.post("/api/jobs/run-site")
@@ -202,6 +226,39 @@ def vulnerability_sync_start(payload: VulnerabilitySyncStartRequest) -> dict:
 @app.post("/api/vulnerabilities/sync/stop")
 def vulnerability_sync_stop() -> dict:
     return stop_vulnerability_sync_dispatch()
+
+
+@app.get("/api/ransomware/sync/status")
+def ransomware_sync_status() -> dict:
+    return get_ransomware_sync_status()
+
+
+@app.post("/api/ransomware/sync/run")
+def ransomware_sync_run(payload: RansomwareSyncRunRequest) -> dict:
+    return dispatch_run_ransomware_sync_once(limit=payload.limit)
+
+
+@app.post("/api/ransomware/sync/start")
+def ransomware_sync_start(payload: RansomwareSyncStartRequest) -> dict:
+    return start_ransomware_sync_dispatch(
+        interval_seconds=payload.interval_seconds,
+        limit=payload.limit,
+    )
+
+
+@app.post("/api/ransomware/sync/stop")
+def ransomware_sync_stop() -> dict:
+    return stop_ransomware_sync_dispatch()
+
+
+@app.get("/api/ransomware/config")
+def ransomware_config() -> dict:
+    return get_ransomware_live_config_status()
+
+
+@app.post("/api/ransomware/config")
+def ransomware_config_save(payload: RansomwareConfigRequest) -> dict:
+    return set_ransomware_live_api_key(payload.api_key)
 
 
 @app.post("/api/sites/{site_name}/enabled")

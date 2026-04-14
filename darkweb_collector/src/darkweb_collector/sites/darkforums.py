@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from urllib.parse import urljoin, urlparse
 
@@ -20,6 +20,18 @@ DETAIL_QUOTE_RE = re.compile(r'<blockquote[^>]*>.*?</blockquote>', re.IGNORECASE
 FIRST_POST_BLOCK_RE = re.compile(
     r'<div class="post classic .*?id="post_\d+".*?<!-- end: postbit_classic -->',
     re.IGNORECASE | re.DOTALL,
+)
+ABSOLUTE_TIMESTAMP_RE = re.compile(
+    r'(?P<day>\d{1,2})-(?P<month>\d{1,2})-(?P<year>\d{2,4}),\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM)',
+    re.IGNORECASE,
+)
+TEXTUAL_TIMESTAMP_RE = re.compile(
+    r'(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})\s+(?P<year>\d{4})(?:,\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM))?',
+    re.IGNORECASE,
+)
+RELATIVE_TIMESTAMP_RE = re.compile(
+    r'(?P<value>\d+)\s+(?P<unit>minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s+ago',
+    re.IGNORECASE,
 )
 
 def _clean_html_text(value: str) -> str:
@@ -40,6 +52,94 @@ def _clean_html_text(value: str) -> str:
 def _extract_domain(url: str) -> str:
     parsed = urlparse(url)
     return parsed.netloc
+
+
+def _parse_reference_dt(value: str | None) -> datetime:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            dt = None
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+    return datetime.now(timezone.utc)
+
+
+def normalize_darkforums_timestamp(value: str | None, *, collected_at_utc: str | None = None) -> str:
+    raw = _clean_html_text(value)
+    if not raw:
+        return ""
+
+    reference_dt = _parse_reference_dt(collected_at_utc)
+
+    match = ABSOLUTE_TIMESTAMP_RE.search(raw)
+    if match:
+        year = int(match.group("year"))
+        if year < 100:
+            year += 2000
+        hour = int(match.group("hour")) % 12
+        if match.group("ampm").upper() == "PM":
+            hour += 12
+        dt = datetime(
+            year,
+            int(match.group("month")),
+            int(match.group("day")),
+            hour,
+            int(match.group("minute")),
+            tzinfo=timezone.utc,
+        )
+        return dt.date().isoformat()
+
+    match = TEXTUAL_TIMESTAMP_RE.search(raw)
+    if match:
+        date_raw = f"{match.group('day')} {match.group('month')} {match.group('year')}"
+        parsed_dt = None
+        for fmt in ("%d %B %Y", "%d %b %Y"):
+            try:
+                parsed_dt = datetime.strptime(date_raw, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_dt is not None:
+            hour = int(match.group("hour") or 0)
+            minute = int(match.group("minute") or 0)
+            ampm = str(match.group("ampm") or "").upper()
+            if ampm:
+                hour = hour % 12
+                if ampm == "PM":
+                    hour += 12
+            dt = parsed_dt.replace(hour=hour, minute=minute, tzinfo=timezone.utc)
+            return dt.date().isoformat()
+
+    lowered = raw.lower()
+    if "yesterday" in lowered:
+        dt = reference_dt - timedelta(days=1)
+        return dt.date().isoformat()
+    if "today" in lowered:
+        return reference_dt.date().isoformat()
+
+    match = RELATIVE_TIMESTAMP_RE.search(lowered)
+    if match:
+        value_num = int(match.group("value"))
+        unit = match.group("unit").lower()
+        if unit.startswith("minute"):
+            delta = timedelta(minutes=value_num)
+        elif unit.startswith("hour"):
+            delta = timedelta(hours=value_num)
+        elif unit.startswith("day"):
+            delta = timedelta(days=value_num)
+        elif unit.startswith("week"):
+            delta = timedelta(weeks=value_num)
+        elif unit.startswith("month"):
+            delta = timedelta(days=30 * value_num)
+        else:
+            delta = timedelta(days=365 * value_num)
+        return (reference_dt - delta).date().isoformat()
+
+    return ""
 
 
 def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
@@ -253,15 +353,18 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     end_time = time.time()
     print(f"[{time.strftime('%H:%M:%S')}] Detail parsing completed in {end_time - start_time:.2f}s")
     
+    collected_at_utc = datetime.now(timezone.utc).isoformat()
+
     return {
         "site_name": "darkforums",
         "source_url": url,
         "domain": domain,
         "title": title,
-        "collected_at_utc": datetime.now(timezone.utc).isoformat(),
+        "collected_at_utc": collected_at_utc,
         "content": content,
         "author": author,
         "timestamp": timestamp,
+        "published_at_utc": normalize_darkforums_timestamp(timestamp, collected_at_utc=collected_at_utc),
         "attachments": attachments,
         "victims": victim_info,
         "attackers": attackers,

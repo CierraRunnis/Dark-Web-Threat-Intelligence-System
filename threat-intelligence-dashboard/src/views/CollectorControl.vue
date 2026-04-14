@@ -90,7 +90,7 @@
             <strong>{{ vulnerabilitySync.last_success_at || '暂无' }}</strong>
           </div>
           <div>
-            <span>最新漏洞日期</span>
+            <span>最新披露时间</span>
             <strong>{{ vulnerabilitySync.latest_disclosure_time || '暂无' }}</strong>
           </div>
           <div>
@@ -100,6 +100,94 @@
         </div>
         <div v-if="vulnerabilitySync.last_error" class="empty-state vulnerability-sync-error">
           <p>最近错误：{{ vulnerabilitySync.last_error }}</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="ti-card ti-reveal-up">
+      <div class="ti-card-header">
+        <div class="ti-card-title">ransomware.live 同步控制</div>
+        <div class="health-actions">
+          <el-input
+            v-model="ransomwareApiKeyInput"
+            type="password"
+            show-password
+            clearable
+            placeholder="填写 ransomware.live API Key"
+            style="width: 320px"
+          />
+          <el-button :loading="ransomwareConfigLoading" @click="saveRansomwareApiKey">
+            保存 Key
+          </el-button>
+          <el-select v-model="ransomwareIntervalHours" style="width: 150px">
+            <el-option label="每 1 小时" :value="1" />
+            <el-option label="每 4 小时" :value="4" />
+          </el-select>
+          <el-button plain :loading="ransomwareRunLoading" :disabled="!ransomwareConfig.has_api_key" @click="runRansomwareSyncOnce">
+            同步一次
+          </el-button>
+          <el-button
+            type="success"
+            :loading="ransomwareContinuousLoading"
+            :disabled="ransomwareSync.enabled || !ransomwareConfig.has_api_key"
+            @click="startRansomwareSync"
+          >
+            开始自动同步
+          </el-button>
+          <el-button
+            type="danger"
+            plain
+            :loading="ransomwareContinuousLoading"
+            :disabled="!ransomwareSync.enabled"
+            @click="stopRansomwareSync"
+          >
+            停止自动同步
+          </el-button>
+          <StatusBadge
+            :label="ransomwareSync.running ? '同步中' : ransomwareSync.enabled ? '自动运行中' : '未运行'"
+            :tone="ransomwareSync.running ? 'warning' : ransomwareSync.enabled ? 'success' : 'muted'"
+            :dot="false"
+          />
+          <StatusBadge
+            :label="ransomwareConfig.has_api_key ? '已配置 Key' : '未配置 Key'"
+            :tone="ransomwareConfig.has_api_key ? 'success' : 'warning'"
+            :dot="false"
+          />
+        </div>
+      </div>
+      <div class="ti-card-body">
+        <div class="vulnerability-sync-grid">
+          <div>
+            <span>当前 Key</span>
+            <strong>{{ ransomwareConfig.masked_api_key || '未配置' }}</strong>
+          </div>
+          <div>
+            <span>自动同步</span>
+            <strong>{{ ransomwareSync.enabled ? '已开启' : '未开启' }}</strong>
+          </div>
+          <div>
+            <span>同步间隔</span>
+            <strong>{{ ransomwareSync.interval_seconds ? `${Math.round(ransomwareSync.interval_seconds / 3600)} 小时` : '未设置' }}</strong>
+          </div>
+          <div>
+            <span>受害者记录</span>
+            <strong>{{ ransomwareSync.record_count || 0 }}</strong>
+          </div>
+          <div>
+            <span>最近同步</span>
+            <strong>{{ ransomwareSync.last_success_at || '暂无' }}</strong>
+          </div>
+          <div>
+            <span>最新披露时间</span>
+            <strong>{{ ransomwareSync.latest_disclosure_time || '暂无' }}</strong>
+          </div>
+          <div>
+            <span>最近结果</span>
+            <strong>{{ ransomwareSync.last_ingested ? `同步 ${ransomwareSync.last_ingested} 条` : '暂无' }}</strong>
+          </div>
+        </div>
+        <div v-if="ransomwareSync.last_error" class="empty-state vulnerability-sync-error">
+          <p>最近错误：{{ ransomwareSync.last_error }}</p>
         </div>
       </div>
     </section>
@@ -267,13 +355,27 @@ const continuousStatus = computed(() => continuousState.value || {})
 const siteHealth = computed(() => jobsData.value.site_health || [])
 const recentFailures = computed(() => jobsData.value.recent_failures || [])
 const vulnerabilitySync = computed(() => jobsData.value.vulnerability_sync || {})
+const ransomwareSync = computed(() => jobsData.value.ransomware_sync || {})
 const runtimeDbStatus = computed(() => jobsData.value.runtime_db || {})
+const ransomwareConfig = ref({
+  has_api_key: false,
+  masked_api_key: '',
+  source: 'none',
+  env_var: 'RANSOMWARE_LIVE_API_KEY',
+  settings_path: '',
+  updated_at: '',
+})
+const ransomwareApiKeyInput = ref('')
+const ransomwareConfigLoading = ref(false)
 
 const runningAllSites = ref(false)
 const continuousLoading = ref(false)
 const vulnerabilityRunLoading = ref(false)
 const vulnerabilityContinuousLoading = ref(false)
 const vulnerabilityIntervalHours = ref(1)
+const ransomwareRunLoading = ref(false)
+const ransomwareContinuousLoading = ref(false)
+const ransomwareIntervalHours = ref(1)
 const runningSiteMap = ref({})
 const togglingSiteMap = ref({})
 let pollTimer = null
@@ -297,7 +399,53 @@ function setSiteToggling(siteName, value) {
 }
 
 async function refreshAllPanels() {
-  await Promise.all([refreshIntelligence(), refreshJobs(), refreshContinuous()])
+  await Promise.all([refreshIntelligence(), refreshJobs(), refreshContinuous(), loadRansomwareConfig()])
+}
+
+async function loadRansomwareConfig() {
+  try {
+    const response = await fetch('/api/ransomware/config')
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+    ransomwareConfig.value = await response.json()
+  } catch {
+    ransomwareConfig.value = {
+      has_api_key: false,
+      masked_api_key: '',
+      source: 'none',
+      env_var: 'RANSOMWARE_LIVE_API_KEY',
+      settings_path: '',
+      updated_at: '',
+    }
+  }
+}
+
+async function saveRansomwareApiKey() {
+  const apiKey = String(ransomwareApiKeyInput.value || '').trim()
+  if (!apiKey) {
+    ElMessage.warning('请先填写 API Key')
+    return
+  }
+  ransomwareConfigLoading.value = true
+  try {
+    const response = await fetch('/api/ransomware/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey }),
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+    ransomwareConfig.value = await response.json()
+    ransomwareApiKeyInput.value = ''
+    ElMessage.success('API Key 已保存')
+    await refreshJobs()
+  } catch (error) {
+    ElMessage.error(error.message || '保存 API Key 失败')
+  } finally {
+    ransomwareConfigLoading.value = false
+  }
 }
 
 async function runSiteOnce(siteName) {
@@ -309,7 +457,7 @@ async function runSiteOnce(siteName) {
       body: JSON.stringify({ site_name: siteName, force: true }),
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || `${siteName} 已触发`)
@@ -330,7 +478,7 @@ async function toggleSite(siteName, enabled) {
       body: JSON.stringify({ enabled }),
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || `${siteName} 状态已更新`)
@@ -351,7 +499,7 @@ async function runAllSitesOnce() {
       body: JSON.stringify({ force: true }),
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(`已触发 ${payload.count} 个站点`)
@@ -370,7 +518,7 @@ async function startContinuousRun() {
       method: 'POST',
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || '已开始持久运行')
@@ -389,7 +537,7 @@ async function stopContinuousRun() {
       method: 'POST',
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || '已停止持久运行')
@@ -410,7 +558,7 @@ async function runVulnerabilitySyncOnce() {
       body: JSON.stringify({ limit: 300 }),
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || '已触发漏洞同步')
@@ -431,7 +579,7 @@ async function startVulnerabilitySync() {
       body: JSON.stringify({ interval_seconds: vulnerabilityIntervalHours.value * 3600, limit: 300 }),
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || '已开始漏洞自动同步')
@@ -450,7 +598,7 @@ async function stopVulnerabilitySync() {
       method: 'POST',
     })
     if (!response.ok) {
-      throw new Error(`请求失败：${response.status}`)
+      throw new Error(`请求失败: ${response.status}`)
     }
     const payload = await response.json()
     ElMessage.success(payload.message || '已停止漏洞自动同步')
@@ -462,7 +610,69 @@ async function stopVulnerabilitySync() {
   }
 }
 
+async function runRansomwareSyncOnce() {
+  ransomwareRunLoading.value = true
+  try {
+    const response = await fetch('/api/ransomware/sync/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 100 }),
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+    const payload = await response.json()
+    ElMessage.success(payload.message || '已触发 ransomware.live 同步')
+    await Promise.all([refreshJobs(), loadRansomwareConfig()])
+  } catch (error) {
+    ElMessage.error(error.message || 'ransomware.live 同步触发失败')
+  } finally {
+    ransomwareRunLoading.value = false
+  }
+}
+
+async function startRansomwareSync() {
+  ransomwareContinuousLoading.value = true
+  try {
+    const response = await fetch('/api/ransomware/sync/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_seconds: ransomwareIntervalHours.value * 3600, limit: 100 }),
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+    const payload = await response.json()
+    ElMessage.success(payload.message || '已开始 ransomware.live 自动同步')
+    await Promise.all([refreshJobs(), loadRansomwareConfig()])
+  } catch (error) {
+    ElMessage.error(error.message || '启动 ransomware.live 自动同步失败')
+  } finally {
+    ransomwareContinuousLoading.value = false
+  }
+}
+
+async function stopRansomwareSync() {
+  ransomwareContinuousLoading.value = true
+  try {
+    const response = await fetch('/api/ransomware/sync/stop', {
+      method: 'POST',
+    })
+    if (!response.ok) {
+      throw new Error(`请求失败: ${response.status}`)
+    }
+    const payload = await response.json()
+    ElMessage.success(payload.message || '已停止 ransomware.live 自动同步')
+    await Promise.all([refreshJobs(), loadRansomwareConfig()])
+  } catch (error) {
+    ElMessage.error(error.message || '停止 ransomware.live 自动同步失败')
+  } finally {
+    ransomwareContinuousLoading.value = false
+  }
+}
+
 onMounted(() => {
+  loadRansomwareConfig()
   pollTimer = window.setInterval(() => {
     refreshContinuous()
     refreshJobs()

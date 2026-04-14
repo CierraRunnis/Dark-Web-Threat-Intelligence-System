@@ -10,6 +10,7 @@ from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.orchestrator import enqueue_due_sites, run_site_once, show_runs
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
 from darkweb_collector.queueing import build_worker_command, queue_for_seed
+from darkweb_collector.ransomware_live import sync_ransomware_live_victims
 from darkweb_collector.state_store import get_state_store
 
 
@@ -35,7 +36,10 @@ def build_parser() -> ArgumentParser:
 
     sync_vulns_parser = subparsers.add_parser("sync-public-vulns")
     sync_vulns_parser.add_argument("--sample-file", default=None)
-    sync_vulns_parser.add_argument("--limit", type=int, default=20)
+    sync_vulns_parser.add_argument("--limit", type=int, default=300)
+
+    sync_ransomware_parser = subparsers.add_parser("sync-ransomware-live")
+    sync_ransomware_parser.add_argument("--limit", type=int, default=100)
 
     return parser
 
@@ -117,6 +121,11 @@ def _sync_public_vulns(sample_file: str | None, limit: int) -> int:
     return 0
 
 
+def _sync_ransomware_live(limit: int) -> int:
+    print(json.dumps(sync_ransomware_live_victims(limit=limit), ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -139,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         return _show_runs(args.limit)
     if args.command == "sync-public-vulns":
         return _sync_public_vulns(args.sample_file, args.limit)
+    if args.command == "sync-ransomware-live":
+        return _sync_ransomware_live(args.limit)
     parser.error(f"unsupported command: {args.command}")
     return 2
 
