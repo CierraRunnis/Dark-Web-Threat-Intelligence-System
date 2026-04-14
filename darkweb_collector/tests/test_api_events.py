@@ -175,6 +175,54 @@ class ApiEventsTests(unittest.TestCase):
                 self.assertIn("mirror_resources", detail)
                 self.assertIn("screenshot_resources", detail)
 
+    def test_forum_disclosure_time_prefers_post_timestamp_over_fetch_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, config_path), clear=False):
+                with get_db_connection() as connection:
+                    upsert_forum_topic(
+                        connection,
+                        site_name="darkforums",
+                        section="databases",
+                        title="XIAOMI China Database Leaked Download!",
+                        url="https://darkforums.su/Thread-XIAOMI-China-Database-Leaked-Download",
+                        author="Knox",
+                        replies="1",
+                        views="20",
+                        published_at="",
+                        last_reply_at="",
+                        content_hash="xiaomi-topic-hash",
+                        collected_at_utc="2026-04-11T09:00:00+00:00",
+                    )
+                    upsert_forum_detail(
+                        connection,
+                        site_name="darkforums",
+                        section="databases",
+                        topic_url="https://darkforums.su/Thread-XIAOMI-China-Database-Leaked-Download",
+                        content="full detail content",
+                        authors="Knox",
+                        timestamps="20-12-24, 08:02 PM",
+                        published_at_utc="2024-12-20T20:02:00+00:00",
+                        attachments="",
+                        victims=[{"name": "Xiaomi", "industry": "technology", "region": "asia"}],
+                        attackers=["darkforums"],
+                        content_hash="xiaomi-detail-hash",
+                        collected_at_utc="2026-04-11T09:00:00+00:00",
+                    )
+                    connection.commit()
+
+                events = build_event_records()
+                forum_event = next(item for item in events if item["original_title"] == "XIAOMI China Database Leaked Download!")
+                self.assertEqual("2024-12-20", forum_event["disclosure_time"])
+
+                detail = build_event_detail(forum_event["id"])
+                self.assertIsNotNone(detail)
+                self.assertEqual("2024-12-20", detail["disclosure_time"])
+
     def test_build_event_detail_hydrates_late_forum_artifacts_without_recollecting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

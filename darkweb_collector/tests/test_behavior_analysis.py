@@ -460,6 +460,85 @@ class BehaviorAnalysisTests(unittest.TestCase):
         )
         self.assertEqual("农业", normalized_intelligence._infer_industry(snippet))
 
+    def test_country_inference_supports_generic_country_names(self) -> None:
+        bundle = normalized_intelligence._infer_country_bundle(("title", 8, "Peru RENIEC national citizen database"))
+        self.assertEqual("PE", bundle["country_code"])
+
+    def test_country_label_supports_near_full_chinese_fallback(self) -> None:
+        self.assertEqual("孟加拉国", normalized_intelligence._label_country("BD"))
+        self.assertEqual("尼日利亚", normalized_intelligence._label_country("NG"))
+        self.assertEqual("荷兰", normalized_intelligence._label_country("NL"))
+
+    def test_forum_country_inference_ignores_source_topic_domain(self) -> None:
+        row = {
+            "id": 1,
+            "site_name": "darkforums",
+            "section": "databases",
+            "topic_url": "https://darkforums.su/thread-something",
+            "content": "credential sample without country clues",
+            "attachments": "",
+            "victims": "",
+            "attackers": "",
+            "fetched_at": "2026-04-10T00:00:00+00:00",
+            "raw_json": "{}",
+            "title": "Generic leak post",
+            "victim_names": "",
+            "industries": "",
+            "regions": "",
+        }
+        with patch("darkweb_collector.normalized_intelligence._enrich_domain") as mocked_enrich:
+            event = normalized_intelligence._build_forum_base_event(row, domain_cache={})
+        mocked_enrich.assert_not_called()
+        self.assertEqual("未知", event["country"])
+
+    def test_victim_country_inference_ignores_source_detail_domain(self) -> None:
+        row = {
+            "id": 1,
+            "site_name": "dragonforceblog",
+            "source_url": "https://dragonforce.example/listing",
+            "detail_url": "https://dragonforce.example/post/1",
+            "name": "Victim Org",
+            "display_label": "Victim Org",
+            "domain": "",
+            "status": "published",
+            "published_at_utc": "2026-04-10T00:00:00+00:00",
+            "raw_json": "{}",
+            "text_excerpt": "",
+            "page_title": "",
+            "fetched_at_utc": "",
+            "detail_raw_json": "{}",
+        }
+        with patch("darkweb_collector.normalized_intelligence._enrich_domain") as mocked_enrich:
+            event = normalized_intelligence._build_victim_base_event(row, domain_cache={})
+        mocked_enrich.assert_not_called()
+        self.assertEqual("未知", event["country"])
+
+    def test_low_confidence_ip_geo_country_is_not_propagated(self) -> None:
+        events = [
+            {
+                "victim_key": "acme",
+                "country": "美国",
+                "country_code": "US",
+                "region": "北美",
+                "industry": "科技",
+                "confidence_score": 40,
+                "completeness_score": 40,
+                "metadata": {"country_source": "ip_geo", "country_score": 4, "industry_source": "title", "industry_score": 8},
+            },
+            {
+                "victim_key": "acme",
+                "country": "未知",
+                "country_code": "",
+                "region": "未知",
+                "industry": "未知",
+                "confidence_score": 20,
+                "completeness_score": 20,
+                "metadata": {},
+            },
+        ]
+        normalized_intelligence._propagate_entity_context(events)
+        self.assertEqual("未知", events[1]["country"])
+
     def test_display_title_for_data_leak_is_explicit(self) -> None:
         with patch(
             "darkweb_collector.normalized_intelligence.translate_event_title_live",
@@ -525,3 +604,69 @@ class BehaviorAnalysisTests(unittest.TestCase):
                 self.assertIn("threatExecutivePriorityEvents", payload)
                 self.assertIn("threatExecutiveCoverage", payload)
                 self.assertTrue(payload["threatExecutiveCountries"])
+
+    def test_executive_countries_excludes_vulnerability_only_country_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, config_path), clear=False):
+                with get_db_connection() as connection:
+                    upsert_victim(
+                        connection,
+                        run_id=1,
+                        payload={
+                            "site_name": "dragonforce",
+                            "source_url": "http://dragon.onion/",
+                            "detail_url": "https://fr-victim.example/",
+                            "name": "French Victim",
+                            "display_label": "French Victim",
+                            "domain": "fr-victim.example",
+                            "status": "published",
+                            "published_at_utc": "2026-03-18T02:00:00+00:00",
+                            "claimed_size": "10G",
+                            "claimed_size_gb": 10.0,
+                            "content_hash": "fr-victim-hash",
+                            "last_detail_fetch_status": "ok",
+                            "raw_json": json.dumps({"description": "Company in France"}),
+                        },
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO vulnerability_records (
+                            source_name, source_type, cve_id, title, vendor, product, vulnerability_type,
+                            severity, cvss, is_exploited, has_poc, patch_available, wide_impact,
+                            disclosure_time, affected_versions, summary, advisory_url, reference_urls_json,
+                            raw_json, last_seen_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "securityweek",
+                            "media",
+                            "CVE-2026-9999",
+                            "United States infrastructure issue",
+                            "Example Vendor",
+                            "Example Product",
+                            "Remote Code Execution",
+                            "high",
+                            8.8,
+                            0,
+                            0,
+                            1,
+                            0,
+                            "2026-03-19T02:00:00+00:00",
+                            "[]",
+                            "Issue impacting systems in New York, United States.",
+                            "https://example.com/advisory",
+                            "[]",
+                            "{}",
+                            "2026-03-19T02:00:00+00:00",
+                        ),
+                    )
+                    connection.commit()
+
+                payload = build_intelligence_payload()
+                self.assertTrue(payload["threatExecutiveCountries"])
+                self.assertEqual("法国", payload["threatExecutiveCountries"][0]["name"])

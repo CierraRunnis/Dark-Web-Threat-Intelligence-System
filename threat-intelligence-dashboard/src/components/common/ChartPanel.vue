@@ -7,7 +7,6 @@
           <span>{{ eyebrow }}</span>
         </div>
         <h3 class="chart-panel__title">{{ title }}</h3>
-        <p v-if="description" class="chart-panel__description">{{ description }}</p>
       </div>
       <div v-if="$slots.actions" class="chart-panel__actions">
         <slot name="actions" />
@@ -73,13 +72,6 @@ defineProps({
   color: var(--ti-text-primary);
   font-size: 18px;
   line-height: 1.3;
-}
-
-.chart-panel__description {
-  margin: 6px 0 0;
-  color: var(--ti-text-secondary);
-  font-size: 13px;
-  line-height: 1.6;
 }
 
 .chart-panel__body {

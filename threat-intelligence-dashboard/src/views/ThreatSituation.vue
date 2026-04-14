@@ -2,23 +2,8 @@
   <div class="threat-situation-page ti-page">
     <section class="ti-panel ti-reveal-up executive-hero">
       <div class="executive-hero__copy">
-        <span class="ti-kicker">领导汇报视图</span>
         <h2>近 30 天威胁态势总览</h2>
         <p>{{ executiveSummary }}</p>
-      </div>
-      <div class="executive-hero__metrics">
-        <div class="executive-hero__metric">
-          <span>国家覆盖率</span>
-          <strong :class="{ 'is-warning': coverage.countryCoverageRate < 80 }">{{ coverage.countryCoverageRate }}%</strong>
-        </div>
-        <div class="executive-hero__metric">
-          <span>地区覆盖率</span>
-          <strong :class="{ 'is-warning': coverage.regionCoverageRate < 80 }">{{ coverage.regionCoverageRate }}%</strong>
-        </div>
-        <div class="executive-hero__metric">
-          <span>行业覆盖率</span>
-          <strong :class="{ 'is-warning': coverage.industryCoverageRate < 80 }">{{ coverage.industryCoverageRate }}%</strong>
-        </div>
       </div>
     </section>
 
@@ -50,7 +35,6 @@
       <ChartPanel
         eyebrow="趋势判断"
         title="30 天攻击态势趋势"
-        description="直接判断近期攻击总量与高风险事件是上升还是下降。"
         icon="TrendCharts"
         height="360px"
       >
@@ -60,7 +44,6 @@
       <ChartPanel
         eyebrow="重点国家"
         title="受害国家 Top 10"
-        description="按事件数量排序，辅助识别当前最需要汇报的重点国家。"
         icon="Histogram"
         height="360px"
       >
@@ -70,7 +53,6 @@
       <ChartPanel
         eyebrow="受害行业"
         title="重点受害行业分布"
-        description="展示当前统计样本中的全部已识别行业，并按占比展开。"
         icon="PieChart"
         height="420px"
       >
@@ -80,8 +62,7 @@
 
       <ChartPanel
         eyebrow="活跃组织"
-        title="活跃泄露组织 Top 10"
-        description="按出现次数从高到低排序，辅助识别近期最活跃的泄露主体。"
+        title="活跃的勒索组织 Top 10"
         icon="Histogram"
         height="420px"
       >
@@ -170,12 +151,6 @@ const cards = computed(() => resolveObjectSection('threatExecutiveCards', {
   topCountryEventCount: 0,
 }))
 
-const coverage = computed(() => resolveObjectSection('threatExecutiveCoverage', {
-  countryCoverageRate: 0,
-  regionCoverageRate: 0,
-  industryCoverageRate: 0,
-}))
-
 const trend = computed(() => resolveObjectSection('threatExecutiveTrend', {
   labels: [],
   total: [],
@@ -217,7 +192,7 @@ const hasIndustryDistribution = computed(() => industryDistribution.value.length
 
 const activeActors = computed(() => {
   const grouped = new Map()
-  for (const event of threatEvents.value) {
+  for (const event of ransomwareEvents.value) {
     const actor = normalizeText(event.attacker)
     if (!actor || actor === '未知') continue
     const current = grouped.get(actor) || { actor, value: 0, riskTotal: 0 }
@@ -251,12 +226,7 @@ const trendOption = computed(() => ({
     bottom: 0,
     textStyle: { color: '#6b7280' },
   },
-  grid: {
-    top: 20,
-    right: 16,
-    bottom: 42,
-    left: 44,
-  },
+  grid: { top: 20, right: 16, bottom: 42, left: 44 },
   xAxis: {
     type: 'category',
     data: trend.value.labels,
@@ -298,12 +268,7 @@ const trendOption = computed(() => ({
 
 const countriesOption = computed(() => ({
   tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-  grid: {
-    top: 20,
-    right: 16,
-    bottom: 20,
-    left: 72,
-  },
+  grid: { top: 20, right: 16, bottom: 20, left: 72 },
   xAxis: {
     type: 'value',
     axisLine: { show: false },
@@ -526,14 +491,11 @@ function viewEventDetail(row) {
 
 <style scoped lang="scss">
 .executive-hero {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: flex-start;
+  display: block;
 }
 
 .executive-hero__copy h2 {
-  margin: 10px 0 0;
+  margin: 0;
   font-size: 36px;
   line-height: 1.15;
   color: var(--ti-text-primary);
@@ -544,37 +506,6 @@ function viewEventDetail(row) {
   color: var(--ti-text-secondary);
   font-size: 15px;
   line-height: 1.7;
-}
-
-.executive-hero__metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
-  min-width: 360px;
-}
-
-.executive-hero__metric {
-  padding: 16px 18px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.executive-hero__metric span {
-  display: block;
-  color: var(--ti-text-muted);
-  font-size: 12px;
-}
-
-.executive-hero__metric strong {
-  display: block;
-  margin-top: 8px;
-  color: var(--ti-text-primary);
-  font-size: 28px;
-}
-
-.executive-hero__metric strong.is-warning {
-  color: #dc2626;
 }
 
 .cards-grid {
@@ -638,11 +569,6 @@ function viewEventDetail(row) {
 }
 
 @media (max-width: 1280px) {
-  .executive-hero {
-    flex-direction: column;
-  }
-
-  .executive-hero__metrics,
   .cards-grid,
   .charts-grid {
     grid-template-columns: 1fr;

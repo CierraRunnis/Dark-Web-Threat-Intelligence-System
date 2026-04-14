@@ -12,6 +12,14 @@ import socket
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+try:
+    import pycountry
+except Exception:  # pragma: no cover - optional until dependencies are installed
+    pycountry = None
+try:
+    from babel import Locale
+except Exception:  # pragma: no cover - optional until dependencies are installed
+    Locale = None
 
 from darkweb_collector.config import get_site_config
 from darkweb_collector.detail_i18n import translate_event_title_live
@@ -19,10 +27,12 @@ from darkweb_collector.db import (
     get_normalized_intelligence_cache_state,
     get_normalized_intelligence_event,
     list_normalized_intelligence_events,
+    list_ransomware_live_victims,
     replace_normalized_intelligence_events,
     upsert_normalized_intelligence_cache_state,
 )
 from darkweb_collector.runtime import project_root
+from darkweb_collector.sites.darkforums import normalize_darkforums_timestamp
 from darkweb_collector.utils import safe_stem
 from darkweb_collector.vulnerability_i18n import (
     build_affected_version_items,
@@ -47,9 +57,12 @@ SOURCE_LABELS = {
     "lynx": "Lynx",
     "cisa_kev": "CISA KEV",
     "nvd": "NVD",
+    "nvd_recent": "NVD Recent",
+    "github_advisories": "GitHub Advisory DB",
     "securityweek": "SecurityWeek",
     "apache": "Apache Security",
     "vendor_oracle": "Oracle Security",
+    "ransomware_live": "ransomware.live",
 }
 
 STATUS_LABELS = {
@@ -119,10 +132,12 @@ COUNTRY_LABELS = {
     "CH": "瑞士",
     "MY": "马来西亚",
     "EG": "埃及",
+    "MA": "摩洛哥",
     "AR": "阿根廷",
     "BR": "巴西",
     "IN": "印度",
     "ID": "印度尼西亚",
+    "PE": "秘鲁",
     "PL": "波兰",
     "JP": "日本",
     "KR": "韩国",
@@ -163,11 +178,13 @@ COUNTRY_REGION_MAP = {
     "SA": "中东",
     "ZA": "非洲",
     "EG": "非洲",
+    "MA": "非洲",
     "ET": "非洲",
     "IQ": "中东",
     "AR": "南美",
     "BR": "南美",
     "CL": "南美",
+    "PE": "南美",
     "VE": "南美",
     "AU": "大洋洲",
     "NZ": "大洋洲",
@@ -288,6 +305,16 @@ NOISY_VICTIM_DOMAINS = {
     "mega.nz",
 }
 
+SOURCE_HOSTNAME_KEYWORDS = {
+    "darkforums",
+    "dragonforce",
+    "chaos",
+    "lynx",
+    "blogspot",
+    "wordpress",
+    "onion",
+}
+
 INDUSTRY_PRIORITY = [
     "军事",
     "金融",
@@ -392,9 +419,31 @@ REGION_KEYWORDS = {
     "大洋洲": ["australia", "new zealand", "oceania"],
 }
 
+RANSOMWARE_LIVE_ACTIVITY_LABELS = {
+    "transportation/logistics": "交通运输",
+    "education": "教育",
+    "technology": "科技",
+    "healthcare": "医疗",
+    "financial services": "金融",
+    "manufacturing": "制造业",
+    "energy": "能源",
+    "retail": "零售",
+    "telecommunication": "通信",
+    "telecommunications": "通信",
+    "government": "政府",
+    "construction": "建筑业",
+    "business services": "企业服务",
+    "consumer services": "消费服务",
+    "hospitality and tourism": "酒店旅游",
+    "charitable organizations": "公益组织",
+    "agriculture": "农业",
+    "not found": "未知",
+    "": "未知",
+}
+
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-04-10-darkforums-artifacts-industry-v1"
+NORMALIZATION_VERSION = "2026-04-13-ransomware-live-v1"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -653,7 +702,24 @@ def _label_source(value: str | None) -> str:
 
 def _label_country(code: str | None) -> str:
     raw = _normalize_label(code).upper()
-    return COUNTRY_LABELS.get(raw, "未知")
+    if raw in COUNTRY_LABELS:
+        return COUNTRY_LABELS[raw]
+    if Locale is not None and raw:
+        try:
+            locale = Locale.parse("zh_Hans_CN")
+            translated = locale.territories.get(raw)
+        except Exception:
+            translated = None
+        if translated:
+            return str(translated)
+    if pycountry is not None and raw:
+        try:
+            country = pycountry.countries.get(alpha_2=raw)
+        except Exception:
+            country = None
+        if country is not None:
+            return str(getattr(country, "name", "") or raw)
+    return "未知"
 
 
 def _region_from_country_code(code: str | None) -> str:
@@ -669,6 +735,90 @@ def _display_region(country: str | None, macro_region: str | None) -> str:
     if region_label and region_label != "未知":
         return region_label
     return "未知"
+
+
+def _translate_ransomware_live_activity(value: str | None) -> str:
+    raw = _normalize_label(value)
+    lowered = raw.lower()
+    if lowered in RANSOMWARE_LIVE_ACTIVITY_LABELS:
+        return RANSOMWARE_LIVE_ACTIVITY_LABELS[lowered]
+    if "transport" in lowered or "logistics" in lowered:
+        return "交通运输"
+    if "education" in lowered or "school" in lowered or "university" in lowered:
+        return "教育"
+    if "tech" in lowered or "software" in lowered:
+        return "科技"
+    if "health" in lowered or "medical" in lowered:
+        return "医疗"
+    if "financial" in lowered or "finance" in lowered or "bank" in lowered:
+        return "金融"
+    if "manufact" in lowered or "industrial" in lowered:
+        return "制造业"
+    if "energy" in lowered or "oil" in lowered or "gas" in lowered:
+        return "能源"
+    if "retail" in lowered:
+        return "零售"
+    if "telecom" in lowered or "communication" in lowered:
+        return "通信"
+    if "government" in lowered or "public sector" in lowered:
+        return "政府"
+    if "construction" in lowered or "builder" in lowered:
+        return "建筑业"
+    if "business service" in lowered:
+        return "企业服务"
+    if "consumer service" in lowered:
+        return "消费服务"
+    if "tourism" in lowered or "hospitality" in lowered:
+        return "酒店旅游"
+    if "charit" in lowered or "non-profit" in lowered:
+        return "公益组织"
+    if "agri" in lowered or "farm" in lowered:
+        return "农业"
+    return "其他"
+
+
+_GENERIC_COUNTRY_PATTERNS: list[tuple[str, re.Pattern[str], str]] | None = None
+
+
+def _generic_country_patterns() -> list[tuple[str, re.Pattern[str], str]]:
+    global _GENERIC_COUNTRY_PATTERNS
+    if _GENERIC_COUNTRY_PATTERNS is not None:
+        return _GENERIC_COUNTRY_PATTERNS
+
+    patterns: list[tuple[str, re.Pattern[str], str]] = []
+    if pycountry is None:
+        _GENERIC_COUNTRY_PATTERNS = patterns
+        return patterns
+
+    seen: set[tuple[str, str]] = set()
+    skipped_alpha2 = {"US", "GB", "AE", "SA", "GE", "LA"}
+    for country in pycountry.countries:
+        code = str(getattr(country, "alpha_2", "") or "").upper()
+        if not code or code in skipped_alpha2:
+            continue
+        aliases = {
+            str(getattr(country, "name", "") or "").strip(),
+            str(getattr(country, "official_name", "") or "").strip(),
+            str(getattr(country, "common_name", "") or "").strip(),
+        }
+        for alias in aliases:
+            normalized_alias = alias.lower()
+            if not normalized_alias or len(normalized_alias) < 4:
+                continue
+            key = (code, normalized_alias)
+            if key in seen:
+                continue
+            seen.add(key)
+            patterns.append(
+                (
+                    code,
+                    re.compile(rf"(?<![a-z0-9]){re.escape(normalized_alias)}(?![a-z0-9])", re.IGNORECASE),
+                    alias,
+                )
+            )
+
+    _GENERIC_COUNTRY_PATTERNS = patterns
+    return patterns
 
 
 def _clean_display_subject(value: str | None) -> str:
@@ -868,12 +1018,23 @@ def _resolve_ip_country(domain: str) -> tuple[str, str]:
     return country_code, ip
 
 
-def _enrich_domain(domain: str, cache: dict[str, Any]) -> dict[str, Any]:
+def _enrich_domain(domain: str, cache: dict[str, Any], *, allow_ip_geo: bool = True) -> dict[str, Any]:
     normalized = _normalize_domain(domain)
     if not normalized or _is_noisy_domain(normalized):
         return {}
     cached = cache.get(normalized)
     if isinstance(cached, dict):
+        if str(cached.get("country_source") or "") == "ip_geo":
+            cached = {
+                **cached,
+                "country": "未知",
+                "country_code": "",
+                "macro_region": "未知",
+                "country_source": "unknown",
+                "country_score": 0,
+                "country_evidence": [],
+            }
+            cache[normalized] = cached
         return cached
     if int(cache.get("__remaining__", DOMAIN_ENRICHMENT_BUDGET)) <= 0:
         return {}
@@ -932,18 +1093,6 @@ def _enrich_domain(domain: str, cache: dict[str, Any]) -> dict[str, Any]:
         ("followup_pages", 5, followup_text),
     )
 
-    if geo_bundle["country"] == "未知":
-        country_code, ip = _resolve_ip_country(normalized)
-        if country_code:
-            geo_bundle = {
-                "country": _label_country(country_code),
-                "country_code": country_code,
-                "macro_region": _region_from_country_code(country_code),
-                "source": "ip_geo",
-                "score": 4,
-                "evidence": [ip],
-            }
-
     enriched = {
         "domain": normalized,
         "fetched_url": fetched_url,
@@ -970,6 +1119,35 @@ def _pick_primary_domain(*values: str) -> str:
             if not _is_noisy_domain(domain):
                 return domain
     return ""
+
+
+def _source_base_domains(*urls: str) -> set[str]:
+    domains: set[str] = set()
+    for url in urls:
+        domain = _normalize_domain(_extract_domain_from_url(url))
+        if not domain:
+            continue
+        domains.add(domain)
+        base_domain = _to_base_domain(domain)
+        if base_domain:
+            domains.add(base_domain)
+    return domains
+
+
+def _filter_country_candidate_domains(domains: list[str], *source_urls: str) -> list[str]:
+    excluded = _source_base_domains(*source_urls)
+    filtered: list[str] = []
+    for domain in domains:
+        normalized = _normalize_domain(domain)
+        if not normalized:
+            continue
+        base_domain = _to_base_domain(normalized)
+        if normalized in excluded or (base_domain and base_domain in excluded):
+            continue
+        if any(keyword in normalized for keyword in SOURCE_HOSTNAME_KEYWORDS):
+            continue
+        filtered.append(normalized)
+    return list(dict.fromkeys(filtered))
 
 
 def _count_keyword_matches(text: str, keyword: str) -> int:
@@ -1044,6 +1222,15 @@ def _infer_country_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
                 sources[code].append(f"{source_name}:domain")
                 evidence[code].append(domain)
 
+        for code, pattern, alias in _generic_country_patterns():
+            match = pattern.search(lowered)
+            if not match:
+                continue
+            scores[code] += max(1, weight - 1)
+            sources[code].append(f"{source_name}:generic_country")
+            evidence[code].append(match.group(0) or alias)
+            break
+
     if not scores:
         return {
             "country": "未知",
@@ -1115,7 +1302,14 @@ def _propagate_entity_context(events: list[dict[str, Any]]) -> None:
         )
         for event in victim_events:
             metadata = event.setdefault("metadata", {})
-            if event.get("country") in {"", "未知"} and best_country_event.get("country") not in {"", "未知"}:
+            best_country_meta = best_country_event.get("metadata", {}) or {}
+            best_country_source = str(best_country_meta.get("country_source") or "")
+            best_country_score = int(best_country_meta.get("country_score") or 0)
+            can_propagate_country = (
+                best_country_event.get("country") not in {"", "未知"}
+                and (best_country_source != "ip_geo" or best_country_score >= 6)
+            )
+            if event.get("country") in {"", "未知"} and can_propagate_country:
                 event["country"] = best_country_event["country"]
                 event["country_code"] = best_country_event.get("country_code") or ""
                 event["region"] = best_country_event.get("region") or event.get("region") or "未知"
@@ -1568,6 +1762,14 @@ def _source_signature_payload(connection) -> dict[str, Any]:
         FROM vulnerability_records
         """
     ).fetchone()
+    ransomware_live_stats = connection.execute(
+        """
+        SELECT COUNT(*) AS count, MAX(id) AS max_id,
+               MAX(COALESCE(attacked_at, discovered_at)) AS latest_at,
+               MAX(last_seen_at) AS latest_seen_at
+        FROM ransomware_live_victims
+        """
+    ).fetchone()
     return {
         "normalization_version": NORMALIZATION_VERSION,
         "forum_details": dict(forum_stats),
@@ -1576,6 +1778,7 @@ def _source_signature_payload(connection) -> dict[str, Any]:
         "victims": dict(victim_stats),
         "victim_details": dict(victim_detail_stats),
         "vulnerability_records": dict(vulnerability_stats),
+        "ransomware_live_victims": dict(ransomware_live_stats),
     }
 
 
@@ -1611,7 +1814,7 @@ def should_refresh_normalized_intelligence(connection) -> bool:
 def _forum_rows(connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
-        SELECT d.id, d.site_name, d.section, d.topic_url, d.content, d.attachments,
+        SELECT d.id, d.site_name, d.section, d.topic_url, d.content, d.timestamps, d.attachments,
                d.victims, d.attackers, d.fetched_at, d.raw_json,
                COALESCE(t.title, d.topic_url) AS title,
                GROUP_CONCAT(fv.victim_name, '||') AS victim_names,
@@ -1652,6 +1855,22 @@ def _victim_rows(connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _resolve_forum_disclosure_time(row: dict[str, Any]) -> str:
+    raw_json = _parse_json(row.get("raw_json"))
+    explicit = _normalize_label(raw_json.get("published_at_utc"))
+    if explicit:
+        dt = _parse_dt(explicit)
+        if dt is not None:
+            return dt.date().isoformat()
+        return explicit.split("T", 1)[0]
+    timestamp_raw = _normalize_label(row.get("timestamps") or raw_json.get("timestamps") or raw_json.get("timestamp"))
+    if timestamp_raw:
+        normalized = normalize_darkforums_timestamp(timestamp_raw, collected_at_utc=row.get("fetched_at"))
+        if normalized:
+            return normalized
+    return row.get("fetched_at") or ""
+
+
 def _vulnerability_rows(connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
@@ -1666,18 +1885,26 @@ def _vulnerability_rows(connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _ransomware_live_rows(connection) -> list[dict[str, Any]]:
+    return list_ransomware_live_victims(connection)
+
+
 def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | None = None) -> dict[str, Any]:
     title = _normalize_label(row.get("title")) or _normalize_label(row.get("topic_url")) or "未命名论坛帖子"
     content = _normalize_whitespace(row.get("content"))
     topic_url = _normalize_label(row.get("topic_url"))
     raw_json = _parse_json(row.get("raw_json"))
     topic_url = _normalize_label(row.get("topic_url"))
+    disclosure_time = _resolve_forum_disclosure_time(row)
     victim_names = [item for item in str(row.get("victim_names") or "").split("||") if _normalize_label(item)]
     victim_candidates = victim_names[:]
     victims_field = _normalize_label(row.get("victims"))
     if victims_field:
         victim_candidates.extend(part for part in victims_field.split(",") if _normalize_label(part))
-    domain_candidates = _extract_domains(title, content, victims_field)
+    domain_candidates = _filter_country_candidate_domains(
+        _extract_domains(title, content, victims_field),
+        topic_url,
+    )
     victim, victim_key = _pick_primary_victim(victim_candidates, title, content, domain_candidates)
     attacker_candidates = [_normalize_label(item) for item in str(row.get("attackers") or "").split(",") if _normalize_label(item)]
     attacker = attacker_candidates[0] if attacker_candidates else _label_source(row.get("site_name"))
@@ -1704,12 +1931,11 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
         ("title", 9, title),
         ("content", 6, content),
         ("victim", 5, victim),
-        ("url", 4, topic_url),
         ("domains", 4, " ".join(domain_candidates)),
     )
-    primary_domain = _pick_primary_domain(victim, topic_url, " ".join(domain_candidates))
+    primary_domain = _pick_primary_domain(victim, " ".join(domain_candidates))
     if domain_cache is not None and primary_domain and (geo_bundle["country"] == "未知" or industry_bundle["industry"] == "未知"):
-        enrichment = _enrich_domain(primary_domain, domain_cache)
+        enrichment = _enrich_domain(primary_domain, domain_cache, allow_ip_geo=False)
         if enrichment and geo_bundle["country"] == "未知" and enrichment.get("country") not in {"", "未知"}:
             geo_bundle = {
                 "country": enrichment["country"],
@@ -1752,7 +1978,7 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
         "country": geo_bundle["country"],
         "country_code": geo_bundle["country_code"],
         "region": region,
-        "disclosure_time": row.get("fetched_at") or "",
+        "disclosure_time": disclosure_time,
         "severity": severity,
         "source_url": topic_url,
         "detail_text": content,
@@ -1769,10 +1995,13 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
             "section": str(row.get("section") or ""),
             "source": str(row.get("site_name") or ""),
             "source_label": _label_source(row.get("site_name")),
+            "source_name": str(row.get("site_name") or ""),
+            "source_labels": [_label_source(row.get("site_name"))],
+            "source_names": [str(row.get("site_name") or "")] if str(row.get("site_name") or "") else [],
             "updated_time": row.get("fetched_at") or "",
             "victim_candidates": _clean_entity_candidates(victim_candidates)[:8],
             "domain_candidates": domain_candidates[:8],
-            "published_label": _format_date(row.get("fetched_at")),
+            "published_label": _format_date(disclosure_time),
             "resource_count": len(mirror_resources),
             "country_source": geo_bundle["source"],
             "country_score": geo_bundle["score"],
@@ -1837,12 +2066,11 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
         ("description", 6, _normalize_label(raw_json.get("description"))),
         ("location", 7, location),
         ("website", 5, website_url),
-        ("detail_url", 4, detail_url),
         ("domain", 5, domain),
         ("detail", 5, detail_text),
         ("victim", 4, victim),
     )
-    primary_domain = _pick_primary_domain(domain, website_url, detail_url, victim)
+    primary_domain = _pick_primary_domain(domain, website_url, victim)
     if domain_cache is not None and primary_domain and (geo_bundle["country"] == "未知" or industry_bundle["industry"] == "未知"):
         enrichment = _enrich_domain(primary_domain, domain_cache)
         if enrichment and geo_bundle["country"] == "未知" and enrichment.get("country") not in {"", "未知"}:
@@ -1908,6 +2136,9 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
             "claimed_size_gb": row.get("claimed_size_gb"),
             "source": str(row.get("site_name") or ""),
             "source_label": _label_source(row.get("site_name")),
+            "source_name": str(row.get("site_name") or ""),
+            "source_labels": [_label_source(row.get("site_name"))],
+            "source_names": [str(row.get("site_name") or "")] if str(row.get("site_name") or "") else [],
             "updated_time": row.get("fetched_at_utc") or detail_raw_json.get("fetched_at_utc") or disclosure_time,
             "published_label": _format_date(disclosure_time),
             "resource_count": len(mirror_resources),
@@ -1923,6 +2154,132 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
                 "domain_candidates": [item for item in [domain, _normalize_domain(victim)] if item],
                 "primary_domain": primary_domain,
             },
+            "risk_reasons": [],
+            "raw_json": raw_json,
+        },
+    }
+
+
+def _build_ransomware_live_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw_json = _parse_json(row.get("raw_json"))
+    victim = _normalize_label(row.get("victim_name")) or _normalize_label(raw_json.get("victim"))
+    website = _normalize_label(row.get("website"))
+    attacker = _normalize_label(row.get("group_name")) or "ransomware.live"
+    title = victim or website or attacker
+    detail_text = _normalize_whitespace(row.get("description") or raw_json.get("description"))
+    country_code = _normalize_label(row.get("country_code")).upper()
+    discovered_at = _normalize_label(row.get("discovered_at"))
+    attacked_at = _normalize_label(row.get("attacked_at"))
+    disclosure_time = attacked_at or discovered_at or _normalize_label(row.get("last_seen_at"))
+    published_label = _normalize_label(STATUS_LABELS.get("published")) or "宸插叕寮€"
+    activity = _normalize_label(row.get("activity"))
+    translated_activity = _translate_ransomware_live_activity(activity)
+    industry_bundle = _infer_industry_bundle(
+        ("activity", 12, activity),
+        ("title", 6, title),
+        ("description", 5, detail_text),
+        ("website", 4, website),
+    )
+    industry = translated_activity
+    if industry in {"", "未知", "其他"} and industry_bundle["industry"] != "未知":
+        industry = industry_bundle["industry"]
+    if country_code:
+        geo_bundle = {
+            "country": _label_country(country_code),
+            "country_code": country_code,
+            "macro_region": _region_from_country_code(country_code),
+            "source": "ransomware_live",
+            "score": 20,
+            "evidence": [country_code],
+        }
+    else:
+        geo_bundle = _infer_country_bundle(
+            ("website", 8, website),
+            ("title", 6, title),
+            ("description", 4, detail_text),
+        )
+    primary_domain = _pick_primary_domain(website, victim)
+    if domain_cache is not None and primary_domain and (geo_bundle["country"] == "鏈煡" or industry in {"", "鏈煡"}):
+        enrichment = _enrich_domain(primary_domain, domain_cache)
+        if enrichment and geo_bundle["country"] == "鏈煡" and enrichment.get("country") not in {"", "鏈煡"}:
+            geo_bundle = {
+                "country": enrichment["country"],
+                "country_code": enrichment.get("country_code") or "",
+                "macro_region": enrichment.get("macro_region") or "鏈煡",
+                "source": enrichment.get("country_source") or "domain_cache",
+                "score": int(enrichment.get("country_score") or 0),
+                "evidence": enrichment.get("country_evidence") or [primary_domain],
+            }
+        if enrichment and industry in {"", "鏈煡"} and enrichment.get("industry") not in {"", "鏈煡"}:
+            industry = enrichment["industry"]
+            industry_bundle = {
+                "industry": enrichment["industry"],
+                "source": enrichment.get("industry_source") or "domain_cache",
+                "score": int(enrichment.get("industry_score") or 0),
+            }
+    mirror_resources = _merge_unique_resources(
+        _coerce_resource_list(_normalize_label(row.get("permalink"))),
+        _merge_unique_resources(
+            _coerce_resource_list(_normalize_label(row.get("post_url"))),
+            _coerce_resource_list(_normalize_label(row.get("press_url"))),
+        ),
+    )
+    screenshot_resources = _coerce_resource_list(_normalize_label(row.get("screenshot_url")))
+    source_url = _normalize_label(row.get("permalink")) or _normalize_label(row.get("post_url"))
+    event = {
+        "event_id": f"victim:ransomware_live:{_event_hash(str(row.get('victim_id') or title or source_url))}",
+        "source_kind": "victim",
+        "raw_source_type": "ransomware_live_victims",
+        "source_site_name": "ransomware_live",
+        "source_record_id": int(row["id"]),
+        "event_type": "ransomware",
+        "category": published_label,
+        "leak_type": "勒索披露",
+        "title": title,
+        "attacker": attacker,
+        "victim": victim or website or "鏈煡瀹炰綋",
+        "victim_key": primary_domain or _canonical_key(victim or website or title),
+        "industry": industry or "鏈煡",
+        "country": geo_bundle["country"],
+        "country_code": geo_bundle["country_code"],
+        "region": geo_bundle["macro_region"],
+        "disclosure_time": disclosure_time,
+        "severity": _severity_from_status("published"),
+        "source_url": source_url,
+        "detail_text": detail_text,
+        "mirror_resources": mirror_resources,
+        "screenshot_resources": screenshot_resources,
+        "json_preview_url": "",
+    }
+    confidence_score, completeness_score = _build_quality_scores(event, geo_bundle, industry_bundle)
+    source_label = _label_source("ransomware_live")
+    return {
+        **event,
+        "confidence_score": confidence_score,
+        "completeness_score": completeness_score,
+        "metadata": {
+            "source": source_label,
+            "source_name": "ransomware_live",
+            "source_label": source_label,
+            "source_labels": [source_label],
+            "source_names": ["ransomware_live"],
+            "raw_source_type_label": humanize_raw_source_type("ransomware_live_victims"),
+            "updated_time": _normalize_label(row.get("last_seen_at")) or disclosure_time,
+            "published_label": _format_date(disclosure_time),
+            "resource_count": len(mirror_resources),
+            "country_source": geo_bundle["source"],
+            "country_score": geo_bundle["score"],
+            "country_evidence": geo_bundle["evidence"],
+            "industry_source": industry_bundle["source"],
+            "industry_score": industry_bundle["score"],
+            "tag_sources": [geo_bundle["source"], industry_bundle["source"]],
+            "entity_link_evidence": {
+                "match_method": "victim_or_domain",
+                "matched_fields": [name for name, value in {"victim": victim, "website": website, "description": detail_text}.items() if value],
+                "domain_candidates": [item for item in [primary_domain, _normalize_domain(website)] if item],
+                "primary_domain": primary_domain,
+            },
+            "reference_urls": mirror_resources,
             "risk_reasons": [],
             "raw_json": raw_json,
         },
@@ -2155,6 +2512,48 @@ def _merge_unique_strings(left: list[Any], right: list[Any]) -> list[str]:
     return merged
 
 
+def _normalize_disclosure_url(value: str | None) -> str:
+    raw = _normalize_label(value)
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return raw.rstrip("/").lower()
+    path = parsed.path.rstrip("/")
+    normalized = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+    if parsed.query:
+        normalized = f"{normalized}?{parsed.query}"
+    return normalized
+
+
+def _event_disclosure_date(event: dict[str, Any]) -> str:
+    event_dt = _parse_dt(str(event.get("disclosure_time") or ""))
+    if event_dt is not None:
+        return event_dt.date().isoformat()
+    return _normalize_label(event.get("disclosure_time")).split("T", 1)[0].split(" ", 1)[0]
+
+
+def _cross_source_ransomware_key(event: dict[str, Any]) -> tuple[str, str] | None:
+    if event.get("event_type") != "ransomware":
+        return None
+    attacker = _canonical_key(event.get("attacker") or "")
+    if not attacker:
+        return None
+    normalized_url = _normalize_disclosure_url(event.get("source_url"))
+    if normalized_url:
+        return ("url", f"{attacker}|{normalized_url}")
+    primary_domain = _pick_primary_domain(
+        _normalize_label(event.get("victim")),
+        _normalize_label((event.get("metadata") or {}).get("primary_domain")),
+        _normalize_label((event.get("metadata") or {}).get("raw_json", {}).get("website")),
+    )
+    canonical_victim = primary_domain or _canonical_key(event.get("victim") or event.get("title") or "")
+    disclosure_date = _event_disclosure_date(event)
+    if not canonical_victim or not disclosure_date:
+        return None
+    return ("victim", f"{attacker}|{canonical_victim}|{disclosure_date}")
+
+
 def _merge_event_metadata(existing: dict[str, Any], current: dict[str, Any], *, mirror_resources: list[dict[str, str]]) -> dict[str, Any]:
     existing_meta = existing.get("metadata") or {}
     current_meta = current.get("metadata") or {}
@@ -2207,7 +2606,7 @@ def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -
     primary = current if prefer_current else existing
     secondary = existing if prefer_current else current
 
-    if primary.get("event_type") == "vulnerability":
+    if primary.get("event_type") in {"vulnerability", "ransomware"}:
         merged_mirror_resources = _merge_unique_resources(existing.get("mirror_resources") or [], current.get("mirror_resources") or [])
         merged_screenshot_resources = _merge_unique_resources(
             existing.get("screenshot_resources") or [],
@@ -2243,6 +2642,8 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
         base_events.append(_build_forum_base_event(row, domain_cache=domain_cache))
     for row in _victim_rows(connection):
         base_events.append(_build_victim_base_event(row, domain_cache=domain_cache))
+    for row in _ransomware_live_rows(connection):
+        base_events.append(_build_ransomware_live_base_event(row, domain_cache=domain_cache))
     for row in _vulnerability_rows(connection):
         base_events.append(_build_vulnerability_base_event(row))
 
@@ -2271,9 +2672,22 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
             continue
         title_deduped_events[title_key] = _merge_duplicate_events(existing, event)
 
+    cross_source_ransomware_events: dict[tuple[str, str], dict[str, Any]] = {}
+    other_events: list[dict[str, Any]] = []
+    for event in title_deduped_events.values():
+        dedup_key = _cross_source_ransomware_key(event)
+        if dedup_key is None:
+            other_events.append(event)
+            continue
+        existing = cross_source_ransomware_events.get(dedup_key)
+        if existing is None:
+            cross_source_ransomware_events[dedup_key] = event
+            continue
+        cross_source_ransomware_events[dedup_key] = _merge_duplicate_events(existing, event)
+
     updated_at = _now_utc().isoformat()
     persisted_rows: list[dict[str, Any]] = []
-    for event in title_deduped_events.values():
+    for event in [*other_events, *cross_source_ransomware_events.values()]:
         metadata_payload = {
             **event["metadata"],
             "country": event.get("country") or "未知",

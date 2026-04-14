@@ -13,6 +13,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from darkweb_collector.api_actions import dispatch_run_site
 from darkweb_collector.api_data import build_jobs_payload
 from darkweb_collector.db import get_db_connection, upsert_crawl_job
 
@@ -191,3 +192,153 @@ class ApiJobsTests(unittest.TestCase):
             gamma = next(item for item in payload["site_health"] if item["site_name"] == "gamma")
             self.assertEqual("异常", gamma["overall_status"])
             self.assertEqual("异常挂起", gamma["seed_status"])
+
+    def test_jobs_payload_includes_ransomware_sync_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                payload = build_jobs_payload()
+
+            self.assertIn("ransomware_sync", payload)
+            self.assertEqual(0, payload["ransomware_sync"]["record_count"])
+
+    def test_dispatch_run_site_falls_back_to_thread_when_no_worker_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            class _FakeThread:
+                def __init__(self, target=None, args=(), daemon=None):
+                    self.target = target
+                    self.args = args
+                    self.daemon = daemon
+                    self.started = False
+
+                def start(self):
+                    self.started = True
+
+            with patch.dict(os.environ, env, clear=False), patch(
+                "darkweb_collector.api_actions._has_queue_worker",
+                return_value=False,
+            ), patch(
+                "darkweb_collector.api_actions.Thread",
+                _FakeThread,
+            ):
+                payload = dispatch_run_site("alpha", force=True)
+
+            self.assertEqual("thread", payload["dispatch_mode"])
+            self.assertEqual("", payload["job_id"])
+
+    def test_enqueued_seed_waiting_on_busy_queue_is_not_marked_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                enqueued_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+                started_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="alpha-seed-enqueued",
+                        site_name="alpha",
+                        job_type="seed",
+                        queue_name="browser_render",
+                        target="alpha",
+                        status="enqueued",
+                        enqueued_at=enqueued_at,
+                    )
+                    upsert_crawl_job(
+                        connection,
+                        job_id="beta-detail-running",
+                        site_name="beta",
+                        job_type="detail",
+                        queue_name="browser_render",
+                        target="beta-detail",
+                        status="running",
+                        started_at=started_at,
+                    )
+                    connection.commit()
+                payload = build_jobs_payload()
+
+            alpha = next(item for item in payload["site_health"] if item["site_name"] == "alpha")
+            self.assertEqual("enqueued", alpha["activeSeedJobStatus"])
+            self.assertFalse(alpha["staleSeedDetected"])
+            self.assertEqual("active_seed_job", alpha["blockingReason"])
+
+    def test_dispatch_run_site_keeps_busy_enqueued_seed_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                enqueued_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+                started_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="alpha-seed-enqueued",
+                        site_name="alpha",
+                        job_type="seed",
+                        queue_name="seed_http",
+                        target="alpha",
+                        status="enqueued",
+                        enqueued_at=enqueued_at,
+                    )
+                    upsert_crawl_job(
+                        connection,
+                        job_id="beta-detail-running",
+                        site_name="beta",
+                        job_type="detail",
+                        queue_name="seed_http",
+                        target="beta-detail",
+                        status="running",
+                        started_at=started_at,
+                    )
+                    connection.commit()
+
+                payload = dispatch_run_site("alpha", force=True)
+
+                with get_db_connection() as connection:
+                    row = connection.execute(
+                        """
+                        SELECT status
+                        FROM crawl_jobs
+                        WHERE job_id = 'alpha-seed-enqueued'
+                        """
+                    ).fetchone()
+
+            self.assertEqual("skipped", payload["dispatch_mode"])
+            self.assertEqual("alpha-seed-enqueued", payload["job_id"])
+            self.assertIsNotNone(row)
+            self.assertEqual("enqueued", row["status"])

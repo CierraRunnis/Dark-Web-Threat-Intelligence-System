@@ -10,7 +10,6 @@
     </div>
     <div class="module-summary-card__label">{{ label }}</div>
     <div class="module-summary-card__value">{{ value }}</div>
-    <p class="module-summary-card__description">{{ description }}</p>
   </article>
 </template>
 
@@ -53,7 +52,7 @@ const cardClass = computed(() => ['module-summary-card', `module-summary-card--$
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 182px;
+  min-height: 150px;
   padding: 22px;
   border-radius: 22px;
   border: 1px solid var(--ti-border-default);
@@ -104,13 +103,6 @@ const cardClass = computed(() => ['module-summary-card', `module-summary-card--$
   letter-spacing: -0.04em;
   color: var(--ti-text-primary);
   font-weight: 700;
-}
-
-.module-summary-card__description {
-  margin: 0;
-  color: var(--ti-text-secondary);
-  font-size: 13px;
-  line-height: 1.7;
 }
 
 .module-summary-card--primary .module-summary-card__icon {

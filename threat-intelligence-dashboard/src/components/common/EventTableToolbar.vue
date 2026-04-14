@@ -3,7 +3,6 @@
     <div class="event-table-toolbar__heading">
       <div class="event-table-toolbar__eyebrow">{{ eyebrow }}</div>
       <h3 class="event-table-toolbar__title">{{ title }}</h3>
-      <p v-if="description" class="event-table-toolbar__description">{{ description }}</p>
     </div>
 
     <div class="event-table-toolbar__controls">
@@ -96,13 +95,6 @@ defineEmits(['update:searchValue'])
   margin: 0;
   color: var(--ti-text-primary);
   font-size: 20px;
-}
-
-.event-table-toolbar__description {
-  margin: 0;
-  color: var(--ti-text-secondary);
-  font-size: 13px;
-  line-height: 1.7;
 }
 
 .event-table-toolbar__controls {
