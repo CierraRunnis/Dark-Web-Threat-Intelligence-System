@@ -3,8 +3,9 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-from threading import Lock, Thread
 import time
+from pathlib import Path
+from threading import Lock, Thread
 
 from fastapi import FastAPI
 from fastapi import HTTPException
@@ -29,6 +30,7 @@ from darkweb_collector.api_actions import (
     update_site_enabled,
 )
 import darkweb_collector.api_data as api_data_module
+import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
 from darkweb_collector.runtime import project_root
@@ -38,13 +40,21 @@ app = FastAPI(title="Darkweb Collector API", version="1.0.0")
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
 _warmup_started = False
+_api_auto_reload_enabled = os.environ.get("DARKWEB_API_AUTO_RELOAD") == "1"
 collector_output_dir = (project_root() / "output").resolve()
+shared_output_root = str(os.environ.get("DARKWEB_COLLECTOR_OUTPUT_ROOT") or "").strip()
+if shared_output_root:
+    collector_output_dir = Path(shared_output_root).expanduser().resolve()
 collector_output_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _reload_api_modules():
+    if not _api_auto_reload_enabled:
+        return api_data_module
     importlib.reload(normalized_intelligence_module)
+    importlib.reload(monitoring_rules_module)
     return importlib.reload(api_data_module)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,11 +107,6 @@ def intelligence() -> dict:
 @app.get("/api/jobs")
 def jobs() -> dict:
     return _reload_api_modules().build_jobs_payload()
-
-
-@app.get("/api/behavior")
-def behavior() -> dict:
-    return _reload_api_modules().build_behavior_payload()
 
 
 @app.get("/api/events")
@@ -163,16 +168,28 @@ class VulnerabilitySyncStartRequest(BaseModel):
 
 
 class RansomwareSyncRunRequest(BaseModel):
-    limit: int = 100
+    limit: int = 0
 
 
 class RansomwareSyncStartRequest(BaseModel):
     interval_seconds: int = 3600
-    limit: int = 100
+    limit: int = 0
 
 
 class RansomwareConfigRequest(BaseModel):
     api_key: str
+
+
+class MonitoringKeywordRow(BaseModel):
+    keyword: str
+    category: str
+    weight: int
+    enabled: bool = True
+    match_mode: str = "contains"
+
+
+class MonitoringKeywordsRequest(BaseModel):
+    keywords: list[MonitoringKeywordRow]
 
 
 @app.post("/api/jobs/run-site")
@@ -264,3 +281,21 @@ def ransomware_config_save(payload: RansomwareConfigRequest) -> dict:
 @app.post("/api/sites/{site_name}/enabled")
 def set_site_enabled(site_name: str, payload: SetSiteEnabledRequest) -> dict:
     return update_site_enabled(site_name=site_name, enabled=payload.enabled)
+
+
+@app.get("/api/monitoring/keywords")
+def monitoring_keywords() -> list[dict]:
+    _reload_api_modules()
+    return monitoring_rules_module.get_monitoring_keywords()
+
+
+@app.post("/api/monitoring/keywords")
+def update_monitoring_keywords(payload: MonitoringKeywordsRequest) -> list[dict]:
+    _reload_api_modules()
+    return monitoring_rules_module.save_monitoring_keywords([item.model_dump() for item in payload.keywords])
+
+
+@app.get("/api/analysis/monitoring-status")
+def monitoring_status() -> dict:
+    _reload_api_modules()
+    return monitoring_rules_module.build_monitoring_status()

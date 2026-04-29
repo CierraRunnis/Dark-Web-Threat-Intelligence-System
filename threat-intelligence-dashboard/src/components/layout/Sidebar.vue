@@ -6,7 +6,6 @@
       </div>
       <div v-show="!shell.state.sidebarCollapsed" class="sidebar__brand-text">
         <strong>Threat Intel</strong>
-        <span>监控台 / Editorial View</span>
       </div>
     </div>
 
@@ -24,7 +23,6 @@
           </el-icon>
           <div v-show="!shell.state.sidebarCollapsed" class="sidebar__item-text">
             <span class="sidebar__item-title">{{ item.title }}</span>
-            <span class="sidebar__item-note">{{ item.note }}</span>
           </div>
         </div>
         <StatusBadge
@@ -39,7 +37,7 @@
     <div class="sidebar__footer">
       <div v-show="!shell.state.sidebarCollapsed" class="sidebar__watch">
         <span class="sidebar__watch-label">监控范围</span>
-        <p>42 国 / 18 行业 / 126 点位</p>
+        <p>{{ monitoringRangeText }}</p>
       </div>
       <button class="sidebar__collapse" @click="shell.toggleSidebar">
         <el-icon>
@@ -57,17 +55,19 @@ import { useRoute } from 'vue-router'
 import router from '@/router'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useShellLayout } from '@/composables/useShellLayout'
+import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
 const $route = useRoute()
 const shell = useShellLayout()
+const { data } = useIntelligenceData()
 
 const navMeta = {
-  '/': { note: '总览摘要与联动事件', badge: '今日', tone: 'primary' },
-  '/ransomware': { note: '披露事件与团伙活跃度', badge: '高热', tone: 'danger' },
-  '/data-leak': { note: '泄露规模与敏感类型', badge: '更新', tone: 'warning' },
-  '/vulnerability-alerts': { note: '公开源高危漏洞与利用状态', badge: '预警', tone: 'danger' },
-  '/threat-situation': { note: '区域热区与告警流', badge: '态势', tone: 'success' },
-  '/collector-control': { note: '任务触发与站点健康', badge: '控制', tone: 'primary' }
+  '/': { badge: '今日', tone: 'primary' },
+  '/ransomware': { badge: '高热', tone: 'danger' },
+  '/data-leak': { badge: '更新', tone: 'warning' },
+  '/vulnerability-alerts': { badge: '预警', tone: 'danger' },
+  '/threat-situation': { badge: '态势', tone: 'success' },
+  '/collector-control': { badge: '控制', tone: 'primary' },
 }
 
 const navItems = computed(() =>
@@ -78,9 +78,27 @@ const navItems = computed(() =>
       path: route.path,
       title: route.meta.title,
       icon: route.meta.icon,
-      ...navMeta[route.path]
+      ...navMeta[route.path],
     }))
 )
+
+const monitoringRangeText = computed(() => {
+  const dataLeakEvents = Array.isArray(data.value.dataLeakEvents) ? data.value.dataLeakEvents : []
+  const ransomwareEvents = Array.isArray(data.value.ransomwareEvents) ? data.value.ransomwareEvents : []
+  const vulnerabilityEvents = Array.isArray(data.value.vulnerabilityEvents) ? data.value.vulnerabilityEvents : []
+  const allEvents = [...dataLeakEvents, ...ransomwareEvents, ...vulnerabilityEvents]
+
+  const countries = new Set()
+  const industries = new Set()
+  for (const item of allEvents) {
+    const country = String(item.country || '').trim()
+    const industry = String(item.industry || '').trim()
+    if (country && country !== '未知') countries.add(country)
+    if (industry && !['未知', '其他'].includes(industry)) industries.add(industry)
+  }
+
+  return `${countries.size} 国家 / ${industries.size} 行业 / ${allEvents.length} 点位`
+})
 </script>
 
 <style lang="scss" scoped>
@@ -136,17 +154,12 @@ const navItems = computed(() =>
   font-size: 16px;
 }
 
-.sidebar__brand-text span {
-  color: var(--ti-text-muted);
-  font-size: 12px;
-}
-
 .sidebar__nav {
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: 8px;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .sidebar__item {
@@ -208,14 +221,6 @@ const navItems = computed(() =>
   color: var(--ti-text-primary);
   font-size: 14px;
   font-weight: 700;
-}
-
-.sidebar__item-note {
-  color: var(--ti-text-muted);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .sidebar__footer {

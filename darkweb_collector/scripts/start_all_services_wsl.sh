@@ -14,7 +14,9 @@ COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DASHBOARD_ROOT="$(cd "$COLLECTOR_ROOT/../threat-intelligence-dashboard" && pwd)"
 COLLECTOR_VENV="$COLLECTOR_ROOT/venv"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
-COLLECTOR_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
+DEFAULT_WINDOWS_SOURCE_DB="/mnt/c/Users/alex/.local/share/bishe/collector.db"
+DEFAULT_PROJECT_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
+COLLECTOR_SOURCE_DB="${DARKWEB_COLLECTOR_SOURCE_DB_PATH:-$DEFAULT_WINDOWS_SOURCE_DB}"
 COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$HOME/.local/share/bishe/collector.db}"
 COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_DB}.meta.json}"
 
@@ -34,6 +36,105 @@ warn() {
 require_command() {
   local command_name="$1"
   command -v "$command_name" >/dev/null 2>&1 || die "missing required command: $command_name"
+}
+
+db_has_data() {
+  local db_path="$1"
+  python3 - "$db_path" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+if not path.exists():
+    raise SystemExit(2)
+
+tables = ("collection_runs", "victims", "forum_details", "crawl_jobs", "vulnerability_records", "ransomware_live_victims", "normalized_intelligence_events")
+connection = sqlite3.connect(str(path))
+try:
+    for table_name in tables:
+        try:
+            row = connection.execute("SELECT COUNT(1) FROM " + table_name).fetchone()
+        except Exception:
+            continue
+        if row and int(row[0]) > 0:
+            raise SystemExit(0)
+finally:
+    connection.close()
+
+raise SystemExit(1)
+PY
+}
+
+db_score() {
+  local db_path="$1"
+  python3 - "$db_path" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+if not path.exists():
+    print(-1)
+    raise SystemExit(0)
+
+tables = ("victims", "forum_details", "crawl_jobs", "vulnerability_records", "ransomware_live_victims", "normalized_intelligence_events")
+score = 0
+connection = sqlite3.connect(str(path))
+try:
+    for table_name in tables:
+        try:
+            row = connection.execute("SELECT COUNT(1) FROM " + table_name).fetchone()
+        except Exception:
+            continue
+        if row:
+            score += int(row[0])
+finally:
+    connection.close()
+
+print(score)
+PY
+}
+
+resolve_source_db() {
+  local candidates=()
+  if [[ -n "${DARKWEB_COLLECTOR_SOURCE_DB_PATH:-}" ]]; then
+    candidates+=("${DARKWEB_COLLECTOR_SOURCE_DB_PATH}")
+  else
+    candidates+=("$DEFAULT_WINDOWS_SOURCE_DB" "$DEFAULT_PROJECT_SOURCE_DB" "$COLLECTOR_RUNTIME_DB")
+  fi
+
+  local best_path=""
+  local best_score=-1
+  local candidate score
+  for candidate in "${candidates[@]}"; do
+    score="$(db_score "$candidate")"
+    if (( score > best_score )); then
+      best_score="$score"
+      best_path="$candidate"
+    fi
+  done
+
+  if [[ -n "$best_path" ]]; then
+    COLLECTOR_SOURCE_DB="$best_path"
+  fi
+}
+
+sync_runtime_db_to_source() {
+  if [[ "$COLLECTOR_RUNTIME_DB" == "$COLLECTOR_SOURCE_DB" ]]; then
+    return 0
+  fi
+
+  local runtime_score source_score
+  runtime_score="$(db_score "$COLLECTOR_RUNTIME_DB")"
+  source_score="$(db_score "$COLLECTOR_SOURCE_DB")"
+  if (( runtime_score <= 0 )) || (( runtime_score <= source_score )); then
+    return 0
+  fi
+
+  info "syncing populated runtime db back to source db"
+  mkdir -p "$(dirname "$COLLECTOR_SOURCE_DB")"
+  cp -f "$COLLECTOR_RUNTIME_DB" "$COLLECTOR_SOURCE_DB"
 }
 
 build_env_exports() {
@@ -63,6 +164,8 @@ ensure_environment() {
   [[ -f "$COLLECTOR_ROOT/scripts/serve_api.py" ]] || die "API launcher not found"
   [[ -f "$DASHBOARD_ROOT/package.json" ]] || die "dashboard package.json not found"
 
+  resolve_source_db
+
   if [[ ! -d "$DASHBOARD_ROOT/node_modules" ]]; then
     info "dashboard dependencies missing, running npm install"
     (
@@ -71,14 +174,16 @@ ensure_environment() {
     )
   fi
 
-  if [[ ! -f "$COLLECTOR_RUNTIME_DB" ]]; then
+  if [[ ! -f "$COLLECTOR_RUNTIME_DB" ]] || ! db_has_data "$COLLECTOR_RUNTIME_DB"; then
     info "runtime db missing, preparing stable WSL-local SQLite database"
     (
       cd "$COLLECTOR_ROOT"
       source "$COLLECTOR_VENV/bin/activate"
-      python scripts/prepare_runtime_db.py --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
+      python scripts/prepare_runtime_db.py --force --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
     )
   fi
+
+  sync_runtime_db_to_source
 }
 
 stop_session_if_exists() {
@@ -285,6 +390,8 @@ stop_services() {
     tmux kill-session -t "$SESSION_NAME"
   fi
   cleanup_stray_processes
+  resolve_source_db
+  sync_runtime_db_to_source
   info "tmux session stopped: $SESSION_NAME"
 }
 

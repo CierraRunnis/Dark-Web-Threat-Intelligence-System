@@ -54,13 +54,14 @@
 推荐先进入虚拟环境：
 
 ```bash
-source /mnt/d/bishe/darkweb_collector/venv/bin/activate
+cd /path/to/bishe/darkweb_collector
+source venv/bin/activate
 ```
 
 安装依赖：
 
 ```bash
-pip install -r /mnt/d/bishe/darkweb_collector/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Tor 环境
@@ -94,7 +95,7 @@ export PROXY_PORT=7890
 先进入项目目录：
 
 ```bash
-cd /mnt/d/bishe/darkweb_collector
+cd /path/to/bishe/darkweb_collector
 ```
 
 ### 查看当前站点
@@ -129,6 +130,13 @@ python scripts/crawl.py run-site --site darkforums --continuous --interval-secon
 
 ```bash
 python scripts/crawl.py show-runs --limit 20
+```
+
+### 启动 API
+
+```bash
+export PYTHONPATH="$PWD/src"
+python -m uvicorn darkweb_collector.api_app:app --host 127.0.0.1 --port 8000
 ```
 
 ## 兼容脚本

@@ -253,6 +253,19 @@ CREATE TABLE IF NOT EXISTS normalized_intelligence_cache_state (
     event_count INTEGER NOT NULL,
     refreshed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS monitoring_keywords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL,
+    category TEXT NOT NULL,
+    weight INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    match_mode TEXT NOT NULL DEFAULT 'contains',
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_monitoring_keywords_unique
+ON monitoring_keywords(keyword, category);
 """
 
 
@@ -1097,4 +1110,45 @@ def upsert_normalized_intelligence_cache_state(
             refreshed_at = excluded.refreshed_at
         """,
         (source_signature, event_count, refreshed_at),
+    )
+
+
+def list_monitoring_keywords(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, keyword, category, weight, enabled, match_mode, updated_at
+        FROM monitoring_keywords
+        ORDER BY category, keyword
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        rows.append(payload)
+    return rows
+
+
+def replace_monitoring_keywords(connection: sqlite3.Connection, rows: list[dict]) -> None:
+    connection.execute("DELETE FROM monitoring_keywords")
+    if not rows:
+        return
+    connection.executemany(
+        """
+        INSERT INTO monitoring_keywords (
+            keyword, category, weight, enabled, match_mode, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                str(row.get("keyword") or "").strip(),
+                str(row.get("category") or "").strip(),
+                int(row.get("weight") or 0),
+                int(bool(row.get("enabled", True))),
+                str(row.get("match_mode") or "contains").strip() or "contains",
+                str(row.get("updated_at") or ""),
+            )
+            for row in rows
+            if str(row.get("keyword") or "").strip()
+        ],
     )

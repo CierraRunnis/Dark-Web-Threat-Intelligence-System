@@ -34,6 +34,27 @@ RELATIVE_TIMESTAMP_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _extract_timestamp_text(post_block: str, html: str) -> str:
+    patterns = [
+        r'<span class="post_date">(.*?)</span>',
+        r'<span[^>]*class="[^"]*DateTime[^"]*"[^>]*>(.*?)</span>',
+        r'<div[^>]*class="[^"]*thread-info__datetime[^"]*"[^>]*>(.*?)</div>',
+    ]
+    for source in (post_block, html):
+        for pattern in patterns:
+            match = re.search(pattern, source, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = _clean_html_text(match.group(1))
+                if text:
+                    return text
+        cleaned = _clean_html_text(source)
+        for regex in (ABSOLUTE_TIMESTAMP_RE, TEXTUAL_TIMESTAMP_RE, RELATIVE_TIMESTAMP_RE):
+            match = regex.search(cleaned)
+            if match:
+                return _clean_html_text(match.group(0))
+    return ""
+
 def _clean_html_text(value: str) -> str:
     """Clean HTML text by removing tags and normalizing whitespace"""
     if not value:
@@ -304,22 +325,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     print(f"[{time.strftime('%H:%M:%S')}] Author: {author}")
     
     # Extract post date/timestamp
-    timestamp_match = re.search(
-        r'<span class="post_date">(.*?)</span>',
-        post_block, re.IGNORECASE | re.DOTALL
-    )
-    if not timestamp_match:
-        timestamp_match = re.search(
-            r'<span[^>]*class="[^"]*DateTime[^"]*"[^>]*>(.*?)</span>',
-            post_block,
-            re.IGNORECASE | re.DOTALL,
-        )
-    if not timestamp_match:
-        timestamp_match = re.search(
-            r'>(\d{2}-\d{2}-\d{2},\s*\d{2}:\d{2}\s*(?:AM|PM))<',
-            post_block, re.IGNORECASE
-        )
-    timestamp = _clean_html_text(timestamp_match.group(1)) if timestamp_match else ""
+    timestamp = _extract_timestamp_text(post_block, html)
     
     print(f"[{time.strftime('%H:%M:%S')}] Timestamp: {timestamp}")
     

@@ -22,6 +22,8 @@ darkweb_collector/C*/
 # OS / editor
 .DS_Store
 Thumbs.db
+.codex-backups/
+_tmp_kaiti_report.txt
 
 # Archives and downloads
 *.tar.gz
