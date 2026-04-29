@@ -19,6 +19,9 @@ DEFAULT_PROJECT_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
 COLLECTOR_SOURCE_DB="${DARKWEB_COLLECTOR_SOURCE_DB_PATH:-$DEFAULT_WINDOWS_SOURCE_DB}"
 COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$HOME/.local/share/bishe/collector.db}"
 COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_DB}.meta.json}"
+REQUIREMENTS_STAMP="$COLLECTOR_VENV/.requirements.sha256"
+PLAYWRIGHT_STAMP="$COLLECTOR_VENV/.playwright.chromium.ready"
+PACKAGE_LOCK_STAMP="$DASHBOARD_ROOT/node_modules/.package-lock.sha256"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -36,6 +39,193 @@ warn() {
 require_command() {
   local command_name="$1"
   command -v "$command_name" >/dev/null 2>&1 || die "missing required command: $command_name"
+}
+
+run_as_root() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+    return
+  fi
+  die "automatic dependency install requires sudo or root privileges"
+}
+
+file_sha256() {
+  local file_path="$1"
+  python3 - "$file_path" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1]).expanduser()
+if not path.exists():
+    print("")
+    raise SystemExit(0)
+
+digest = sha256(path.read_bytes()).hexdigest()
+print(digest)
+PY
+}
+
+install_system_dependencies() {
+  local missing_packages=()
+  command -v tmux >/dev/null 2>&1 || missing_packages+=("tmux")
+  command -v python3 >/dev/null 2>&1 || missing_packages+=("python3")
+  if ! python3 -m venv --help >/dev/null 2>&1; then
+    missing_packages+=("python3-venv")
+  fi
+  python3 -m pip --version >/dev/null 2>&1 || missing_packages+=("python3-pip")
+  command -v npm >/dev/null 2>&1 || missing_packages+=("npm")
+  command -v redis-server >/dev/null 2>&1 || missing_packages+=("redis-server")
+  command -v redis-cli >/dev/null 2>&1 || missing_packages+=("redis-tools")
+  command -v curl >/dev/null 2>&1 || missing_packages+=("curl")
+
+  if (( ${#missing_packages[@]} == 0 )); then
+    return 0
+  fi
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    die "missing required system packages (${missing_packages[*]}), and apt-get is unavailable for automatic install"
+  fi
+
+  info "installing missing system packages: ${missing_packages[*]}"
+  run_as_root apt-get update
+  run_as_root apt-get install -y "${missing_packages[@]}"
+}
+
+ensure_collector_venv() {
+  if [[ -d "$COLLECTOR_VENV" ]]; then
+    return 0
+  fi
+  info "collector venv missing, creating virtual environment"
+  python3 -m venv "$COLLECTOR_VENV"
+}
+
+collector_python_dependencies_ready() {
+  (
+    source "$COLLECTOR_VENV/bin/activate"
+    python - <<'PY'
+modules = ("celery", "redis", "playwright", "fastapi", "uvicorn", "pycountry", "babel")
+for module_name in modules:
+    __import__(module_name)
+PY
+  ) >/dev/null 2>&1
+}
+
+ensure_collector_python_dependencies() {
+  local requirements_hash current_hash
+  requirements_hash="$(file_sha256 "$COLLECTOR_ROOT/requirements.txt")"
+  current_hash=""
+  if [[ -f "$REQUIREMENTS_STAMP" ]]; then
+    current_hash="$(<"$REQUIREMENTS_STAMP")"
+  fi
+  if [[ -n "$requirements_hash" && "$requirements_hash" == "$current_hash" ]]; then
+    return 0
+  fi
+
+  if collector_python_dependencies_ready; then
+    mkdir -p "$(dirname "$REQUIREMENTS_STAMP")"
+    printf '%s' "$requirements_hash" > "$REQUIREMENTS_STAMP"
+    return 0
+  fi
+
+  info "installing collector Python dependencies"
+  (
+    cd "$COLLECTOR_ROOT"
+    source "$COLLECTOR_VENV/bin/activate"
+    python -m pip install --upgrade pip
+    python -m pip install -r requirements.txt
+  )
+  printf '%s' "$requirements_hash" > "$REQUIREMENTS_STAMP"
+}
+
+playwright_runtime_ready() {
+  (
+    source "$COLLECTOR_VENV/bin/activate"
+    python - <<'PY'
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as playwright:
+    executable = Path(playwright.chromium.executable_path)
+    raise SystemExit(0 if executable.exists() else 1)
+PY
+  ) >/dev/null 2>&1
+}
+
+ensure_playwright_runtime() {
+  if [[ -f "$PLAYWRIGHT_STAMP" ]]; then
+    return 0
+  fi
+
+  if playwright_runtime_ready; then
+    mkdir -p "$(dirname "$PLAYWRIGHT_STAMP")"
+    : > "$PLAYWRIGHT_STAMP"
+    return 0
+  fi
+
+  info "installing Playwright Chromium runtime"
+  (
+    cd "$COLLECTOR_ROOT"
+    source "$COLLECTOR_VENV/bin/activate"
+    python -m playwright install chromium
+  )
+  : > "$PLAYWRIGHT_STAMP"
+}
+
+dashboard_dependencies_ready() {
+  [[ -d "$DASHBOARD_ROOT/node_modules" && -f "$DASHBOARD_ROOT/node_modules/.bin/vite" ]]
+}
+
+ensure_dashboard_dependencies() {
+  local expected_hash current_hash
+  expected_hash="$(file_sha256 "$DASHBOARD_ROOT/package-lock.json")"
+  current_hash=""
+  if [[ -f "$PACKAGE_LOCK_STAMP" ]]; then
+    current_hash="$(<"$PACKAGE_LOCK_STAMP")"
+  fi
+
+  if dashboard_dependencies_ready && [[ -n "$expected_hash" ]] && [[ -z "$current_hash" ]]; then
+    mkdir -p "$(dirname "$PACKAGE_LOCK_STAMP")"
+    printf '%s' "$expected_hash" > "$PACKAGE_LOCK_STAMP"
+    return 0
+  fi
+
+  if [[ ! -d "$DASHBOARD_ROOT/node_modules" || -z "$expected_hash" || "$expected_hash" != "$current_hash" ]]; then
+    info "installing dashboard dependencies"
+    (
+      cd "$DASHBOARD_ROOT"
+      npm install
+    )
+    mkdir -p "$(dirname "$PACKAGE_LOCK_STAMP")"
+    printf '%s' "$expected_hash" > "$PACKAGE_LOCK_STAMP"
+  fi
+}
+
+initialize_empty_runtime_db() {
+  info "no source database found, initializing empty runtime database"
+  python3 - "$COLLECTOR_ROOT" "$COLLECTOR_RUNTIME_DB" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1]).expanduser().resolve()
+target = Path(sys.argv[2]).expanduser().resolve()
+src = root / "src"
+if str(src) not in sys.path:
+    sys.path.insert(0, str(src))
+
+from darkweb_collector.db import connect
+
+target.parent.mkdir(parents=True, exist_ok=True)
+connection = connect(target)
+try:
+    connection.commit()
+finally:
+    connection.close()
+PY
 }
 
 db_has_data() {
@@ -117,6 +307,8 @@ resolve_source_db() {
 
   if [[ -n "$best_path" ]]; then
     COLLECTOR_SOURCE_DB="$best_path"
+  else
+    COLLECTOR_SOURCE_DB="$COLLECTOR_RUNTIME_DB"
   fi
 }
 
@@ -153,6 +345,7 @@ build_env_exports() {
 }
 
 ensure_environment() {
+  install_system_dependencies
   require_command tmux
   require_command python3
   require_command npm
@@ -160,27 +353,26 @@ ensure_environment() {
   require_command redis-cli
   require_command curl
 
-  [[ -d "$COLLECTOR_VENV" ]] || die "collector venv not found: $COLLECTOR_VENV"
+  ensure_collector_venv
   [[ -f "$COLLECTOR_ROOT/scripts/serve_api.py" ]] || die "API launcher not found"
   [[ -f "$DASHBOARD_ROOT/package.json" ]] || die "dashboard package.json not found"
 
+  ensure_collector_python_dependencies
+  ensure_playwright_runtime
   resolve_source_db
-
-  if [[ ! -d "$DASHBOARD_ROOT/node_modules" ]]; then
-    info "dashboard dependencies missing, running npm install"
-    (
-      cd "$DASHBOARD_ROOT"
-      npm install
-    )
-  fi
+  ensure_dashboard_dependencies
 
   if [[ ! -f "$COLLECTOR_RUNTIME_DB" ]] || ! db_has_data "$COLLECTOR_RUNTIME_DB"; then
-    info "runtime db missing, preparing stable WSL-local SQLite database"
-    (
-      cd "$COLLECTOR_ROOT"
-      source "$COLLECTOR_VENV/bin/activate"
-      python scripts/prepare_runtime_db.py --force --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
-    )
+    if [[ -f "$COLLECTOR_SOURCE_DB" ]] && db_has_data "$COLLECTOR_SOURCE_DB"; then
+      info "runtime db missing, preparing stable WSL-local SQLite database"
+      (
+        cd "$COLLECTOR_ROOT"
+        source "$COLLECTOR_VENV/bin/activate"
+        python scripts/prepare_runtime_db.py --force --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
+      )
+    else
+      initialize_empty_runtime_db
+    fi
   fi
 
   sync_runtime_db_to_source
