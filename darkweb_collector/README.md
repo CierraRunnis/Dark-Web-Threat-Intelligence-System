@@ -98,6 +98,45 @@ export PROXY_PORT=7890
 cd /path/to/bishe/darkweb_collector
 ```
 
+## 一键启动整套服务
+
+如果你希望一次性启动 Redis、后端 API、前端、采集 worker、scheduler 和同步任务，推荐在 WSL 中使用：
+
+```bash
+bash scripts/start_all_services_wsl.sh start
+```
+
+脚本会自动：
+
+- 校验 `tmux`、`python3`、`python3-venv`、`python3-pip`、`npm`、`redis-server`、`redis-cli`、`curl`
+- 在 Debian/Ubuntu/WSL 环境下，缺失时自动通过 `apt-get` 安装系统依赖
+- 自动创建后端虚拟环境并安装 `requirements.txt`
+- 自动安装 Playwright Chromium 运行时
+- 检查前端 `node_modules`，缺失时自动执行 `npm install`
+- 准备 WSL 本地运行时数据库；如果没有历史数据库，会自动初始化空库
+- 用 `tmux` 拉起整套服务并保留各窗口日志
+
+常用子命令：
+
+```bash
+# 启动
+bash scripts/start_all_services_wsl.sh start
+
+# 查看状态
+bash scripts/start_all_services_wsl.sh status
+
+# 进入 tmux 会话
+bash scripts/start_all_services_wsl.sh attach
+
+# 停止
+bash scripts/start_all_services_wsl.sh stop
+```
+
+默认启动后可访问：
+
+- 前端：`http://localhost:5173`
+- 后端健康检查：`http://127.0.0.1:8000/api/health`
+
 ### 查看当前站点
 
 ```bash
