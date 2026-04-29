@@ -26,7 +26,7 @@ CONTINUOUS_INTERVAL_SECONDS = 60
 DEFAULT_VULNERABILITY_SYNC_INTERVAL_SECONDS = 3600
 DEFAULT_VULNERABILITY_SYNC_LIMIT = 300
 DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS = 3600
-DEFAULT_RANSOMWARE_SYNC_LIMIT = 100
+DEFAULT_RANSOMWARE_SYNC_LIMIT = 0
 WORKER_QUEUE_CACHE_TTL_SECONDS = 5
 
 
@@ -563,8 +563,6 @@ def start_ransomware_sync_dispatch(
     global _ransomware_sync_limit
     if interval_seconds <= 0:
         interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
-    if limit <= 0:
-        limit = DEFAULT_RANSOMWARE_SYNC_LIMIT
     with _ransomware_sync_lock:
         if _ransomware_sync_enabled and _ransomware_sync_thread and _ransomware_sync_thread.is_alive():
             return {

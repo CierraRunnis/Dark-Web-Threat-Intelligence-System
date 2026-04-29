@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 
-const DETAIL_CACHE_VERSION = '2026-04-09-rich-detail-v4'
+const DETAIL_CACHE_VERSION = '2026-04-16-rich-detail-v5'
 
 export function useEventDetail() {
   const detail = ref(null)

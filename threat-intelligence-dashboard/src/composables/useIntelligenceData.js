@@ -22,6 +22,48 @@ const COUNTRY_NAME_OVERRIDES = {
   US: '美国',
 }
 
+const INDUSTRY_NAME_OVERRIDES = {
+  other: '其他',
+  unknown: '未知',
+  'business services': '其他',
+  'consumer services': '零售',
+  'financial services': '金融',
+  manufacturing: '制造业',
+  construction: '制造业',
+  'public sector': '政府',
+  'agriculture and food production': '农业',
+  telecommunication: '通信',
+  telecommunications: '通信',
+  'transportation/logistics': '交通',
+  transportation: '交通',
+  'hospitality and tourism': '文娱',
+  healthcare: '医疗',
+  technology: '科技',
+  energy: '能源',
+  education: '教育',
+  retail: '零售',
+  government: '政府',
+  finance: '金融',
+  military: '军事',
+  agriculture: '农业',
+  entertainment: '文娱',
+  '鍏朵粬': '其他',
+  '鏈煡': '未知',
+  '闆跺敭': '零售',
+  '閲戣瀺': '金融',
+  '鍒堕€犱笟': '制造业',
+  '鏀垮簻': '政府',
+  '鍖荤枟': '医疗',
+  '绉戞妧': '科技',
+  '鍐涗簨': '军事',
+  '鍐滀笟': '农业',
+  '鏁欒偛': '教育',
+  '閫氫俊': '通信',
+  '鑳芥簮': '能源',
+  '浜ら€?': '交通',
+  '鏂囧ū': '文娱',
+}
+
 const countryNameFormatter =
   typeof Intl !== 'undefined' && typeof Intl.DisplayNames === 'function'
     ? new Intl.DisplayNames(['zh-Hans'], { type: 'region' })
@@ -39,7 +81,7 @@ function toChineseCountryName(countryCode, fallbackName = '') {
 }
 
 function normalizeCountryItem(item) {
-  if (!item || typeof item !== 'object') return item
+  if (!item || typeof item !== "object") return item
   const countryCode = String(item.countryCode || item.country_code || '').trim().toUpperCase()
   if (!countryCode) return item
   const chineseCountry = toChineseCountryName(countryCode, item.country || item.region)
@@ -47,6 +89,21 @@ function normalizeCountryItem(item) {
     ...item,
     country: chineseCountry,
     region: chineseCountry,
+  }
+}
+
+function normalizeIndustryName(industry) {
+  const value = String(industry || '').trim()
+  if (!value) return value
+  return INDUSTRY_NAME_OVERRIDES[value] || INDUSTRY_NAME_OVERRIDES[value.toLowerCase()] || value
+}
+
+function normalizeEventItem(item) {
+  if (!item || typeof item !== "object") return item
+  const countryNormalized = normalizeCountryItem(item)
+  return {
+    ...countryNormalized,
+    industry: normalizeIndustryName(countryNormalized.industry),
   }
 }
 
@@ -77,10 +134,10 @@ function rebuildExecutiveCountries(dataLeakEvents, ransomwareEvents) {
 function normalizePayloadCountries(payload) {
   if (!payload || typeof payload !== 'object') return payload
 
-  const dataLeakEvents = Array.isArray(payload.dataLeakEvents) ? payload.dataLeakEvents.map(normalizeCountryItem) : payload.dataLeakEvents || []
-  const ransomwareEvents = Array.isArray(payload.ransomwareEvents) ? payload.ransomwareEvents.map(normalizeCountryItem) : payload.ransomwareEvents || []
+  const dataLeakEvents = Array.isArray(payload.dataLeakEvents) ? payload.dataLeakEvents.map(normalizeEventItem) : payload.dataLeakEvents || []
+  const ransomwareEvents = Array.isArray(payload.ransomwareEvents) ? payload.ransomwareEvents.map(normalizeEventItem) : payload.ransomwareEvents || []
   const threatExecutivePriorityEvents = Array.isArray(payload.threatExecutivePriorityEvents)
-    ? payload.threatExecutivePriorityEvents.map(normalizeCountryItem)
+    ? payload.threatExecutivePriorityEvents.map(normalizeEventItem)
     : payload.threatExecutivePriorityEvents || []
   const threatExecutiveCountries = rebuildExecutiveCountries(dataLeakEvents, ransomwareEvents)
   const topCountry = threatExecutiveCountries[0]?.name || payload.threatExecutiveCards?.topCountry || '未知'

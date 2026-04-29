@@ -1,7 +1,10 @@
 #!/bin/bash
 # Run onion crawler in WSL
 
-cd /mnt/d/bishe/darkweb_collector
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/darkweb_collector" && pwd)"
+
+cd "$PROJECT_ROOT"
 
 # Create virtual environment if not exists
 if [ ! -d "venv" ]; then

@@ -1,7 +1,10 @@
 #!/bin/bash
 # Run onion crawler with Playwright in WSL with Tor
 
-cd /mnt/d/bishe/darkweb_collector
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/darkweb_collector" && pwd)"
+
+cd "$PROJECT_ROOT"
 
 # Activate virtual environment
 source venv/bin/activate

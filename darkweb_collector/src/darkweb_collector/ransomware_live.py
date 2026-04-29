@@ -22,7 +22,7 @@ RANSOMWARE_LIVE_API_KEY_ENV = "RANSOMWARE_LIVE_API_KEY"
 RANSOMWARE_LIVE_SETTINGS_PATH_ENV = "DARKWEB_RANSOMWARE_LIVE_SETTINGS_PATH"
 RANSOMWARE_LIVE_SETTINGS_FILE = "ransomware_live_settings.json"
 RANSOMWARE_LIVE_SYNC_TTL_SECONDS = 3600
-RANSOMWARE_LIVE_DEFAULT_LIMIT = 100
+RANSOMWARE_LIVE_DEFAULT_LIMIT = 0
 HTTP_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "bishe-threat-intel/1.0",
@@ -133,6 +133,18 @@ def _normalize_datetime(value: Any) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _apply_record_limit(victims: list[dict[str, Any]], limit: int | None) -> list[dict[str, Any]]:
+    if limit is None:
+        return victims
+    try:
+        normalized = int(limit)
+    except (TypeError, ValueError):
+        return victims
+    if normalized <= 0:
+        return victims
+    return victims[:normalized]
+
+
 def _fetch_json(url: str, *, timeout: int = 30) -> dict[str, Any]:
     api_key = get_ransomware_live_api_key()
     if not api_key:
@@ -197,7 +209,7 @@ def fetch_recent_ransomware_live_victims(
     victims = payload.get("victims") or []
     if not isinstance(victims, list):
         victims = []
-    limited = victims[: max(1, int(limit))]
+    limited = _apply_record_limit(victims, limit)
     observed_at = _now_utc_iso()
     records = [
         normalize_ransomware_live_victim(item, last_seen_at=observed_at)

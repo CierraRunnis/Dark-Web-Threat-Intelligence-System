@@ -9,11 +9,12 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+import darkweb_collector.monitoring_rules as monitoring_rules_module
 from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.detail_i18n import translate_event_detail_text_live
-from darkweb_collector.db import get_db_connection, get_normalized_intelligence_cache_state
+from darkweb_collector.db import get_db_connection, get_normalized_intelligence_cache_state, list_vulnerability_records
 from darkweb_collector.normalized_intelligence import (
-    build_behavior_payload as build_behavior_payload_from_events,
+    _build_vulnerability_base_event,
     build_display_title,
     ensure_normalized_intelligence,
     load_normalized_event_detail,
@@ -56,6 +57,21 @@ INDUSTRY_LABELS = {
     "entertainment": "文娱",
 }
 
+INDUSTRY_LABELS.update(
+    {
+        "public sector": "鏀垮簻",
+        "financial services": "閲戣瀺",
+        "agriculture and food production": "鍐滀笟",
+        "consumer services": "闆跺敭",
+        "telecommunication": "閫氫俊",
+        "transportation/logistics": "浜ら€?",
+        "hospitality and tourism": "鏂囧ū",
+        "manufacturing": "鍒堕€犱笟",
+        "construction": "鍒堕€犱笟",
+        "business services": "鍏朵粬",
+    }
+)
+
 REGION_LABELS = {
     "unknown": "未知",
     "north_america": "北美",
@@ -78,13 +94,10 @@ JOB_STATUS_LABELS = {
 RECENT_FAILURE_WINDOW_HOURS = 24
 STALE_RUNNING_MINUTES = 30
 STALE_ENQUEUED_MINUTES = 10
-STALE_ENQUEUED_BUSY_QUEUE_MINUTES = 60
-RANSOMWARE_EVENT_LIMIT = 300
-RANSOMWARE_SOURCE_QUERY_LIMIT = 500
+RANSOMWARE_EVENT_LIMIT = 0
+RANSOMWARE_SOURCE_QUERY_LIMIT = 0
 DATA_LEAK_EVENT_LIMIT = 3000
 VULNERABILITY_EVENT_LIMIT = 500
-VULNERABILITY_RECENT_WINDOW_DAYS = 30
-VULNERABILITY_RECENT_WINDOW_DAYS = 30
 
 _PAYLOAD_CACHE_LOCK = Lock()
 _PAYLOAD_CACHE: dict[str, dict[str, Any]] = {}
@@ -110,11 +123,23 @@ def _format_dt(value: str | None) -> str:
     return dt.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
+def _apply_event_limit(items: list[Any], limit: int | None) -> list[Any]:
+    if limit is None:
+        return items
+    try:
+        normalized = int(limit)
+    except (TypeError, ValueError):
+        return items
+    if normalized <= 0:
+        return items
+    return items[:normalized]
+
+
 def _format_date(value: str | None) -> str:
     dt = _parse_dt(value)
     if dt is None:
         return (value or "").split(" ", 1)[0]
-    return dt.astimezone().strftime("%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d")
 
 
 def _weekday_cn(dt: datetime) -> str:
@@ -125,6 +150,38 @@ def _weekday_cn(dt: datetime) -> str:
 def _label_industry(value: str | None) -> str:
     raw = (value or "").strip()
     return INDUSTRY_LABELS.get(raw, raw or "未知")
+
+
+def _label_industry(value: str | None) -> str:
+    raw = (value or "").strip()
+    lowered = raw.lower()
+    if any(token in raw for token in ("鍒堕",)) or "manufact" in lowered or "construction" in lowered:
+        return "制造业"
+    if any(token in raw for token in ("鍏朵",)) or "business services" in lowered:
+        return "其他"
+    if any(token in raw for token in ("闆跺",)) or "consumer services" in lowered or "retail" in lowered:
+        return "零售"
+    if any(token in raw for token in ("浜ら",)) or "transport" in lowered or "logistics" in lowered:
+        return "交通"
+    if any(token in raw for token in ("鏂囧",)) or "hospitality" in lowered or "tourism" in lowered or "entertainment" in lowered:
+        return "文娱"
+    if any(token in raw for token in ("鏀垮",)) or "public sector" in lowered or "government" in lowered:
+        return "政府"
+    if any(token in raw for token in ("閲戣",)) or "financial services" in lowered or "finance" in lowered:
+        return "金融"
+    if any(token in raw for token in ("鍖荤",)) or "healthcare" in lowered:
+        return "医疗"
+    if any(token in raw for token in ("绉戞",)) or "technology" in lowered:
+        return "科技"
+    if any(token in raw for token in ("鍐滀",)) or "agriculture" in lowered:
+        return "农业"
+    if any(token in raw for token in ("閫氫",)) or "telecommunication" in lowered:
+        return "通信"
+    if any(token in raw for token in ("鑳芥",)) or "energy" in lowered:
+        return "能源"
+    if any(token in raw for token in ("鏁欒",)) or "education" in lowered:
+        return "教育"
+    return INDUSTRY_LABELS.get(lowered, INDUSTRY_LABELS.get(raw, raw or "鏈煡"))
 
 
 def _label_region(value: str | None) -> str:
@@ -184,49 +241,18 @@ def _is_stale_running(started_at: str | None, finished_at: str | None) -> bool:
     return started < (_now_utc() - timedelta(minutes=STALE_RUNNING_MINUTES))
 
 
-def _is_recent_running_job(row: dict[str, Any]) -> bool:
-    if row.get("status") != "running":
-        return False
-    return not _is_stale_running(row.get("started_at"), row.get("finished_at"))
-
-
-def _annotate_queue_activity(crawl_jobs: list[dict[str, Any]]) -> None:
-    recent_running_by_queue = Counter(
-        str(row.get("queue_name") or "")
-        for row in crawl_jobs
-        if row.get("queue_name") and _is_recent_running_job(row)
-    )
-    for row in crawl_jobs:
-        queue_name = str(row.get("queue_name") or "")
-        row["_queue_has_recent_running"] = bool(queue_name and recent_running_by_queue.get(queue_name, 0) > 0)
-
-
-def _is_stale_enqueued(
-    enqueued_at: str | None,
-    started_at: str | None,
-    finished_at: str | None,
-    *,
-    queue_has_recent_running: bool = False,
-) -> bool:
+def _is_stale_enqueued(enqueued_at: str | None, started_at: str | None, finished_at: str | None) -> bool:
     if started_at or finished_at:
         return False
     enqueued = _parse_dt(enqueued_at)
     if enqueued is None:
         return False
-    threshold_minutes = (
-        STALE_ENQUEUED_BUSY_QUEUE_MINUTES if queue_has_recent_running else STALE_ENQUEUED_MINUTES
-    )
-    return enqueued < (_now_utc() - timedelta(minutes=threshold_minutes))
+    return enqueued < (_now_utc() - timedelta(minutes=STALE_ENQUEUED_MINUTES))
 
 
 def _effective_job_status(row: dict[str, Any]) -> str:
     status = row.get("status") or ""
-    if status == "enqueued" and _is_stale_enqueued(
-        row.get("enqueued_at"),
-        row.get("started_at"),
-        row.get("finished_at"),
-        queue_has_recent_running=bool(row.get("_queue_has_recent_running")),
-    ):
+    if status == "enqueued" and _is_stale_enqueued(row.get("enqueued_at"), row.get("started_at"), row.get("finished_at")):
         return "stale"
     if status == "running" and _is_stale_running(row.get("started_at"), row.get("finished_at")):
         return "stale"
@@ -250,17 +276,6 @@ def _series_from_counter(counter: Counter[str], days: int = 7) -> dict[str, list
     labels = [item.strftime("%m-%d") for item in dates]
     values = [int(counter.get(item.date().isoformat(), 0)) for item in dates]
     return {"labels": labels, "values": values}
-
-
-def _filter_recent_event_rows(items: list[dict[str, Any]], *, days: int) -> list[dict[str, Any]]:
-    cutoff = _now_utc() - timedelta(days=max(1, days))
-    filtered: list[dict[str, Any]] = []
-    for item in items:
-        event_dt = _parse_dt(str(item.get("disclosure_time") or ""))
-        if event_dt is None or event_dt < cutoff:
-            continue
-        filtered.append(item)
-    return filtered
 
 
 def _count_by_day(values: list[str | None]) -> Counter[str]:
@@ -294,6 +309,55 @@ def _build_monitoring_status(forum_details: list[dict[str, Any]], crawl_jobs: li
         "refreshedLabel": "最近刷新",
         "refreshedValue": latest_refresh or "暂无运行记录",
     }
+
+
+def _recent_problem_rows(crawl_jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for item in ranked[:limit]:
+        list_item = normalized_event_to_list_item(item)
+        rows.append(
+            {
+                "id": item["event_id"],
+                "disclosureDate": list_item.get("disclosureDate") or list_item.get("updatedTime", "")[:10],
+                "title": list_item.get("title") or build_display_title(item),
+                "originalTitle": item.get("title") or "鏈懡鍚嶄簨浠?",
+                "sourceSite": list_item.get("sourceSite") or _label_source(item.get("source_site_name")),
+                "attacker": item.get("attacker") or "鏈煡",
+                "country": list_item.get("country") or "鏈煡",
+                "industry": list_item.get("industry") or "鏈煡",
+                "riskScore": int(item.get("risk_score") or 0),
+                "monitoringWeight": int(list_item.get("monitoringWeight") or 0),
+                "monitoringMatches": list_item.get("monitoringMatches") or [],
+                "hasSampleEvidence": bool(list_item.get("hasSampleEvidence")),
+            }
+        )
+    return rows
+    rows = []
+    for item in ranked[:limit]:
+        list_item = normalized_event_to_list_item(item)
+        rows.append(
+            {
+                "id": item["event_id"],
+                "disclosureDate": list_item.get("disclosureDate") or list_item.get("updatedTime", "")[:10],
+                "title": list_item.get("title") or build_display_title(item),
+                "originalTitle": item.get("title") or "鏈懡鍚嶄簨浠?",
+                "sourceSite": list_item.get("sourceSite") or _label_source(item.get("source_site_name")),
+                "attacker": item.get("attacker") or "鏈煡",
+                "country": list_item.get("country") or "鏈煡",
+                "industry": list_item.get("industry") or "鏈煡",
+                "riskScore": int(item.get("risk_score") or 0),
+                "monitoringWeight": int(list_item.get("monitoringWeight") or 0),
+                "monitoringMatches": list_item.get("monitoringMatches") or [],
+                "hasSampleEvidence": bool(list_item.get("hasSampleEvidence")),
+            }
+        )
+    return rows
+    return [
+        row
+        for row in crawl_jobs
+        if _effective_job_status(row) in {"failed", "stale"}
+        and _is_recent(row.get("finished_at") or row.get("started_at"), RECENT_FAILURE_WINDOW_HOURS)
+    ]
 
 
 def _recent_problem_rows(crawl_jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -347,7 +411,7 @@ def _build_data_leak_events(forum_details: list[dict[str, Any]]) -> list[dict[st
 
 def _build_ransomware_events(victim_rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     events: list[dict[str, str]] = []
-    for row in victim_rows[:RANSOMWARE_EVENT_LIMIT]:
+    for row in _apply_event_limit(victim_rows, RANSOMWARE_EVENT_LIMIT):
         raw_json = _parse_json(row.get("raw_json"))
         detail_url = row.get("detail_url") or raw_json.get("detail_url") or ""
         event_id = f"victim:{row['site_name']}:{_event_hash(detail_url or row.get('name', ''))}"
@@ -481,7 +545,7 @@ def _build_forum_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
     disclosure_time = (
         raw_json.get("published_at_utc")
         or normalize_darkforums_timestamp(
-            row_dict.get("timestamps") or raw_json.get("timestamps") or raw_json.get("timestamp"),
+            raw_json.get("timestamp") or row_dict.get("timestamps"),
             collected_at_utc=row_dict.get("fetched_at"),
         )
         or row_dict.get("fetched_at")
@@ -498,7 +562,7 @@ def _build_forum_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
         "event_type": "forum",
         "raw_source_type": "forum_details",
         "title": row_dict.get("title") or row_dict.get("topic_url") or "未命名论坛帖子",
-        "disclosure_time": _format_date(disclosure_time),
+        "disclosure_time": _format_dt(disclosure_time),
         "attacker": attackers or _label_source(row_dict.get("site_name")),
         "disclosure_url": row_dict.get("topic_url") or "",
         "detail_text": row_dict.get("content") or "",
@@ -546,7 +610,7 @@ def _build_victim_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
 def _build_forum_event_records(connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
-        SELECT d.site_name, d.section, d.topic_url, d.content, d.timestamps, d.attachments, d.victims, d.attackers, d.fetched_at, d.raw_json,
+        SELECT d.site_name, d.section, d.topic_url, d.content, d.attachments, d.victims, d.attackers, d.fetched_at, d.raw_json,
                COALESCE(t.title, d.topic_url) AS title,
                COALESCE((SELECT industry FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'other') AS industry,
                COALESCE((SELECT region FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'unknown') AS region
@@ -586,7 +650,7 @@ def _build_victim_event_records(connection) -> list[dict[str, Any]]:
 
 def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        normalized_events = load_normalized_events(connection)
+        normalized_events, _ = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
 
     events = [normalized_event_to_detail(item) for item in normalized_events]
     if limit is not None:
@@ -602,7 +666,7 @@ def _build_forum_event_detail_by_id(
 ) -> dict[str, Any] | None:
     rows = connection.execute(
         """
-        SELECT d.site_name, d.section, d.topic_url, d.content, d.timestamps, d.attachments, d.victims, d.attackers, d.fetched_at, d.raw_json,
+        SELECT d.site_name, d.section, d.topic_url, d.content, d.attachments, d.victims, d.attackers, d.fetched_at, d.raw_json,
                COALESCE(t.title, d.topic_url) AS title,
                COALESCE((SELECT industry FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'other') AS industry,
                COALESCE((SELECT region FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'unknown') AS region
@@ -696,18 +760,19 @@ def build_event_detail(event_id: str, *, translate_detail: bool = False) -> dict
     with get_db_connection() as connection:
         event = load_normalized_event_detail(connection, event_id)
         fallback_payload = _build_raw_event_detail_by_id(connection, event_id)
-    if event is None:
-        payload = fallback_payload
-        if payload is None:
-            return None
-    else:
-        payload = normalized_event_to_detail(event)
-        if fallback_payload is not None:
-            payload = _merge_event_detail_payload(payload, fallback_payload)
-    payload.setdefault("identifier", payload.get("id") or event_id)
-    if translate_detail and payload.get("normalized_event_type") != "vulnerability":
-        payload["detail_text"] = translate_event_detail_text_live(payload.get("detail_text"))
-    return payload
+        if event is None:
+            payload = fallback_payload
+            if payload is None:
+                return None
+        else:
+            enriched_events, _ = monitoring_rules_module.build_monitoring_payload(connection, [event])
+            payload = normalized_event_to_detail(enriched_events[0] if enriched_events else event)
+            if fallback_payload is not None:
+                payload = _merge_event_detail_payload(payload, fallback_payload)
+        payload.setdefault("identifier", payload.get("id") or event_id)
+        if translate_detail and payload.get("normalized_event_type") != "vulnerability":
+            payload["detail_text"] = translate_event_detail_text_live(payload.get("detail_text"))
+        return payload
 
 
 def build_vulnerability_records(
@@ -718,13 +783,27 @@ def build_vulnerability_records(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        normalized_events = ensure_normalized_intelligence(connection)
+        rows = list_vulnerability_records(connection)
 
-    vulnerability_events = [
-        normalized_event_to_list_item(item)
-        for item in normalized_events
-        if item.get("event_type") == "vulnerability"
+    raw_events = [
+        normalized_event_to_list_item(_materialize_vulnerability_event(row))
+        for row in rows
     ]
+    deduped_map: dict[str, dict[str, Any]] = {}
+    for item in raw_events:
+        key = str(item.get("cveId") or item.get("id") or "")
+        if not key:
+            continue
+        current = deduped_map.get(key)
+        if current is None:
+            deduped_map[key] = item
+            continue
+        current_dt = _parse_dt(str(current.get("updatedTimeRaw") or current.get("disclosureTimeRaw") or ""))
+        item_dt = _parse_dt(str(item.get("updatedTimeRaw") or item.get("disclosureTimeRaw") or ""))
+        if item_dt is not None and (current_dt is None or item_dt >= current_dt):
+            deduped_map[key] = item
+
+    vulnerability_events = list(deduped_map.values())
     filtered: list[dict[str, Any]] = []
     cutoff = _now_utc() - timedelta(days=days) if days else None
     severity_filter = (severity or "").strip().lower()
@@ -749,13 +828,35 @@ def build_vulnerability_records(
 
 def build_vulnerability_detail(event_id: str) -> dict[str, Any] | None:
     with get_db_connection() as connection:
-        event = load_normalized_event_detail(connection, event_id)
-        if event is None:
-            ensure_normalized_intelligence(connection, force=True)
+        cve_id = str(event_id or "").removeprefix("vuln:").upper()
+        row = next((item for item in list_vulnerability_records(connection) if str(item.get("cve_id") or "").upper() == cve_id), None)
+        if row is not None:
+            event = _materialize_vulnerability_event(row)
+        else:
             event = load_normalized_event_detail(connection, event_id)
     if event is None or event.get("event_type") != "vulnerability":
         return None
     return normalized_event_to_detail(event)
+
+
+def _materialize_vulnerability_event(row: dict[str, Any]) -> dict[str, Any]:
+    event = _build_vulnerability_base_event(row)
+    severity = str(event.get("severity") or "").lower()
+    risk_score = 55
+    if severity == "critical":
+        risk_score = 85
+    elif severity == "high":
+        risk_score = 72
+    elif severity == "medium":
+        risk_score = 58
+    if bool((event.get("metadata") or {}).get("is_exploited")):
+        risk_score = min(100, risk_score + 10)
+    return {
+        **event,
+        "source": (event.get("metadata") or {}).get("source") or "公开源",
+        "risk_score": int(event.get("risk_score") or risk_score),
+        "risk_reasons": event.get("risk_reasons") or [],
+    }
 
 
 def _build_summary_cards(
@@ -1059,8 +1160,20 @@ def _build_vulnerability_summary(vulnerability_events: list[dict[str, Any]]) -> 
     ]
 
 
-def _build_vulnerability_rankings(vulnerability_events: list[dict[str, Any]], field: str, limit: int = 6) -> list[dict[str, Any]]:
-    counter = Counter(item.get(field) or "未知" for item in vulnerability_events if item.get(field))
+def _build_vulnerability_rankings(
+    vulnerability_events: list[dict[str, Any]],
+    field: str,
+    limit: int = 6,
+    recent_days: int = 30,
+) -> list[dict[str, Any]]:
+    cutoff = _now_utc() - timedelta(days=recent_days)
+    recent_events = [
+        item
+        for item in vulnerability_events
+        if (_parse_dt(str(item.get("disclosureTimeRaw") or item.get("disclosureTime") or "")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+    ]
+    source_events = recent_events or vulnerability_events
+    counter = Counter(item.get(field) or "未知" for item in source_events if item.get(field))
     return [{"name": name, "value": value} for name, value in counter.most_common(limit)]
 
 
@@ -1151,6 +1264,14 @@ def _latest_job_marker(connection) -> str:
 def _payload_cache_key(connection, namespace: str) -> str:
     cache_state = get_normalized_intelligence_cache_state(connection) or {}
     latest_jobs = _latest_job_marker(connection) if namespace == "intelligence" else ""
+    monitoring_state = connection.execute(
+        """
+        SELECT COUNT(*) AS count, MAX(updated_at) AS latest
+        FROM monitoring_keywords
+        """
+    ).fetchone()
+    monitoring_count = int(monitoring_state["count"]) if monitoring_state else 0
+    monitoring_latest = str(monitoring_state["latest"] or "") if monitoring_state else ""
     payload = {
         "payload_cache_version": PAYLOAD_CACHE_VERSION,
         "namespace": namespace,
@@ -1158,6 +1279,8 @@ def _payload_cache_key(connection, namespace: str) -> str:
         "refreshed_at": cache_state.get("refreshed_at") or "",
         "event_count": int(cache_state.get("event_count") or 0),
         "latest_jobs": latest_jobs,
+        "monitoring_keyword_count": monitoring_count,
+        "monitoring_keyword_latest": monitoring_latest,
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -1257,6 +1380,41 @@ def _build_executive_priority_events(events: list[dict[str, Any]], limit: int = 
     ]
 
 
+def _build_executive_priority_events(events: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    ranked = sorted(
+        (
+            item
+            for item in events
+            if (item.get("title") or "").strip() and len((item.get("title") or "").strip()) >= 4
+        ),
+        key=lambda item: (
+            int(item.get("risk_score") or 0),
+            _parse_dt(item.get("disclosure_time")) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    rows = []
+    for item in ranked[:limit]:
+        list_item = normalized_event_to_list_item(item)
+        rows.append(
+            {
+                "id": item["event_id"],
+                "disclosureDate": list_item.get("disclosureDate") or list_item.get("updatedTime", "")[:10],
+                "title": list_item.get("title") or build_display_title(item),
+                "originalTitle": item.get("title") or "鏈懡鍚嶄簨浠?",
+                "sourceSite": list_item.get("sourceSite") or _label_source(item.get("source_site_name")),
+                "attacker": item.get("attacker") or "鏈煡",
+                "country": list_item.get("country") or "鏈煡",
+                "industry": list_item.get("industry") or "鏈煡",
+                "riskScore": int(item.get("risk_score") or 0),
+                "monitoringWeight": int(list_item.get("monitoringWeight") or 0),
+                "monitoringMatches": list_item.get("monitoringMatches") or [],
+                "hasSampleEvidence": bool(list_item.get("hasSampleEvidence")),
+            }
+        )
+    return rows
+
+
 def _build_executive_coverage(events: list[dict[str, Any]]) -> dict[str, int]:
     total = len(events) or 1
     return {
@@ -1292,21 +1450,20 @@ def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[st
 
 def build_intelligence_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
-        normalized_events = load_normalized_events(connection)
+        normalized_events, monitoring_payload = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
         cache_key = _payload_cache_key(connection, "intelligence")
-        behavior_payload = build_behavior_payload_from_events(connection, events=normalized_events)
+        vulnerability_rows = list_vulnerability_records(connection)
         crawl_jobs = [
             dict(row)
             for row in connection.execute(
                 """
-                SELECT site_name, job_type, status, queue_name, target, enqueued_at, started_at, finished_at, error_message
+                SELECT site_name, job_type, status, target, enqueued_at, started_at, finished_at, error_message
                 FROM crawl_jobs
                 ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
                 LIMIT 100
                 """
             ).fetchall()
         ]
-        _annotate_queue_activity(crawl_jobs)
 
     def sort_by_disclosure(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(
@@ -1317,17 +1474,10 @@ def build_intelligence_payload() -> dict[str, Any]:
 
     data_leak_source_events = sort_by_disclosure([item for item in normalized_events if item.get("event_type") == "data_leak"])
     ransomware_source_events = sort_by_disclosure([item for item in normalized_events if item.get("event_type") == "ransomware"])
-    vulnerability_source_events = sort_by_disclosure([item for item in normalized_events if item.get("event_type") == "vulnerability"])
+    vulnerability_source_events = sort_by_disclosure([_materialize_vulnerability_event(row) for row in vulnerability_rows])
     data_leak_events = [normalized_event_to_list_item(item) for item in data_leak_source_events[:DATA_LEAK_EVENT_LIMIT]]
-    ransomware_events = [normalized_event_to_list_item(item) for item in ransomware_source_events[:RANSOMWARE_EVENT_LIMIT]]
-    vulnerability_recent_cutoff = _now_utc() - timedelta(days=VULNERABILITY_RECENT_WINDOW_DAYS)
-    recent_vulnerability_source_events = [
-        item
-        for item in vulnerability_source_events
-        if (_parse_dt(str(item.get("disclosure_time") or "")) or datetime.min.replace(tzinfo=timezone.utc)) >= vulnerability_recent_cutoff
-    ]
-    vulnerability_events = [normalized_event_to_list_item(item) for item in recent_vulnerability_source_events[:VULNERABILITY_EVENT_LIMIT]]
-    recent_vulnerability_events = [normalized_event_to_list_item(item) for item in recent_vulnerability_source_events[:VULNERABILITY_EVENT_LIMIT]]
+    ransomware_events = [normalized_event_to_list_item(item) for item in _apply_event_limit(ransomware_source_events, RANSOMWARE_EVENT_LIMIT)]
+    vulnerability_events = [normalized_event_to_list_item(item) for item in vulnerability_source_events[:VULNERABILITY_EVENT_LIMIT]]
     forum_victims = [
         {
             "victim_name": item.get("victim"),
@@ -1340,16 +1490,23 @@ def build_intelligence_payload() -> dict[str, Any]:
     dashboard_summary, data_leak_summary, ransomware_summary = _build_summary_cards(
         data_leak_events, ransomware_events, crawl_jobs, forum_victims
     )
-    vulnerability_summary = _build_vulnerability_summary(recent_vulnerability_events)
+    vulnerability_summary = _build_vulnerability_summary(vulnerability_events)
 
     data_leak_counter = _count_by_day([row.get("disclosure_time") for row in data_leak_source_events])
     ransomware_counter = _count_by_day([row.get("disclosure_time") for row in ransomware_source_events])
-    vulnerability_counter = _count_by_day([row.get("disclosure_time") for row in recent_vulnerability_source_events])
-    job_counter = _count_by_day([row.get("finished_at") or row.get("started_at") for row in crawl_jobs])
+    vulnerability_counter = _count_by_day([row.get("disclosure_time") for row in vulnerability_source_events])
     data_leak_series = _series_from_counter(data_leak_counter)
     ransomware_series = _series_from_counter(ransomware_counter)
     vulnerability_series = _series_from_counter(vulnerability_counter)
-    threat_alert_series = _series_from_counter(job_counter)
+    threat_alert_series = {
+        "labels": data_leak_series["labels"],
+        "values": [
+            int(data_leak_series["values"][index])
+            + int(ransomware_series["values"][index])
+            + int(vulnerability_series["values"][index])
+            for index in range(len(data_leak_series["labels"]))
+        ],
+    }
 
     section_counts = Counter(row.get("category") or "unknown" for row in data_leak_events)
     failed_jobs = sum(
@@ -1360,7 +1517,7 @@ def build_intelligence_payload() -> dict[str, Any]:
     attack_type_share = [
         {"name": "数据泄露", "value": len(data_leak_events)},
         {"name": "勒索情报", "value": len(ransomware_events)},
-        {"name": "漏洞预警", "value": len(recent_vulnerability_events)},
+        {"name": "漏洞预警", "value": len(vulnerability_events)},
         {
             "name": "失败任务",
             "value": failed_jobs,
@@ -1375,8 +1532,8 @@ def build_intelligence_payload() -> dict[str, Any]:
     )
     top_ransomware_actors = Counter(item.get("attacker") or "未知" for item in ransomware_events if item.get("attacker"))
     top_ransomware_industries = Counter(item.get("industry") or "未知" for item in ransomware_source_events if item.get("industry"))
-    vulnerability_vendor_ranking = _build_vulnerability_rankings(recent_vulnerability_events, "vendor")
-    vulnerability_product_ranking = _build_vulnerability_rankings(recent_vulnerability_events, "product")
+    vulnerability_vendor_ranking = _build_vulnerability_rankings(vulnerability_events, "vendor")
+    vulnerability_product_ranking = _build_vulnerability_rankings(vulnerability_events, "product")
     threat_level_trend = {
         "labels": data_leak_series["labels"],
         "high": ransomware_series["values"],
@@ -1389,7 +1546,7 @@ def build_intelligence_payload() -> dict[str, Any]:
     executive_trend = _build_executive_trend(normalized_events)
     executive_priority_events = _build_executive_priority_events(normalized_events)
     executive_coverage = _build_executive_coverage(normalized_events)
-    preview_cards = _build_preview_cards(data_leak_events, ransomware_events, crawl_jobs, behavior_payload)
+    preview_cards = _build_preview_cards(data_leak_events, ransomware_events, crawl_jobs, {})
     preview_cards.insert(
         2,
         {
@@ -1397,18 +1554,18 @@ def build_intelligence_payload() -> dict[str, Any]:
             "eyebrow": "模块预览",
             "title": "漏洞预警",
             "summary": "聚合公开源高危漏洞、利用状态与受影响厂商/产品，适合演示应急研判入口。",
-            "highlight": f"{sum(1 for item in recent_vulnerability_events if item.get('isExploited'))} 条已被利用",
+            "highlight": f"{sum(1 for item in vulnerability_events if item.get('isExploited'))} 条已被利用",
             "tone": "danger",
             "stats": [
-                {"label": "漏洞数", "value": str(len(recent_vulnerability_events))},
+                {"label": "漏洞数", "value": str(len(vulnerability_events))},
                 {"label": "厂商数", "value": str(len(vulnerability_vendor_ranking))},
-                {"label": "已利用", "value": str(sum(1 for item in recent_vulnerability_events if item.get('isExploited')))},
+                {"label": "已利用", "value": str(sum(1 for item in vulnerability_events if item.get('isExploited')))},
             ],
         },
     )
-    dashboard_watchlist = _build_vulnerability_watchlist(recent_vulnerability_events, limit=2) + _build_watchlist(crawl_jobs, section_counts)
-    timeline = _build_vulnerability_timeline(recent_vulnerability_events, limit=2) + _build_recent_timeline(data_leak_events, ransomware_events, crawl_jobs)
-    situation_alerts = _build_vulnerability_alert_stream(recent_vulnerability_events, limit=4) + _build_situation_alerts(crawl_jobs)
+    dashboard_watchlist = _build_vulnerability_watchlist(vulnerability_events, limit=2) + _build_watchlist(crawl_jobs, section_counts)
+    timeline = _build_vulnerability_timeline(vulnerability_events, limit=2) + _build_recent_timeline(data_leak_events, ransomware_events, crawl_jobs)
+    situation_alerts = _build_vulnerability_alert_stream(vulnerability_events, limit=4) + _build_situation_alerts(crawl_jobs)
     dashboard_summary_cards = dashboard_summary + vulnerability_summary[:1]
 
     payload = {
@@ -1433,7 +1590,7 @@ def build_intelligence_payload() -> dict[str, Any]:
         "dataLeakSummary": data_leak_summary,
         "dataLeakEvents": data_leak_events,
         "vulnerabilitySummary": vulnerability_summary,
-        "vulnerabilityEvents": recent_vulnerability_events,
+        "vulnerabilityEvents": vulnerability_events,
         "vulnerabilityTrend": vulnerability_series,
         "vulnerabilityVendorRanking": vulnerability_vendor_ranking,
         "vulnerabilityProductRanking": vulnerability_product_ranking,
@@ -1443,7 +1600,7 @@ def build_intelligence_payload() -> dict[str, Any]:
             "stats": [
                 {"label": "泄露事件", "value": str(len(data_leak_events))},
                 {"label": "勒索受害者", "value": str(len(ransomware_events))},
-                {"label": "漏洞预警", "value": str(len(recent_vulnerability_events))},
+                {"label": "漏洞预警", "value": str(len(vulnerability_events))},
                 {"label": "失败任务", "value": str(failed_jobs)},
             ],
         },
@@ -1461,27 +1618,15 @@ def build_intelligence_payload() -> dict[str, Any]:
         "situationAlerts": situation_alerts[:12],
         "threatHeatmap": _build_threat_heatmap(data_leak_events, ransomware_events, crawl_jobs),
         "threatLevelTrend": threat_level_trend,
-        "threatSituationBehavior": behavior_payload,
         "threatExecutiveCards": executive_cards,
         "threatExecutiveTrend": executive_trend,
         "threatExecutiveCountries": executive_countries,
         "threatExecutivePriorityEvents": executive_priority_events,
         "threatExecutiveCoverage": executive_coverage,
+        **monitoring_payload,
     }
     _set_cached_payload("intelligence", cache_key, payload)
     return payload
-
-
-def build_behavior_payload() -> dict[str, Any]:
-    with get_db_connection() as connection:
-        normalized_events = load_normalized_events(connection)
-        cache_key = _payload_cache_key(connection, "behavior")
-        cached = _get_cached_payload("behavior", cache_key)
-        if cached is not None:
-            return cached
-        payload = build_behavior_payload_from_events(connection, events=normalized_events)
-        _set_cached_payload("behavior", cache_key, payload)
-        return payload
 
 
 def warm_api_payloads() -> None:
@@ -1490,7 +1635,6 @@ def warm_api_payloads() -> None:
     with get_db_connection() as connection:
         ensure_normalized_intelligence(connection, force=False)
     build_intelligence_payload()
-    build_behavior_payload()
 
 
 def _runtime_db_status() -> dict[str, Any]:
@@ -1537,7 +1681,6 @@ def build_jobs_payload() -> dict[str, Any]:
                 """
             ).fetchall()
         ]
-        _annotate_queue_activity(crawl_jobs)
         forum_detail_counts = {
             row["site_name"]: int(row["count"])
             for row in connection.execute(
@@ -1583,6 +1726,18 @@ def build_jobs_payload() -> dict[str, Any]:
         latest_seed_dt = _job_event_dt(latest_seed)
         latest_detail_dt = _job_event_dt(latest_detail)
         effective_seed_status = _effective_job_status(latest_seed) if latest_seed else ""
+        if (
+            effective_seed_status == "stale"
+            and latest_seed
+            and latest_seed.get("status") == "enqueued"
+            and any(
+                row.get("queue_name") == latest_seed.get("queue_name")
+                and row.get("status") == "running"
+                and not row.get("finished_at")
+                for row in crawl_jobs
+            )
+        ):
+            effective_seed_status = "enqueued"
         seed_age_minutes = None
         if latest_seed_dt is not None:
             seed_age_minutes = max(0, round((_now_utc() - latest_seed_dt).total_seconds() / 60))
@@ -1657,11 +1812,12 @@ def build_jobs_payload() -> dict[str, Any]:
         "record_count": int(vulnerability_count_row["count"]) if vulnerability_count_row else 0,
         "latest_disclosure_time": _format_dt(vulnerability_count_row["latest_disclosure_time"]) if vulnerability_count_row else "",
     }
-    ransomware_sync_status = get_ransomware_sync_status()
-    ransomware_sync = {
-        **ransomware_sync_status,
-        "latest_disclosure_time": _format_dt(ransomware_sync_status.get("latest_disclosure_time")) if ransomware_sync_status.get("latest_disclosure_time") else "",
-    }
+    for key in ("started_at", "last_tick_at", "last_success_at"):
+        vulnerability_sync[key] = _format_dt(vulnerability_sync.get(key))
+    ransomware_sync = get_ransomware_sync_status()
+    for key in ("started_at", "last_tick_at", "last_success_at"):
+        ransomware_sync[key] = _format_dt(ransomware_sync.get(key))
+    ransomware_sync["latest_disclosure_time"] = _format_dt(ransomware_sync.get("latest_disclosure_time"))
     return {
         "overall_status": overall_status,
         "running_jobs": running_jobs,

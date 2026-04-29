@@ -74,7 +74,7 @@ class BrowserClient:
                 # networkidle never triggers. Fall back to DOM readiness.
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
-            html = _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
+            _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
             if hide_selectors:
                 selector_rules = ", ".join(hide_selectors)
                 page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
@@ -116,6 +116,11 @@ class BrowserClient:
                     screenshot_png = None
             if screenshot_png is None:
                 screenshot_png = page.screenshot(type="png", full_page=True)
+            # Capture HTML after the page-specific selectors have had a chance to
+            # appear. Some forum pages finish rendering well after the initial
+            # DOMContentLoaded/networkidle checkpoint, which made us persist a
+            # head-only document while the screenshot already contained the post.
+            html = _read_page_content(page)
             self._task_count += 1
             return html, screenshot_png
         finally:
@@ -219,6 +224,19 @@ _BROWSER_CHECK_MARKERS = (
 )
 
 
+def _read_page_content(page, *, attempts: int = 6, wait_ms: int = 250) -> str:
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return page.content()
+        except Exception as exc:
+            last_error = exc
+            page.wait_for_timeout(wait_ms)
+    if last_error is not None:
+        raise last_error
+    return ""
+
+
 def _inject_base_href(html: str, base_url: str) -> str:
     base_tag = f'<base href="{base_url}">'
     if "<head>" in html:
@@ -239,7 +257,7 @@ def _clear_browser_check_interstitial(
     timeout_ms: int,
     settle_wait_ms: int = 750,
 ) -> str:
-    html = page.content()
+    html = _read_page_content(page)
     if not _looks_like_browser_check_page(html):
         return html
 
@@ -249,27 +267,36 @@ def _clear_browser_check_interstitial(
     center_y = int(viewport.get("height", 960) * 0.38)
 
     while time.monotonic() < deadline:
-        page.mouse.move(center_x, center_y, steps=12)
-        page.wait_for_timeout(120)
-        page.mouse.click(center_x, center_y, delay=80)
-        page.wait_for_timeout(120)
-        page.mouse.wheel(0, 420)
-        page.wait_for_timeout(120)
-        for key in ("Tab", "Space"):
-            page.keyboard.press(key)
+        try:
+            page.mouse.move(center_x, center_y, steps=12)
             page.wait_for_timeout(120)
-            html = page.content()
+            page.mouse.click(center_x, center_y, delay=80)
+            page.wait_for_timeout(120)
+            page.mouse.wheel(0, 420)
+            page.wait_for_timeout(120)
+        except Exception:
+            # Cloudflare/browser-check pages can trigger a navigation mid-action.
+            # When that happens, just wait for the next stable DOM snapshot
+            # instead of failing the whole fetch.
+            page.wait_for_timeout(300)
+        for key in ("Tab", "Space"):
+            try:
+                page.keyboard.press(key)
+                page.wait_for_timeout(120)
+            except Exception:
+                page.wait_for_timeout(300)
+            html = _read_page_content(page)
             if not _looks_like_browser_check_page(html):
                 page.wait_for_timeout(settle_wait_ms)
-                return page.content()
+                return _read_page_content(page)
         try:
             page.wait_for_load_state("networkidle", timeout=min(1500, timeout_ms))
         except Exception:
             pass
-        html = page.content()
+        html = _read_page_content(page)
         if not _looks_like_browser_check_page(html):
             page.wait_for_timeout(settle_wait_ms)
-            return page.content()
+            return _read_page_content(page)
     return html
 
 

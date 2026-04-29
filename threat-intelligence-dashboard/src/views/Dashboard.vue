@@ -1,10 +1,7 @@
 <template>
   <div class="dashboard-page ti-page">
     <section class="ti-panel ti-reveal-up dashboard-hero">
-      <SectionHeader
-        eyebrow="Threat Intelligence Dashboard"
-        title="编辑化卡片视角下的威胁情报总览"
-      />
+      <SectionHeader title="威胁情报总览" />
 
       <div class="dashboard-hero__summary">
         <ModuleSummaryCard
@@ -50,11 +47,7 @@
     </section>
 
     <section class="module-preview">
-      <SectionHeader
-        eyebrow="模块重点"
-        title="核心模块预览"
-        description="首页只展示最值得展开查看的重点，深度内容留在各模块页完成。"
-      />
+      <SectionHeader eyebrow="模块重点" title="核心模块预览" />
 
       <div class="module-preview__grid">
         <router-link
@@ -109,49 +102,6 @@
           </div>
         </div>
       </div>
-
-      <ChartPanel
-        eyebrow="重点国家"
-        title="国家与地区暴露分布"
-        icon="MapLocation"
-        height="320px"
-      >
-        <div class="dashboard-focus__body">
-          <div class="dashboard-focus__chart">
-            <v-chart class="dashboard-chart" :option="countryFocusOption" autoresize />
-          </div>
-
-          <aside class="dashboard-focus__aside">
-            <div class="dashboard-focus__stats">
-              <article class="dashboard-focus__stat">
-                <span>头部地区</span>
-                <strong>{{ leadCountry.name || '暂无' }}</strong>
-                <small>暴露强度 {{ leadCountry.value || 0 }}</small>
-              </article>
-              <article class="dashboard-focus__stat">
-                <span>头部占比</span>
-                <strong>{{ leadCountryShare }}%</strong>
-                <small>前 1 位占总关注强度</small>
-              </article>
-            </div>
-
-            <div class="dashboard-focus__ranking">
-              <article
-                v-for="(item, index) in rankedCountryFocus"
-                :key="item.name"
-                class="dashboard-focus__ranking-item"
-              >
-                <span class="dashboard-focus__rank">#{{ index + 1 }}</span>
-                <div class="dashboard-focus__meta">
-                  <strong>{{ item.name }}</strong>
-                  <small>暴露强度 {{ item.value }}</small>
-                </div>
-                <span class="dashboard-focus__share">{{ item.share }}%</span>
-              </article>
-            </div>
-          </aside>
-        </div>
-      </ChartPanel>
     </section>
   </div>
 </template>
@@ -169,7 +119,6 @@ import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
 const { data } = useIntelligenceData()
 const crossModuleTimeline = computed(() => data.value.crossModuleTimeline || [])
-const dashboardCountryFocus = computed(() => data.value.dashboardCountryFocus || [])
 const dashboardSummaryCards = computed(() => data.value.dashboardSummaryCards || [])
 const dashboardTrendSeries = computed(() => data.value.dashboardTrendSeries || { labels: [], ransomware: [], dataLeak: [], vulnerability: [], threatAlerts: [] })
 const dashboardWatchlist = computed(() => data.value.dashboardWatchlist || [])
@@ -179,47 +128,29 @@ const visibleDashboardSummaryCards = computed(() =>
   dashboardSummaryCards.value.filter((card) => card?.label !== '爬虫任务')
 )
 
-const countryFocusTotal = computed(() =>
-  dashboardCountryFocus.value.reduce((total, item) => total + Number(item.value || 0), 0)
-)
-
-const leadCountry = computed(() => dashboardCountryFocus.value[0] || { name: '', value: 0 })
-
-const leadCountryShare = computed(() => {
-  if (!countryFocusTotal.value || !leadCountry.value.value) return 0
-  return Math.round((Number(leadCountry.value.value || 0) / countryFocusTotal.value) * 100)
-})
-
-const rankedCountryFocus = computed(() =>
-  dashboardCountryFocus.value.slice(0, 5).map((item) => ({
-    ...item,
-    share: countryFocusTotal.value ? Math.round((Number(item.value || 0) / countryFocusTotal.value) * 100) : 0,
-  }))
-)
-
 const overviewTrendOption = computed(() => ({
-  color: ['#2d5dff', '#e88030', '#8a3ffc', '#cf4432'],
+  color: ['#2d5dff', '#e88030', '#8a3ffc', '#0f766e'],
   tooltip: {
     trigger: 'axis',
     backgroundColor: 'rgba(255, 253, 250, 0.96)',
     borderColor: 'rgba(63, 80, 104, 0.12)',
-    textStyle: { color: '#1e2735' }
+    textStyle: { color: '#1e2735' },
   },
   legend: {
     bottom: 0,
-    textStyle: { color: '#536074' }
+    textStyle: { color: '#536074' },
   },
   grid: { left: 10, right: 16, top: 16, bottom: 38, containLabel: true },
   xAxis: {
     type: 'category',
     data: dashboardTrendSeries.value.labels,
     axisLine: { lineStyle: { color: 'rgba(87, 97, 123, 0.16)' } },
-    axisLabel: { color: '#7f8898' }
+    axisLabel: { color: '#7f8898' },
   },
   yAxis: {
     type: 'value',
     splitLine: { lineStyle: { color: 'rgba(87, 97, 123, 0.08)', type: 'dashed' } },
-    axisLabel: { color: '#7f8898' }
+    axisLabel: { color: '#7f8898' },
   },
   series: [
     {
@@ -227,14 +158,14 @@ const overviewTrendOption = computed(() => ({
       type: 'line',
       smooth: true,
       symbolSize: 8,
-      data: dashboardTrendSeries.value.ransomware
+      data: dashboardTrendSeries.value.ransomware,
     },
     {
       name: '数据泄露',
       type: 'line',
       smooth: true,
       symbolSize: 8,
-      data: dashboardTrendSeries.value.dataLeak
+      data: dashboardTrendSeries.value.dataLeak,
     },
     {
       name: '漏洞预警',
@@ -243,60 +174,19 @@ const overviewTrendOption = computed(() => ({
       symbolSize: 8,
       data: dashboardTrendSeries.value.vulnerability,
       lineStyle: { color: '#8a3ffc' },
-      itemStyle: { color: '#8a3ffc' }
+      itemStyle: { color: '#8a3ffc' },
     },
     {
       name: '总体告警',
       type: 'line',
       smooth: true,
       symbolSize: 8,
-      data: dashboardTrendSeries.value.threatAlerts
-    }
-  ]
-}))
-
-const countryFocusOption = computed(() => ({
-  tooltip: {
-    trigger: 'axis',
-    axisPointer: { type: 'shadow' },
-    backgroundColor: 'rgba(255, 253, 250, 0.96)',
-    borderColor: 'rgba(63, 80, 104, 0.12)',
-    textStyle: { color: '#1e2735' }
-  },
-  grid: { left: 16, right: 16, top: 10, bottom: 10, containLabel: true },
-  xAxis: {
-    type: 'value',
-    splitLine: { lineStyle: { color: 'rgba(87, 97, 123, 0.08)', type: 'dashed' } },
-    axisLabel: { color: '#7f8898' }
-  },
-  yAxis: {
-    type: 'category',
-    data: dashboardCountryFocus.value.map((item) => item.name),
-    axisTick: { show: false },
-    axisLine: { show: false },
-    axisLabel: { color: '#536074' }
-  },
-  series: [
-    {
-      type: 'bar',
-      data: dashboardCountryFocus.value.map((item) => item.value),
-      barWidth: 14,
-      itemStyle: {
-        borderRadius: [0, 10, 10, 0],
-        color: {
-          type: 'linear',
-          x: 0,
-          y: 0,
-          x2: 1,
-          y2: 0,
-          colorStops: [
-            { offset: 0, color: '#ffcf9f' },
-            { offset: 1, color: '#e88030' }
-          ]
-        }
-      }
-    }
-  ]
+      data: dashboardTrendSeries.value.threatAlerts,
+      lineStyle: { color: '#0f766e' },
+      itemStyle: { color: '#0f766e' },
+      areaStyle: { color: 'rgba(15, 118, 110, 0.08)' },
+    },
+  ],
 }))
 </script>
 
@@ -419,109 +309,8 @@ const countryFocusOption = computed(() => ({
 }
 
 .dashboard-bottom {
-  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  grid-template-columns: 1fr;
   align-items: start;
-}
-
-.dashboard-focus__body {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(220px, 0.9fr);
-  gap: 18px;
-  align-items: stretch;
-  height: 100%;
-}
-
-.dashboard-focus__chart {
-  min-height: 260px;
-}
-
-.dashboard-focus__aside {
-  display: grid;
-  gap: 12px;
-}
-
-.dashboard-focus__stats {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.dashboard-focus__stat,
-.dashboard-focus__ranking-item {
-  padding: 14px 16px;
-  border-radius: 18px;
-  border: 1px solid var(--ti-border-soft);
-  background: rgba(255, 255, 255, 0.68);
-}
-
-.dashboard-focus__stat span,
-.dashboard-focus__stat small,
-.dashboard-focus__meta small,
-.dashboard-focus__share {
-  color: var(--ti-text-muted);
-}
-
-.dashboard-focus__stat span {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 12px;
-}
-
-.dashboard-focus__stat strong {
-  display: block;
-  color: var(--ti-text-primary);
-  font-size: 24px;
-  line-height: 1.1;
-}
-
-.dashboard-focus__stat small {
-  display: block;
-  margin-top: 6px;
-  font-size: 12px;
-}
-
-.dashboard-focus__ranking {
-  display: grid;
-  gap: 10px;
-}
-
-.dashboard-focus__ranking-item {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-}
-
-.dashboard-focus__rank {
-  display: inline-flex;
-  min-width: 34px;
-  height: 34px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-  background: rgba(232, 128, 48, 0.12);
-  color: var(--ti-accent-strong);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.dashboard-focus__meta {
-  min-width: 0;
-}
-
-.dashboard-focus__meta strong {
-  display: block;
-  color: var(--ti-text-primary);
-  font-size: 14px;
-}
-
-.dashboard-focus__meta small,
-.dashboard-focus__share {
-  font-size: 12px;
-}
-
-.dashboard-focus__share {
-  font-weight: 700;
 }
 
 .timeline-list {
@@ -569,8 +358,7 @@ const countryFocusOption = computed(() => ({
 
 @media (max-width: 1024px) {
   .dashboard-main,
-  .dashboard-bottom,
-  .dashboard-focus__body {
+  .dashboard-bottom {
     grid-template-columns: 1fr;
   }
 }
@@ -578,8 +366,7 @@ const countryFocusOption = computed(() => ({
 @media (max-width: 767px) {
   .dashboard-hero__summary,
   .module-preview__grid,
-  .module-preview__stats,
-  .dashboard-focus__stats {
+  .module-preview__stats {
     grid-template-columns: 1fr;
   }
 

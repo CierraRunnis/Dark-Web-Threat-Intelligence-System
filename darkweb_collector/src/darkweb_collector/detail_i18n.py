@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from threading import Lock, Thread
+from urllib.error import HTTPError
 
 from darkweb_collector.runtime import project_root
 from darkweb_collector.vulnerability_i18n import translate_text_online
@@ -87,30 +88,43 @@ def _split_for_translation(text: str, *, max_chunk_length: int = 900) -> list[st
     return chunks or [normalized]
 
 
-def translate_event_detail_text_live(value: str | None) -> str:
+def translate_event_detail_text_with_meta(value: str | None) -> tuple[str, bool, str | None]:
     raw = _normalize_text(value)
-    if not raw or not _looks_translatable(raw):
-        return raw
+    if not raw:
+        return raw, False, None
+    if not _looks_translatable(raw):
+        return raw, False, "not_needed"
 
     with _CACHE_LOCK:
         cache = _load_cache()
-        if raw in cache:
-            return cache[raw]
+        cached = cache.get(raw)
+        if cached:
+            return cached, cached != raw, None
 
     translated_parts: list[str] = []
     try:
         for chunk in _split_for_translation(raw):
             translated_parts.append(_normalize_text(translate_text_online(chunk)))
+    except HTTPError as error:
+        if error.code == 429:
+            return raw, False, "rate_limited"
+        return raw, False, f"http_{error.code}"
     except Exception:
-        return raw
+        return raw, False, "service_unavailable"
 
     translated = "\n\n".join(part for part in translated_parts if part).strip() or raw
+    applied = translated != raw
     with _CACHE_LOCK:
         cache = _load_cache()
         cache[raw] = translated
         global _CACHE_DIRTY
         _CACHE_DIRTY = True
         _save_cache()
+    return translated, applied, None if applied else "unchanged"
+
+
+def translate_event_detail_text_live(value: str | None) -> str:
+    translated, _, _ = translate_event_detail_text_with_meta(value)
     return translated
 
 

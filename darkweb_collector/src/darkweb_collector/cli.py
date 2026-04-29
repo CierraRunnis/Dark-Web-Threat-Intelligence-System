@@ -39,7 +39,7 @@ def build_parser() -> ArgumentParser:
     sync_vulns_parser.add_argument("--limit", type=int, default=300)
 
     sync_ransomware_parser = subparsers.add_parser("sync-ransomware-live")
-    sync_ransomware_parser.add_argument("--limit", type=int, default=100)
+    sync_ransomware_parser.add_argument("--limit", type=int, default=0)
 
     return parser
 
