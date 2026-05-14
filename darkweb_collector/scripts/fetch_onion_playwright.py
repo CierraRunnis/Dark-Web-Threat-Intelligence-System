@@ -14,7 +14,7 @@ Usage:
     
 Environment variables:
     TOR_SOCKS_HOST: Tor SOCKS proxy host (default: 127.0.0.1)
-    TOR_SOCKS_PORT: Tor SOCKS proxy port (default: 9050)
+    TOR_SOCKS_PORT: Tor SOCKS proxy port (default: 9150, matches tor_fetch.py and torbrowser-socks-env.sh)
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
-def fetch_onion_with_playwright(url: str, socks_host: str = "127.0.0.1", socks_port: int = 9050, wait_time: int = 20) -> str:
+def fetch_onion_with_playwright(url: str, socks_host: str = "127.0.0.1", socks_port: int = 9150, wait_time: int = 20) -> str:
     """
     Fetch an .onion URL using Playwright through Tor SOCKS proxy
     
@@ -129,9 +129,12 @@ def main() -> None:
     if not url.endswith('.onion/'):
         print(f"⚠️  Warning: URL doesn't look like a .onion address: {url}")
     
-    # Get Tor proxy settings (default to 9050 for system Tor)
+    # Get Tor proxy settings. Default to 9150 (Tor Browser / torbrowser-socks-env.sh),
+    # matching darkweb_collector.tor_fetch.get_tor_socks_settings(). When
+    # scripts/tor_healthcheck.sh has already selected an endpoint, TOR_SOCKS_PORT
+    # will be set to 9050 or a gateway-based value automatically.
     socks_host = os.environ.get("TOR_SOCKS_HOST", "127.0.0.1")
-    socks_port = int(os.environ.get("TOR_SOCKS_PORT", "9050"))
+    socks_port = int(os.environ.get("TOR_SOCKS_PORT", "9150"))
     
     print("\n" + "="*60)
     print(f"[{time.strftime('%H:%M:%S')}] 🧅 ONION SITE CRAWLER (Playwright)")

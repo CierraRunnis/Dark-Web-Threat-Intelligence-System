@@ -51,6 +51,22 @@ build_env_exports() {
   printf '%s; ' "${exports[@]}"
 }
 
+run_tor_healthcheck() {
+  local healthcheck_script="$COLLECTOR_ROOT/scripts/tor_healthcheck.sh"
+  if [[ ! -x "$healthcheck_script" ]]; then
+    warn "tor_healthcheck.sh not found or not executable, skipping endpoint selection"
+    return
+  fi
+  local exports
+  if exports="$(bash "$healthcheck_script" --export)"; then
+    # shellcheck disable=SC1090
+    eval "$exports"
+    info "tor endpoint: ${TOR_SOCKS_HOST:-?}:${TOR_SOCKS_PORT:-?} (layer=${TOR_SOCKS_LAYER:-unknown})"
+  else
+    warn "tor healthcheck reported no working SOCKS endpoint; .onion tasks may fail until resolved"
+  fi
+}
+
 ensure_environment() {
   require_command tmux
   require_command python3
@@ -62,6 +78,8 @@ ensure_environment() {
   [[ -d "$COLLECTOR_VENV" ]] || die "collector venv not found: $COLLECTOR_VENV"
   [[ -f "$COLLECTOR_ROOT/scripts/serve_api.py" ]] || die "API launcher not found"
   [[ -f "$DASHBOARD_ROOT/package.json" ]] || die "dashboard package.json not found"
+
+  run_tor_healthcheck
 
   if [[ ! -d "$DASHBOARD_ROOT/node_modules" ]]; then
     info "dashboard dependencies missing, running npm install"
