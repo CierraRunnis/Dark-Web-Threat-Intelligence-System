@@ -1,1 +1,20 @@
+# bridges.webtunnel.fixed
+#
+# Canonical webtunnel bridge pool for this repo.
+# Install to /etc/tor/bridges.webtunnel before running `sudo tor-bridge-switch webtunnel`.
+#
+# This file deliberately drops the [2001:db8:1b75:cd28:36c7:1347:3eda:a01e]:443
+# entry that exists in tor-migration-package/etc/tor/bridges.webtunnel.
+# 2001:db8::/32 is the RFC 3849 documentation range and cannot route real
+# traffic, so including it would only burn `TOR_BRIDGE_WAIT_TIMEOUT` seconds
+# per bootstrap attempt in `tor-bridge-switch auto`.
+#
+# Operational rule from TOR_CONNECTION_PLAN.md section 2:
+#   Keep at least 2 real webtunnel bridges here. Refresh from
+#   https://bridges.torproject.org/bridges?transport=webtunnel
+#   or `sudo tor-bridge-refresh` (which calls bridgedb-fetch) whenever
+#   the current pool stops working.
+#
+# Lines that are not prefixed with "Bridge " are ignored by tor-bridge-switch.
+
 Bridge webtunnel 103.17.153.45:443 412F21AAD09FA4F83AD52186458466BEC5D27795 url=https://cdn-45.triplebit.dev/yaux5diphu8Meiqu ver=0.0.2
