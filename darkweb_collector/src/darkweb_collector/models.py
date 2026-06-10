@@ -45,6 +45,14 @@ class SiteConfig:
     def render_wait_seconds(self) -> int:
         return int(self.extras.get("render_wait_seconds", 8))
 
+    @property
+    def uses_browser(self) -> bool:
+        return self.seed_fetch_mode == "browser" or self.detail_fetch_mode == "browser"
+
+    @property
+    def failure_cooldown_seconds(self) -> int:
+        return int(self.extras.get("failure_cooldown_seconds", 30 * 60))
+
 
 @dataclass(frozen=True)
 class RunContext:

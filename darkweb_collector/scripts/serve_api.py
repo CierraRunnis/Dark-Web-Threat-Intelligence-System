@@ -17,4 +17,6 @@ if __name__ == "__main__":
     os.chdir(ROOT)
     os.environ.setdefault("DARKWEB_COLLECTOR_DB_PATH", str((ROOT / "data" / "collector.db").resolve()))
     os.environ.setdefault("DARKWEB_COLLECTOR_SITES_FILE", str((ROOT / "sites.yaml").resolve()))
-    uvicorn.run("darkweb_collector.api_app:app", host="0.0.0.0", port=8000, reload=False)
+    host = os.environ.get("DARKWEB_API_HOST", "0.0.0.0")
+    port = int(os.environ.get("DARKWEB_API_PORT", "8000"))
+    uvicorn.run("darkweb_collector.api_app:app", host=host, port=port, reload=False)

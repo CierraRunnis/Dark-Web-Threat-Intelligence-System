@@ -20,3 +20,21 @@ def default_db_path() -> Path:
     if raw_path:
         return Path(raw_path).expanduser().resolve()
     return project_root() / "data" / "collector.db"
+
+
+def _legacy_output_root() -> Path | None:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return None
+    return (Path(local_app_data) / "DarkWebThreatIntel" / "output").expanduser().resolve()
+
+
+def output_root() -> Path:
+    raw_path = os.environ.get("DARKWEB_COLLECTOR_OUTPUT_ROOT")
+    if raw_path:
+        resolved = Path(raw_path).expanduser().resolve()
+        legacy = _legacy_output_root()
+        if legacy is not None and resolved == legacy:
+            return project_root() / "output"
+        return resolved
+    return project_root() / "output"

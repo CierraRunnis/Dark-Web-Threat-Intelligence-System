@@ -23,11 +23,6 @@
       </div>
 
       <div class="header__actions">
-        <div class="search-box">
-          <el-icon class="search-box__icon"><Search /></el-icon>
-          <input type="text" placeholder="检索事件标题、攻击者、地区" class="search-box__input" />
-        </div>
-
         <div class="header__buttons">
           <el-badge :value="6" class="header__badge">
             <el-button circle class="header__action-btn">
@@ -60,7 +55,14 @@ const { data } = useIntelligenceData()
 
 const monitoringStatus = computed(() => data.value.monitoringStatus || {})
 const routeHeaderMeta = computed(() => data.value.routeHeaderMeta || {})
-const pageMeta = computed(() => routeHeaderMeta.value[$route.path] || routeHeaderMeta.value['/'] || {})
+const pageMeta = computed(() => {
+  const routeMeta = $route.meta || {}
+  const payloadMeta = routeHeaderMeta.value[$route.path] || routeHeaderMeta.value['/'] || {}
+  return {
+    kicker: routeMeta.kicker || payloadMeta.kicker || 'Threat Intel',
+    subtitle: routeMeta.subtitle || payloadMeta.subtitle || '',
+  }
+})
 </script>
 
 <style lang="scss" scoped>
@@ -122,7 +124,7 @@ const pageMeta = computed(() => routeHeaderMeta.value[$route.path] || routeHeade
   flex-direction: column;
   gap: 14px;
   align-items: flex-end;
-  min-width: 420px;
+  min-width: 220px;
 }
 
 .header__status-strip {
@@ -159,44 +161,6 @@ const pageMeta = computed(() => routeHeaderMeta.value[$route.path] || routeHeade
   gap: 14px;
 }
 
-.search-box {
-  position: relative;
-  width: 300px;
-}
-
-.search-box__icon {
-  position: absolute;
-  left: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--ti-text-muted);
-}
-
-.search-box__input {
-  width: 100%;
-  height: 44px;
-  padding: 0 14px 0 42px;
-  border: 1px solid transparent;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.98);
-  color: var(--ti-text-primary);
-  transition:
-    border-color 0.2s ease,
-    box-shadow 0.2s ease,
-    background 0.2s ease;
-}
-
-.search-box__input::placeholder {
-  color: var(--ti-text-muted);
-}
-
-.search-box__input:focus {
-  outline: none;
-  background: #ffffff;
-  border-color: rgba(45, 93, 255, 0.24);
-  box-shadow: 0 0 0 4px rgba(45, 93, 255, 0.08);
-}
-
 .header__buttons {
   display: flex;
   align-items: center;
@@ -226,18 +190,13 @@ const pageMeta = computed(() => routeHeaderMeta.value[$route.path] || routeHeade
   }
 
   .header__actions {
-    justify-content: space-between;
+    justify-content: flex-end;
   }
 }
 
 @media (max-width: 767px) {
   .header {
     padding: 18px 18px 16px;
-  }
-
-  .search-box {
-    width: 180px;
-    opacity: 0.72;
   }
 }
 </style>

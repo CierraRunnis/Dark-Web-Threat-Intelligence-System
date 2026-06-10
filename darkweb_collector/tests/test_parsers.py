@@ -9,7 +9,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from darkweb_collector.sites.chaos import parse_chaos_detail, parse_chaos_homepage
-from darkweb_collector.sites.darkforums import parse_darkforums_detail, parse_darkforums_list
+from darkweb_collector.sites.darkforums import (
+    extract_attackers_from_content,
+    normalize_darkforums_timestamp,
+    parse_darkforums_detail,
+    parse_darkforums_list,
+)
 from darkweb_collector.sites.dragonforceblog import parse_dragonforceblog_detail_page, parse_dragonforceblog_list_page
 from darkweb_collector.sites.dragonforce import parse_dragonforce_homepage
 
@@ -120,6 +125,26 @@ class ParserTests(unittest.TestCase):
         self.assertIn("Main body content", detail_result["content"])
         self.assertNotIn("#1", detail_result["content"])
         self.assertIn("01-09-23, 05:04 PM", detail_result["timestamp"])
+
+    def test_darkforums_timestamp_normalization_uses_original_post_time(self) -> None:
+        normalized = normalize_darkforums_timestamp("20-12-24, 08:02 PM", collected_at_utc="2026-04-11T09:00:00+00:00")
+        self.assertEqual("2024-12-20", normalized)
+
+    def test_darkforums_attacker_extraction_filters_false_positives(self) -> None:
+        explicit = "Victim: Acme. Group: LockBit. This post contains breach details."
+        self.assertEqual(["LockBit"], extract_attackers_from_content(explicit))
+
+        military = (
+            "I am selling 11 TB of exfiltrated data from company based in Europe, Serbia. "
+            "Its subcontractor for military and its making various howitzers, ammunition and complex systems."
+        )
+        self.assertEqual([], extract_attackers_from_content(military))
+
+        crm_dump = (
+            'Rejected By Jitasa","Item owner\'s visibility group","0","0","0","0","U.S." '
+            "global BSA group L10."
+        )
+        self.assertEqual([], extract_attackers_from_content(crm_dump))
 
     def test_chaos_parsers_extract_homepage_and_detail(self) -> None:
         homepage_html = """

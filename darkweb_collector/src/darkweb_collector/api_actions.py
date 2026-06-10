@@ -2,21 +2,34 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
+import time
 from typing import Any
 
+from darkweb_collector.browser_process_pool import browser_process_pool_status, submit_browser_site
 from darkweb_collector.config import get_site_config, load_site_configs, set_site_enabled
-from darkweb_collector.db import get_active_crawl_job, get_db_connection, upsert_crawl_job
-from darkweb_collector.orchestrator import run_site_once
+from darkweb_collector.db import (
+    get_active_crawl_job,
+    get_db_connection,
+    get_ransomware_live_sync_state,
+    upsert_crawl_job,
+)
+from darkweb_collector.job_diagnostics import consecutive_failures, failure_cooldown_until
+from darkweb_collector.orchestrator import new_job_id, run_site_once
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
-from darkweb_collector.queueing import queue_for_seed
+from darkweb_collector.queueing import BROWSER_RENDER_QUEUE, browser_concurrency, queue_for_seed
+from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
 from darkweb_collector.utils import utc_now_iso
 
 
 STALE_RUNNING_MINUTES = 30
 STALE_ENQUEUED_MINUTES = 10
+STALE_ENQUEUED_BUSY_QUEUE_MINUTES = 60
 CONTINUOUS_INTERVAL_SECONDS = 60
 DEFAULT_VULNERABILITY_SYNC_INTERVAL_SECONDS = 3600
 DEFAULT_VULNERABILITY_SYNC_LIMIT = 300
+DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS = 3600
+DEFAULT_RANSOMWARE_SYNC_LIMIT = 0
+WORKER_QUEUE_CACHE_TTL_SECONDS = 5
 
 
 _continuous_lock = Lock()
@@ -42,6 +55,26 @@ _vulnerability_sync_running = False
 _vulnerability_sync_stop_event: Event | None = None
 _vulnerability_sync_thread: Thread | None = None
 
+_ransomware_sync_lock = Lock()
+_ransomware_sync_enabled = False
+_ransomware_sync_started_at = ""
+_ransomware_sync_last_tick_at = ""
+_ransomware_sync_last_success_at = ""
+_ransomware_sync_last_error = ""
+_ransomware_sync_last_source = ""
+_ransomware_sync_last_ingested = 0
+_ransomware_sync_interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
+_ransomware_sync_limit = DEFAULT_RANSOMWARE_SYNC_LIMIT
+_ransomware_sync_running = False
+_ransomware_sync_stop_event: Event | None = None
+_ransomware_sync_thread: Thread | None = None
+
+_worker_queue_cache_lock = Lock()
+_worker_queue_cache_checked_at = 0.0
+_worker_queue_cache: set[str] = set()
+_worker_queue_worker_counts: dict[str, int] = {}
+_worker_queue_worker_names: dict[str, list[str]] = {}
+
 
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
@@ -55,7 +88,31 @@ def _parse_dt(value: str | None) -> datetime | None:
     return dt
 
 
-def _is_active_job_blocking(active_job: dict[str, Any] | None) -> bool:
+def _has_recent_running_job_in_queue(connection, queue_name: str, *, exclude_job_id: str = "") -> bool:
+    if not queue_name:
+        return False
+    rows = connection.execute(
+        """
+        SELECT job_id, started_at, finished_at
+        FROM crawl_jobs
+        WHERE queue_name = ? AND status = 'running'
+        """,
+        (queue_name,),
+    ).fetchall()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_RUNNING_MINUTES)
+    for row in rows:
+        job_id = str(row["job_id"] or "")
+        if exclude_job_id and job_id == exclude_job_id:
+            continue
+        if row["finished_at"]:
+            continue
+        started_at = _parse_dt(row["started_at"])
+        if started_at is not None and started_at >= cutoff:
+            return True
+    return False
+
+
+def _is_active_job_blocking(active_job: dict[str, Any] | None, *, queue_has_recent_running: bool = False) -> bool:
     if not active_job:
         return False
     status = active_job.get("status")
@@ -63,7 +120,10 @@ def _is_active_job_blocking(active_job: dict[str, Any] | None) -> bool:
         enqueued_at = _parse_dt(active_job.get("enqueued_at"))
         if enqueued_at is None:
             return False
-        return enqueued_at >= datetime.now(timezone.utc) - timedelta(minutes=STALE_ENQUEUED_MINUTES)
+        threshold_minutes = (
+            STALE_ENQUEUED_BUSY_QUEUE_MINUTES if queue_has_recent_running else STALE_ENQUEUED_MINUTES
+        )
+        return enqueued_at >= datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
     if status != "running":
         return False
     started_at = _parse_dt(active_job.get("started_at"))
@@ -114,6 +174,48 @@ def _enqueue_job_row(job_id: str, site_name: str, queue_name: str) -> None:
         connection.commit()
 
 
+def _refresh_worker_queue_cache() -> tuple[set[str], dict[str, int], dict[str, list[str]]]:
+    try:
+        from darkweb_collector.celery_app import app as celery_app
+    except Exception:
+        return set(), {}, {}
+
+    inspect = celery_app.control.inspect(timeout=0.8)
+    try:
+        active_queues = inspect.active_queues() or {}
+    except Exception:
+        active_queues = {}
+    queue_names: set[str] = set()
+    worker_counts: dict[str, int] = {}
+    worker_names: dict[str, list[str]] = {}
+    for worker_name, worker_queues in active_queues.items():
+        for queue in worker_queues or []:
+            name = str((queue or {}).get("name") or "").strip()
+            if name:
+                queue_names.add(name)
+                worker_counts[name] = worker_counts.get(name, 0) + 1
+                worker_names.setdefault(name, []).append(str(worker_name))
+    return queue_names, worker_counts, {name: sorted(names) for name, names in worker_names.items()}
+
+
+def _refresh_worker_queue_cache_if_needed(*, force: bool = False) -> None:
+    global _worker_queue_cache_checked_at, _worker_queue_cache, _worker_queue_worker_counts, _worker_queue_worker_names
+    now = time.monotonic()
+    if force or (now - _worker_queue_cache_checked_at) > WORKER_QUEUE_CACHE_TTL_SECONDS:
+        (
+            _worker_queue_cache,
+            _worker_queue_worker_counts,
+            _worker_queue_worker_names,
+        ) = _refresh_worker_queue_cache()
+        _worker_queue_cache_checked_at = now
+
+
+def _has_queue_worker(queue_name: str) -> bool:
+    with _worker_queue_cache_lock:
+        _refresh_worker_queue_cache_if_needed()
+        return queue_name in _worker_queue_cache
+
+
 def _run_site_in_thread(site_name: str) -> None:
     try:
         run_site_once(site_name)
@@ -122,21 +224,77 @@ def _run_site_in_thread(site_name: str) -> None:
         return
 
 
+def _dispatch_browser_process(site_name: str, queue_name: str, message: str) -> dict[str, Any]:
+    job_id = new_job_id("seed", site_name)
+    _enqueue_job_row(job_id=job_id, site_name=site_name, queue_name=queue_name)
+    submit_browser_site(site_name=site_name, job_id=job_id)
+    return {
+        "site_name": site_name,
+        "dispatch_mode": "process",
+        "message": message,
+        "job_id": job_id,
+    }
+
+
 def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
     config = get_site_config(site_name)
     with get_db_connection() as connection:
         active_job = get_active_crawl_job(connection, site_name=site_name, job_type="seed")
-    if _is_active_job_blocking(active_job):
+        queue_has_recent_running = _has_recent_running_job_in_queue(
+            connection,
+            str((active_job or {}).get("queue_name") or ""),
+            exclude_job_id=str((active_job or {}).get("job_id") or ""),
+        )
+        seed_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT status, started_at, finished_at, enqueued_at, error_message
+                FROM crawl_jobs
+                WHERE site_name = ? AND job_type = 'seed'
+                ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
+                LIMIT 20
+                """,
+                (site_name,),
+            ).fetchall()
+        ]
+    if _is_active_job_blocking(active_job, queue_has_recent_running=queue_has_recent_running):
         return {
             "site_name": site_name,
             "dispatch_mode": "skipped",
             "message": "该站点已有运行中的种子任务",
             "job_id": active_job.get("job_id") if active_job else "",
         }
+    cooldown_until = failure_cooldown_until(config, seed_rows)
+    if not force and cooldown_until is not None and datetime.now(timezone.utc) < cooldown_until:
+        return {
+            "site_name": site_name,
+            "dispatch_mode": "skipped",
+            "message": "该站点连续失败达到阈值，仍处于冷却期",
+            "job_id": "",
+            "reason": "failure_cooldown",
+            "consecutive_failures": consecutive_failures(seed_rows),
+            "failure_cooldown_until": cooldown_until.isoformat(),
+        }
 
     _mark_stale_active_job(site_name, active_job)
 
     queue_name = queue_for_seed(config.seed_fetch_mode)
+    if not _has_queue_worker(queue_name):
+        if config.uses_browser:
+            return _dispatch_browser_process(
+                site_name=site_name,
+                queue_name=queue_name,
+                message="未检测到可消费浏览器队列的 worker，已提交到本地浏览器进程池",
+            )
+        thread = Thread(target=_run_site_in_thread, args=(site_name,), daemon=True)
+        thread.start()
+        return {
+            "site_name": site_name,
+            "dispatch_mode": "thread",
+            "message": "未检测到可消费该队列的 worker，已在本地线程触发单次运行",
+            "job_id": "",
+        }
     try:
         from darkweb_collector.tasks import crawl_seed
 
@@ -153,6 +311,12 @@ def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
             "job_id": job_id,
         }
     except Exception:
+        if config.uses_browser:
+            return _dispatch_browser_process(
+                site_name=site_name,
+                queue_name=queue_name,
+                message="队列不可用，已提交到本地浏览器进程池",
+            )
         thread = Thread(target=_run_site_in_thread, args=(site_name,), daemon=True)
         thread.start()
         return {
@@ -250,6 +414,26 @@ def get_continuous_dispatch_status() -> dict[str, Any]:
         "started_at": _continuous_started_at,
         "last_tick_at": _continuous_last_tick_at,
         "mode": _continuous_mode,
+    }
+
+
+def get_browser_runtime_status() -> dict[str, Any]:
+    with _worker_queue_cache_lock:
+        _refresh_worker_queue_cache_if_needed(force=True)
+        worker_queues = sorted(_worker_queue_cache)
+        worker_counts = dict(_worker_queue_worker_counts)
+        worker_names = {name: list(names) for name, names in _worker_queue_worker_names.items()}
+    browser_worker_count = int(worker_counts.get(BROWSER_RENDER_QUEUE, 0))
+    configured_concurrency = browser_concurrency()
+    return {
+        "browser_queue": BROWSER_RENDER_QUEUE,
+        "configured_concurrency": configured_concurrency,
+        "browser_concurrency": configured_concurrency,
+        "browser_worker_count": browser_worker_count,
+        "browser_worker_names": worker_names.get(BROWSER_RENDER_QUEUE, []),
+        "local_process_pool": browser_process_pool_status(),
+        "worker_queues": worker_queues,
+        "worker_counts": worker_counts,
     }
 
 
@@ -384,6 +568,142 @@ def get_vulnerability_sync_status() -> dict[str, Any]:
         "last_ingested": _vulnerability_sync_last_ingested,
         "interval_seconds": _vulnerability_sync_interval_seconds,
         "limit": _vulnerability_sync_limit,
+    }
+
+
+def _run_ransomware_sync(limit: int) -> dict[str, Any]:
+    global _ransomware_sync_running
+    global _ransomware_sync_last_tick_at
+    global _ransomware_sync_last_success_at
+    global _ransomware_sync_last_error
+    global _ransomware_sync_last_source
+    global _ransomware_sync_last_ingested
+    with _ransomware_sync_lock:
+        _ransomware_sync_running = True
+        _ransomware_sync_last_tick_at = utc_now_iso()
+        _ransomware_sync_last_error = ""
+    try:
+        result = sync_ransomware_live_victims(limit=limit, refresh_normalized=True)
+        with _ransomware_sync_lock:
+            _ransomware_sync_last_success_at = utc_now_iso()
+            _ransomware_sync_last_source = str(result.get("source") or "")
+            _ransomware_sync_last_ingested = int(result.get("ingested") or 0)
+            _ransomware_sync_last_error = ""
+        return result
+    except Exception as exc:
+        with _ransomware_sync_lock:
+            _ransomware_sync_last_error = str(exc)
+        raise
+    finally:
+        with _ransomware_sync_lock:
+            _ransomware_sync_running = False
+
+
+def _run_ransomware_sync_once_in_thread(limit: int) -> None:
+    try:
+        _run_ransomware_sync(limit=limit)
+    except Exception:
+        return
+
+
+def dispatch_run_ransomware_sync_once(limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT) -> dict[str, Any]:
+    global _ransomware_sync_thread
+    with _ransomware_sync_lock:
+        if _ransomware_sync_running:
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 同步任务已在运行中",
+            }
+        thread = Thread(target=_run_ransomware_sync_once_in_thread, args=(limit,), daemon=True)
+        _ransomware_sync_thread = thread
+        thread.start()
+    return {
+        **get_ransomware_sync_status(),
+        "message": "已触发一次 ransomware.live 同步",
+    }
+
+
+def _ransomware_sync_loop(stop_event: Event) -> None:
+    global _ransomware_sync_enabled
+    while not stop_event.is_set():
+        try:
+            _run_ransomware_sync(limit=_ransomware_sync_limit)
+        except Exception:
+            pass
+        if stop_event.wait(_ransomware_sync_interval_seconds):
+            break
+    _ransomware_sync_enabled = False
+
+
+def start_ransomware_sync_dispatch(
+    interval_seconds: int = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS,
+    limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT,
+) -> dict[str, Any]:
+    global _ransomware_sync_enabled
+    global _ransomware_sync_started_at
+    global _ransomware_sync_stop_event
+    global _ransomware_sync_thread
+    global _ransomware_sync_interval_seconds
+    global _ransomware_sync_limit
+    if interval_seconds <= 0:
+        interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
+    with _ransomware_sync_lock:
+        if _ransomware_sync_enabled and _ransomware_sync_thread and _ransomware_sync_thread.is_alive():
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 自动同步已在运行",
+            }
+        stop_event = Event()
+        thread = Thread(target=_ransomware_sync_loop, args=(stop_event,), daemon=True)
+        _ransomware_sync_enabled = True
+        _ransomware_sync_started_at = utc_now_iso()
+        _ransomware_sync_interval_seconds = interval_seconds
+        _ransomware_sync_limit = limit
+        _ransomware_sync_stop_event = stop_event
+        _ransomware_sync_thread = thread
+        thread.start()
+    return {
+        **get_ransomware_sync_status(),
+        "message": "已开始 ransomware.live 自动同步",
+    }
+
+
+def stop_ransomware_sync_dispatch() -> dict[str, Any]:
+    global _ransomware_sync_enabled
+    with _ransomware_sync_lock:
+        if not _ransomware_sync_enabled or _ransomware_sync_stop_event is None:
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 自动同步当前未运行",
+            }
+        _ransomware_sync_stop_event.set()
+        _ransomware_sync_enabled = False
+    return {
+        **get_ransomware_sync_status(),
+        "message": "已停止 ransomware.live 自动同步",
+    }
+
+
+def get_ransomware_sync_status() -> dict[str, Any]:
+    thread_alive = bool(_ransomware_sync_thread and _ransomware_sync_thread.is_alive())
+    with get_db_connection() as connection:
+        sync_state = get_ransomware_live_sync_state(connection)
+    last_error = _ransomware_sync_last_error
+    if get_ransomware_live_api_key() and "RANSOMWARE_LIVE_API_KEY" in last_error and "not set" in last_error.lower():
+        last_error = ""
+    return {
+        "enabled": bool(_ransomware_sync_enabled and thread_alive),
+        "running": bool(_ransomware_sync_running),
+        "started_at": _ransomware_sync_started_at,
+        "last_tick_at": _ransomware_sync_last_tick_at,
+        "last_success_at": _ransomware_sync_last_success_at,
+        "last_error": last_error,
+        "last_source": _ransomware_sync_last_source,
+        "last_ingested": _ransomware_sync_last_ingested,
+        "interval_seconds": _ransomware_sync_interval_seconds,
+        "limit": _ransomware_sync_limit,
+        "record_count": int(sync_state.get("count") or 0),
+        "latest_disclosure_time": str(sync_state.get("latest_disclosure_time") or ""),
     }
 
 

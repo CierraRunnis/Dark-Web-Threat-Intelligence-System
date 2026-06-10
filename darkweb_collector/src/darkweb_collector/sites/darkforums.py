@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from urllib.parse import urljoin, urlparse
 
@@ -21,6 +22,96 @@ FIRST_POST_BLOCK_RE = re.compile(
     r'<div class="post classic .*?id="post_\d+".*?<!-- end: postbit_classic -->',
     re.IGNORECASE | re.DOTALL,
 )
+ABSOLUTE_TIMESTAMP_RE = re.compile(
+    r'(?P<day>\d{1,2})-(?P<month>\d{1,2})-(?P<year>\d{2,4}),\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM)',
+    re.IGNORECASE,
+)
+TEXTUAL_TIMESTAMP_RE = re.compile(
+    r'(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})\s+(?P<year>\d{4})(?:,\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM))?',
+    re.IGNORECASE,
+)
+RELATIVE_TIMESTAMP_RE = re.compile(
+    r'(?P<value>\d+)\s+(?P<unit>minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s+ago',
+    re.IGNORECASE,
+)
+ATTACKER_VALUE_RE = re.compile(r"[A-Za-z0-9$][A-Za-z0-9$ ._&+\-/]{1,48}")
+ATTACKER_SHORT_CODE_RE = re.compile(r"[A-Za-z]?\d{1,3}$")
+ATTACKER_BLOCKED_PHRASES = (
+    "item owner",
+    "visibility group",
+    "rejected by",
+    "subcontractor",
+    "internal documents",
+    "engineering documents",
+    "howitzers",
+    "ammunition",
+    "format: csv",
+    "all rows",
+    "open deals",
+    "email messages",
+    "monthly comp",
+    "position title",
+    "recruiting source",
+    "activities to do",
+)
+ATTACKER_GENERIC_VALUES = {
+    "actor",
+    "actors",
+    "attacker",
+    "attackers",
+    "group",
+    "groups",
+    "hacker",
+    "hackers",
+    "team",
+    "gang",
+    "unknown",
+    "none",
+    "n/a",
+    "null",
+}
+ATTACKER_PATTERNS = (
+    r'\b[Aa]ttacker[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
+    r'\b[Hh]acker[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
+    r'\b[Gg]roup(?:\s+name)?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
+    r'\b[Tt]hreat [Aa]ctor[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
+    r'\b[Aa]ctor[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
+    r'\b[Cc]redit[s]?\s+(?:to|goes to)\s*[:=-]?\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
+    r'(?:^|[\s(\[])[Bb]y\s+([A-Za-z0-9$][A-Za-z0-9$._&+\-/]{1,30}(?:\s+[A-Za-z0-9$][A-Za-z0-9$._&+\-/]{1,30}){0,2})\s+(?:group|team|gang)\b',
+)
+
+
+def _safe_console_text(value: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return str(value).encode(encoding, errors="replace").decode(encoding, errors="replace")
+    except LookupError:
+        return str(value).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
+def _debug_log(message: str) -> None:
+    print(_safe_console_text(message))
+
+
+def _extract_timestamp_text(post_block: str, html: str) -> str:
+    patterns = [
+        r'<span class="post_date">(.*?)</span>',
+        r'<span[^>]*class="[^"]*DateTime[^"]*"[^>]*>(.*?)</span>',
+        r'<div[^>]*class="[^"]*thread-info__datetime[^"]*"[^>]*>(.*?)</div>',
+    ]
+    for source in (post_block, html):
+        for pattern in patterns:
+            match = re.search(pattern, source, re.IGNORECASE | re.DOTALL)
+            if match:
+                text = _clean_html_text(match.group(1))
+                if text:
+                    return text
+        cleaned = _clean_html_text(source)
+        for regex in (ABSOLUTE_TIMESTAMP_RE, TEXTUAL_TIMESTAMP_RE, RELATIVE_TIMESTAMP_RE):
+            match = regex.search(cleaned)
+            if match:
+                return _clean_html_text(match.group(0))
+    return ""
 
 def _clean_html_text(value: str) -> str:
     """Clean HTML text by removing tags and normalizing whitespace"""
@@ -42,6 +133,94 @@ def _extract_domain(url: str) -> str:
     return parsed.netloc
 
 
+def _parse_reference_dt(value: str | None) -> datetime:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            dt = None
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+    return datetime.now(timezone.utc)
+
+
+def normalize_darkforums_timestamp(value: str | None, *, collected_at_utc: str | None = None) -> str:
+    raw = _clean_html_text(value)
+    if not raw:
+        return ""
+
+    reference_dt = _parse_reference_dt(collected_at_utc)
+
+    match = ABSOLUTE_TIMESTAMP_RE.search(raw)
+    if match:
+        year = int(match.group("year"))
+        if year < 100:
+            year += 2000
+        hour = int(match.group("hour")) % 12
+        if match.group("ampm").upper() == "PM":
+            hour += 12
+        dt = datetime(
+            year,
+            int(match.group("month")),
+            int(match.group("day")),
+            hour,
+            int(match.group("minute")),
+            tzinfo=timezone.utc,
+        )
+        return dt.date().isoformat()
+
+    match = TEXTUAL_TIMESTAMP_RE.search(raw)
+    if match:
+        date_raw = f"{match.group('day')} {match.group('month')} {match.group('year')}"
+        parsed_dt = None
+        for fmt in ("%d %B %Y", "%d %b %Y"):
+            try:
+                parsed_dt = datetime.strptime(date_raw, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_dt is not None:
+            hour = int(match.group("hour") or 0)
+            minute = int(match.group("minute") or 0)
+            ampm = str(match.group("ampm") or "").upper()
+            if ampm:
+                hour = hour % 12
+                if ampm == "PM":
+                    hour += 12
+            dt = parsed_dt.replace(hour=hour, minute=minute, tzinfo=timezone.utc)
+            return dt.date().isoformat()
+
+    lowered = raw.lower()
+    if "yesterday" in lowered:
+        dt = reference_dt - timedelta(days=1)
+        return dt.date().isoformat()
+    if "today" in lowered:
+        return reference_dt.date().isoformat()
+
+    match = RELATIVE_TIMESTAMP_RE.search(lowered)
+    if match:
+        value_num = int(match.group("value"))
+        unit = match.group("unit").lower()
+        if unit.startswith("minute"):
+            delta = timedelta(minutes=value_num)
+        elif unit.startswith("hour"):
+            delta = timedelta(hours=value_num)
+        elif unit.startswith("day"):
+            delta = timedelta(days=value_num)
+        elif unit.startswith("week"):
+            delta = timedelta(weeks=value_num)
+        elif unit.startswith("month"):
+            delta = timedelta(days=30 * value_num)
+        else:
+            delta = timedelta(days=365 * value_num)
+        return (reference_dt - delta).date().isoformat()
+
+    return ""
+
+
 def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
     """
     Parse DarkForums list page to extract topic information
@@ -52,7 +231,7 @@ def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
         max_topics: Maximum number of topics to extract (default: 5 for pilot testing)
     """
     start_time = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] Starting to parse list page: {url}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Starting to parse list page: {url}")
     
     # Extract page title
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
@@ -75,7 +254,7 @@ def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
     )
     
     matches = topic_pattern.findall(html)
-    print(f"[{time.strftime('%H:%M:%S')}] Found {len(matches)} topic matches")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Found {len(matches)} topic matches")
     
     for tid, href, topic_title in matches:
         # Skip if already have this topic
@@ -105,15 +284,15 @@ def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
         }
         
         topics.append(topic_data)
-        print(f"[{time.strftime('%H:%M:%S')}] Found topic {len(topics)}: {clean_title[:60]}...")
+        _debug_log(f"[{time.strftime('%H:%M:%S')}] Found topic {len(topics)}: {clean_title[:60]}...")
         
         # Limit to max_topics for pilot testing
         if len(topics) >= max_topics:
-            print(f"[{time.strftime('%H:%M:%S')}] Reached limit of {max_topics} topics, stopping")
+            _debug_log(f"[{time.strftime('%H:%M:%S')}] Reached limit of {max_topics} topics, stopping")
             break
-    
+
     end_time = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] List parsing completed in {end_time - start_time:.2f}s, found {len(topics)} topics")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] List parsing completed in {end_time - start_time:.2f}s, found {len(topics)} topics")
     
     return {
         "site_name": "darkforums",
@@ -153,7 +332,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     Parse DarkForums detail page to extract post content and metadata
     """
     start_time = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] Parsing detail page: {url}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Parsing detail page: {url}")
     
     # Extract page title
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
@@ -187,7 +366,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
                 break
     content = _clean_html_text(content_match.group(1)) if content_match else ""
 
-    print(f"[{time.strftime('%H:%M:%S')}] Extracted content length: {len(content)} chars")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Extracted content length: {len(content)} chars")
     
     # Extract author information
     author_match = re.search(
@@ -201,35 +380,20 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
         )
     author = _clean_html_text(author_match.group(1)) if author_match else "Unknown"
     
-    print(f"[{time.strftime('%H:%M:%S')}] Author: {author}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Author: {author}")
     
     # Extract post date/timestamp
-    timestamp_match = re.search(
-        r'<span class="post_date">(.*?)</span>',
-        post_block, re.IGNORECASE | re.DOTALL
-    )
-    if not timestamp_match:
-        timestamp_match = re.search(
-            r'<span[^>]*class="[^"]*DateTime[^"]*"[^>]*>(.*?)</span>',
-            post_block,
-            re.IGNORECASE | re.DOTALL,
-        )
-    if not timestamp_match:
-        timestamp_match = re.search(
-            r'>(\d{2}-\d{2}-\d{2},\s*\d{2}:\d{2}\s*(?:AM|PM))<',
-            post_block, re.IGNORECASE
-        )
-    timestamp = _clean_html_text(timestamp_match.group(1)) if timestamp_match else ""
+    timestamp = _extract_timestamp_text(post_block, html)
     
-    print(f"[{time.strftime('%H:%M:%S')}] Timestamp: {timestamp}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Timestamp: {timestamp}")
     
     # Extract victims from content and title
     victims = extract_victims_from_content(content, title)
-    print(f"[{time.strftime('%H:%M:%S')}] Found {len(victims)} victims")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Found {len(victims)} victims")
     
     # Extract attackers
     attackers = extract_attackers_from_content(content)
-    print(f"[{time.strftime('%H:%M:%S')}] Found {len(attackers)} attackers")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Found {len(attackers)} attackers")
     
     # Build victim information with industry and region
     victim_info = []
@@ -241,7 +405,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
             'industry': industry,
             'region': region
         })
-        print(f"[{time.strftime('%H:%M:%S')}] Victim: {victim} | Industry: {industry} | Region: {region}")
+        _debug_log(f"[{time.strftime('%H:%M:%S')}] Victim: {victim} | Industry: {industry} | Region: {region}")
     
     # Extract attachments/links
     attachment_matches = re.findall(
@@ -251,17 +415,20 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     attachments = [urljoin(url, match) for match in attachment_matches]
     
     end_time = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] Detail parsing completed in {end_time - start_time:.2f}s")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] Detail parsing completed in {end_time - start_time:.2f}s")
     
+    collected_at_utc = datetime.now(timezone.utc).isoformat()
+
     return {
         "site_name": "darkforums",
         "source_url": url,
         "domain": domain,
         "title": title,
-        "collected_at_utc": datetime.now(timezone.utc).isoformat(),
+        "collected_at_utc": collected_at_utc,
         "content": content,
         "author": author,
         "timestamp": timestamp,
+        "published_at_utc": normalize_darkforums_timestamp(timestamp, collected_at_utc=collected_at_utc),
         "attachments": attachments,
         "victims": victim_info,
         "attackers": attackers,
@@ -333,34 +500,41 @@ def extract_attackers_from_content(content: str) -> list:
     Extract attacker/threat actor information from content
     """
     attackers = []
-    
-    patterns = [
-        r'[Aa]ttacker[s]?[:\s]+(.+?)(?=[.,]|$)',
-        r'[Hh]acker[s]?[:\s]+(.+?)(?=[.,]|$)',
-        r'[Gg]roup[:\s]+(.+?)(?=\s+[Tt]his\s+[Pp]ost|[.,]|$)',
-        r'[Tt]hreat [Aa]ctor[s]?[:\s]+(.+?)(?=[.,]|$)',
-        r'[Aa]ctor[s]?[:\s]+(.+?)(?=[.,]|$)',
-        r'[Cc]redit[s]?\s+(?:to|goes to)[:\s]+(.+?)(?=[.,]|$)',
-        r'[Bb]y[:\s]+(.+?)(?:\s+(?:group|team|gang))',
-    ]
-    
-    for pattern in patterns:
+
+    for pattern in ATTACKER_PATTERNS:
         matches = re.findall(pattern, content, re.IGNORECASE)
         for match in matches:
-            attacker = _clean_html_text(match)
-            if attacker and len(attacker) > 2 and len(attacker) < 50:
+            attacker = _clean_html_text(match).strip(" -:;,.")
+            if attacker:
                 attackers.append(attacker)
-    
-    # Remove duplicates
+
+    return clean_extracted_attackers(attackers)[:5]  # Limit to top 5 attackers
+
+
+def clean_extracted_attackers(values: list[str]) -> list[str]:
+    """Normalize attacker candidates and drop obvious false positives."""
     seen = set()
     unique_attackers = []
-    for a in attackers:
-        a_lower = a.lower()
-        if a_lower not in seen:
-            seen.add(a_lower)
-            unique_attackers.append(a)
-    
-    return unique_attackers[:5]  # Limit to top 5 attackers
+    for value in values:
+        attacker = _clean_html_text(value).strip(" -:;,.")
+        lowered = attacker.lower()
+        if not attacker or lowered in seen:
+            continue
+        if lowered in ATTACKER_GENERIC_VALUES:
+            continue
+        if len(attacker) < 3 or len(attacker) > 40:
+            continue
+        if len(attacker.split()) > 4:
+            continue
+        if ATTACKER_SHORT_CODE_RE.fullmatch(attacker):
+            continue
+        if not ATTACKER_VALUE_RE.fullmatch(attacker):
+            continue
+        if any(phrase in lowered for phrase in ATTACKER_BLOCKED_PHRASES):
+            continue
+        seen.add(lowered)
+        unique_attackers.append(attacker)
+    return unique_attackers
 
 
 def determine_industry(victim: str, context: str = "") -> str:

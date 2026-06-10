@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+from threading import Lock, current_thread
 import traceback
 import time
 from dataclasses import dataclass
@@ -73,11 +74,11 @@ class BrowserClient:
                 # networkidle never triggers. Fall back to DOM readiness.
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
+            _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
             if hide_selectors:
                 selector_rules = ", ".join(hide_selectors)
                 page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
                 page.wait_for_timeout(500)
-            html = page.content()
             screenshot_png = None
             if screenshot_selectors:
                 try:
@@ -115,6 +116,11 @@ class BrowserClient:
                     screenshot_png = None
             if screenshot_png is None:
                 screenshot_png = page.screenshot(type="png", full_page=True)
+            # Capture HTML after the page-specific selectors have had a chance to
+            # appear. Some forum pages finish rendering well after the initial
+            # DOMContentLoaded/networkidle checkpoint, which made us persist a
+            # head-only document while the screenshot already contained the post.
+            html = _read_page_content(page)
             self._task_count += 1
             return html, screenshot_png
         finally:
@@ -146,6 +152,7 @@ class BrowserClient:
             rendered_html = _inject_base_href(html, base_url)
             page.set_content(rendered_html, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
+            _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
             if hide_selectors:
                 selector_rules = ", ".join(hide_selectors)
                 page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
@@ -202,8 +209,30 @@ class BrowserClient:
             self._playwright = None
 
 
-_GLOBAL_CLIENT: BrowserClient | None = None
-_GLOBAL_PROXY: BrowserProxyConfig | None = None
+_GLOBAL_CLIENTS: dict[object, tuple[BrowserProxyConfig, BrowserClient]] = {}
+_GLOBAL_CLIENT_LOCK = Lock()
+
+_BROWSER_CHECK_MARKERS = (
+    "checking your browser",
+    "cf-browser-verification",
+    "security verification",
+    "verify you are human",
+    "please move your mouse or press a key",
+    "please wait while we verify",
+)
+
+
+def _read_page_content(page, *, attempts: int = 6, wait_ms: int = 250) -> str:
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return page.content()
+        except Exception as exc:
+            last_error = exc
+            page.wait_for_timeout(wait_ms)
+    if last_error is not None:
+        raise last_error
+    return ""
 
 
 def _inject_base_href(html: str, base_url: str) -> str:
@@ -215,24 +244,105 @@ def _inject_base_href(html: str, base_url: str) -> str:
     return f"<head>{base_tag}</head>{html}"
 
 
+def _looks_like_browser_check_page(html: str | None) -> bool:
+    content = str(html or "").lower()
+    return any(marker in content for marker in _BROWSER_CHECK_MARKERS)
+
+
+def _clear_browser_check_interstitial(
+    page,
+    *,
+    timeout_ms: int,
+    settle_wait_ms: int = 750,
+) -> str:
+    html = _read_page_content(page)
+    if not _looks_like_browser_check_page(html):
+        return html
+
+    deadline = time.monotonic() + max(timeout_ms, settle_wait_ms) / 1000
+    viewport = getattr(page, "viewport_size", None) or {"width": 1440, "height": 960}
+    center_x = int(viewport.get("width", 1440) * 0.5)
+    center_y = int(viewport.get("height", 960) * 0.38)
+
+    while time.monotonic() < deadline:
+        try:
+            page.mouse.move(center_x, center_y, steps=12)
+            page.wait_for_timeout(120)
+            page.mouse.click(center_x, center_y, delay=80)
+            page.wait_for_timeout(120)
+            page.mouse.wheel(0, 420)
+            page.wait_for_timeout(120)
+        except Exception:
+            # Cloudflare/browser-check pages can trigger a navigation mid-action.
+            # When that happens, just wait for the next stable DOM snapshot
+            # instead of failing the whole fetch.
+            page.wait_for_timeout(300)
+        for key in ("Tab", "Space"):
+            try:
+                page.keyboard.press(key)
+                page.wait_for_timeout(120)
+            except Exception:
+                page.wait_for_timeout(300)
+            html = _read_page_content(page)
+            if not _looks_like_browser_check_page(html):
+                page.wait_for_timeout(settle_wait_ms)
+                return _read_page_content(page)
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(1500, timeout_ms))
+        except Exception:
+            pass
+        html = _read_page_content(page)
+        if not _looks_like_browser_check_page(html):
+            page.wait_for_timeout(settle_wait_ms)
+            return _read_page_content(page)
+    return html
+
+
+def _get_or_create_client(requested_proxy: BrowserProxyConfig) -> BrowserClient:
+    thread_key = current_thread()
+    with _GLOBAL_CLIENT_LOCK:
+        existing = _GLOBAL_CLIENTS.get(thread_key)
+        if existing is not None:
+            existing_proxy, existing_client = existing
+            if existing_proxy == requested_proxy:
+                return existing_client
+            _GLOBAL_CLIENTS.pop(thread_key, None)
+        else:
+            existing_client = None
+
+    if existing_client is not None:
+        existing_client.close()
+
+    client = BrowserClient(proxy=requested_proxy)
+    with _GLOBAL_CLIENT_LOCK:
+        replaced = _GLOBAL_CLIENTS.get(thread_key)
+        _GLOBAL_CLIENTS[thread_key] = (requested_proxy, client)
+
+    if replaced is not None:
+        _, replaced_client = replaced
+        if replaced_client is not client:
+            replaced_client.close()
+    return client
+
+
 def fetch_html_with_browser(
     url: str,
     wait_seconds: int,
     timeout_seconds: int,
     proxy_server: str | None = None,
 ) -> str:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
     requested_proxy = BrowserProxyConfig(server=proxy_server)
-    if _GLOBAL_CLIENT is None or _GLOBAL_PROXY != requested_proxy:
+    client = _get_or_create_client(requested_proxy)
+    try:
+        html, _ = client.fetch_page_artifacts(
+            url=url,
+            wait_seconds=wait_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+        return html
+    except Exception:
         close_browser_client()
-        _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
-        _GLOBAL_PROXY = requested_proxy
-    html, _ = _GLOBAL_CLIENT.fetch_page_artifacts(
-        url=url,
-        wait_seconds=wait_seconds,
-        timeout_seconds=timeout_seconds,
-    )
-    return html
+        raise
 
 
 def fetch_page_artifacts_with_browser(
@@ -244,20 +354,20 @@ def fetch_page_artifacts_with_browser(
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
 ) -> tuple[str, bytes]:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
     requested_proxy = BrowserProxyConfig(server=proxy_server)
-    if _GLOBAL_CLIENT is None or _GLOBAL_PROXY != requested_proxy:
+    client = _get_or_create_client(requested_proxy)
+    try:
+        return client.fetch_page_artifacts(
+            url=url,
+            wait_seconds=wait_seconds,
+            timeout_seconds=timeout_seconds,
+            screenshot_selector=screenshot_selector,
+            screenshot_selectors=screenshot_selectors,
+            hide_selectors=hide_selectors,
+        )
+    except Exception:
         close_browser_client()
-        _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
-        _GLOBAL_PROXY = requested_proxy
-    return _GLOBAL_CLIENT.fetch_page_artifacts(
-        url=url,
-        wait_seconds=wait_seconds,
-        timeout_seconds=timeout_seconds,
-        screenshot_selector=screenshot_selector,
-        screenshot_selectors=screenshot_selectors,
-        hide_selectors=hide_selectors,
-    )
+        raise
 
 
 def screenshot_html_with_browser(
@@ -270,29 +380,37 @@ def screenshot_html_with_browser(
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
 ) -> bytes:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
     requested_proxy = BrowserProxyConfig(server=proxy_server)
-    if _GLOBAL_CLIENT is None or _GLOBAL_PROXY != requested_proxy:
+    client = _get_or_create_client(requested_proxy)
+    try:
+        return client.screenshot_html_content(
+            html=html,
+            base_url=base_url,
+            wait_seconds=wait_seconds,
+            timeout_seconds=timeout_seconds,
+            screenshot_selector=screenshot_selector,
+            screenshot_selectors=screenshot_selectors,
+            hide_selectors=hide_selectors,
+        )
+    except Exception:
         close_browser_client()
-        _GLOBAL_CLIENT = BrowserClient(proxy=requested_proxy)
-        _GLOBAL_PROXY = requested_proxy
-    return _GLOBAL_CLIENT.screenshot_html_content(
-        html=html,
-        base_url=base_url,
-        wait_seconds=wait_seconds,
-        timeout_seconds=timeout_seconds,
-        screenshot_selector=screenshot_selector,
-        screenshot_selectors=screenshot_selectors,
-        hide_selectors=hide_selectors,
-    )
+        raise
 
 
-def close_browser_client() -> None:
-    global _GLOBAL_CLIENT, _GLOBAL_PROXY
-    if _GLOBAL_CLIENT is not None:
-        _GLOBAL_CLIENT.close()
-        _GLOBAL_CLIENT = None
-    _GLOBAL_PROXY = None
+def close_browser_client(*, all_threads: bool = False) -> None:
+    thread_key = current_thread()
+    with _GLOBAL_CLIENT_LOCK:
+        if all_threads:
+            clients = [client for _, client in _GLOBAL_CLIENTS.values()]
+            _GLOBAL_CLIENTS.clear()
+        else:
+            entry = _GLOBAL_CLIENTS.pop(thread_key, None)
+            clients = [entry[1]] if entry is not None else []
+    for client in clients:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
-atexit.register(close_browser_client)
+atexit.register(lambda: close_browser_client(all_threads=True))
