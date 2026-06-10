@@ -32,6 +32,22 @@ export const routeHeaderMeta = {
   '/collector-control': {
     kicker: '采集控制',
     subtitle: '统一触发站点采集任务、查看站点健康状态和失败告警。'
+  },
+  '/document-exposure': {
+    kicker: '文件监测',
+    subtitle: '文件监测模块首页，仅展示监测配置、扫描任务和命中结果三个子模块入口。'
+  },
+  '/document-exposure/settings': {
+    kicker: '文件监测',
+    subtitle: '统一管理平台会话、监测对象、关键词、来源家族、文件类型与启停状态。'
+  },
+  '/document-exposure/scans': {
+    kicker: '文件监测',
+    subtitle: '执行文件监测扫描并查看最近扫描时间、候选数、命中数和错误历史。'
+  },
+  '/document-exposure/results': {
+    kicker: '文件监测',
+    subtitle: '筛选、核验并跟踪文件监测命中，必要时进入统一事件详情页。'
   }
 }
 

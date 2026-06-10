@@ -100,7 +100,7 @@ function parseSortTime(value) {
 
 const sortedEvents = computed(() => {
   return [...dataLeakEvents.value].sort((left, right) => {
-    return parseSortTime(right.updatedTimeRaw || right.disclosureTimeRaw || right.disclosureTime) - parseSortTime(left.updatedTimeRaw || left.disclosureTimeRaw || left.disclosureTime)
+    return parseSortTime(right.disclosureTimeRaw || right.disclosureTime || right.updatedTimeRaw || right.updatedTime) - parseSortTime(left.disclosureTimeRaw || left.disclosureTime || left.updatedTimeRaw || left.updatedTime)
   })
 })
 

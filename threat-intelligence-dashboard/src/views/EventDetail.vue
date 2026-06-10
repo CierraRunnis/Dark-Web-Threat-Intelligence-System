@@ -105,6 +105,60 @@
         </div>
       </div>
 
+      <div v-if="monitoringMatches.length || hasSampleEvidence || sampleLinks.length" class="ti-card ti-reveal-up">
+        <div class="ti-card-header">
+          <div class="ti-card-title">监测与样本证据</div>
+        </div>
+        <div class="ti-card-body key-grid">
+          <div>
+            <span>监测优先级</span>
+            <strong>{{ monitoringPriority || 'low' }}</strong>
+          </div>
+          <div>
+            <span>监测权重</span>
+            <strong>{{ monitoringWeight }}</strong>
+          </div>
+          <div>
+            <span>样本证据</span>
+            <strong>{{ hasSampleEvidence ? '检测到样本证据' : '未检测到' }}</strong>
+          </div>
+        </div>
+        <div class="ti-card-body topic-panel">
+          <div v-if="monitoringMatches.length" class="topic-panel__group">
+            <span>命中监测规则</span>
+            <div class="chip-list">
+              <span v-for="item in monitoringMatches" :key="`${item.keyword}-${item.category}`" class="detail-chip detail-chip--topic">
+                {{ item.keyword }} · {{ item.weight }}
+              </span>
+            </div>
+          </div>
+          <div v-if="sampleLinks.length" class="topic-panel__group">
+            <span>样本链接</span>
+            <div class="reference-list">
+              <div v-for="item in sampleLinks" :key="item.url" class="reference-item">
+                <span class="reference-source">类型：{{ item.kind || 'sample' }}</span>
+                <a :href="item.url" target="_blank" rel="noreferrer" class="reference-link">{{ item.url }}</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="ruleRiskBreakdownSegments.length" class="ti-card ti-reveal-up">
+        <div class="ti-card-header">
+          <div class="ti-card-title">规则主评分构成</div>
+        </div>
+        <div class="ti-card-body risk-breakdown-list">
+          <article v-for="segment in ruleRiskBreakdownSegments" :key="segment.key" class="risk-breakdown-item">
+            <div class="risk-breakdown-item__header">
+              <strong>{{ segment.label }}</strong>
+              <span>{{ segment.score }} / {{ segment.max_score }}</span>
+            </div>
+            <p v-if="segment.reasons?.length">{{ segment.reasons.join('；') }}</p>
+          </article>
+        </div>
+      </div>
+
       <div class="ti-card ti-reveal-up">
         <div class="ti-card-header">
           <div class="ti-card-title">{{ isVulnerability ? '来源与记录信息' : '披露链接与地域' }}</div>
@@ -267,13 +321,31 @@ const router = useRouter()
 const { detail, loading, refreshing, error, load } = useEventDetail()
 const eventDetail = computed(() => detail.value)
 const isVulnerability = computed(() => eventDetail.value?.normalized_event_type === 'vulnerability' || !!eventDetail.value?.cve_id)
-const primarySubjectLabel = computed(() => isVulnerability.value ? '厂商' : '攻击者')
-const primarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.value?.vendor || '未知') : (eventDetail.value?.attacker || '未知'))
+const isDocumentExposure = computed(() => eventDetail.value?.normalized_event_type === 'document_exposure')
+const primarySubjectLabel = computed(() => {
+  if (isVulnerability.value) return '厂商'
+  if (isDocumentExposure.value) return '平台'
+  return '攻击者'
+})
+const primarySubjectValue = computed(() => {
+  if (isVulnerability.value) return eventDetail.value?.vendor || '未知'
+  if (isDocumentExposure.value) return eventDetail.value?.source || eventDetail.value?.attacker || '未知'
+  return eventDetail.value?.attacker || '未知'
+})
 const secondarySubjectLabel = computed(() => isVulnerability.value ? '产品' : '受害实体')
 const secondarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.value?.product || '未知') : (eventDetail.value?.victim || '未知'))
 const affectedVersionItems = computed(() => eventDetail.value?.affected_version_items || [])
 const screenshotResources = computed(() => eventDetail.value?.screenshot_resources || [])
 const referenceUrls = computed(() => eventDetail.value?.reference_urls || [])
+const riskBreakdown = computed(() => eventDetail.value?.risk_breakdown || {})
+const riskBreakdownSegments = computed(() => riskBreakdown.value?.segments || [])
+const ruleRiskBreakdown = computed(() => eventDetail.value?.rule_risk_breakdown || {})
+const ruleRiskBreakdownSegments = computed(() => ruleRiskBreakdown.value?.segments || riskBreakdownSegments.value || [])
+const monitoringMatches = computed(() => eventDetail.value?.monitoring_matches || [])
+const monitoringWeight = computed(() => Number(eventDetail.value?.monitoring_weight || 0))
+const monitoringPriority = computed(() => eventDetail.value?.monitoring_priority || 'low')
+const sampleLinks = computed(() => eventDetail.value?.sample_links || [])
+const hasSampleEvidence = computed(() => Boolean(eventDetail.value?.has_sample_evidence))
 const translatedDetailText = ref('')
 const showTranslatedDetail = ref(false)
 const translatingDetail = ref(false)
@@ -371,7 +443,12 @@ async function toggleDetailTranslation() {
 
 function goBackToList() {
   const eventId = String(route.params.eventId || '')
-  const backPath = sessionStorage.getItem(`event-back:${eventId}`) || (String(eventId).startsWith('vuln:') ? '/vulnerability-alerts' : '/data-leak')
+  const defaultBackPath = String(eventId).startsWith('vuln:')
+    ? '/vulnerability-alerts'
+    : String(eventId).startsWith('document:')
+      ? '/document-exposure/results'
+      : '/data-leak'
+  const backPath = sessionStorage.getItem(`event-back:${eventId}`) || defaultBackPath
   router.push(backPath)
 }
 
@@ -621,6 +698,77 @@ watch(
   color: var(--ti-text-primary);
   font-size: 13px;
   font-weight: 600;
+}
+
+.topic-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.topic-panel__group span {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ti-text-muted);
+  font-size: 12px;
+}
+
+.topic-panel__group p,
+.topic-panel__group strong {
+  margin: 0;
+  color: var(--ti-text-primary);
+}
+
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detail-chip {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detail-chip--topic {
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+}
+
+.detail-chip--behavior {
+  background: rgba(234, 88, 12, 0.08);
+  color: #c2410c;
+}
+
+.detail-chip--keyword {
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+}
+
+.risk-breakdown-list {
+  display: grid;
+  gap: 12px;
+}
+
+.risk-breakdown-item {
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(47, 107, 255, 0.14);
+  background: rgba(47, 107, 255, 0.05);
+}
+
+.risk-breakdown-item__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.risk-breakdown-item p {
+  margin: 8px 0 0;
+  color: var(--ti-text-secondary);
+  line-height: 1.7;
 }
 
 @media (max-width: 1100px) {

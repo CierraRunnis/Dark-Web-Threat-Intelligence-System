@@ -182,6 +182,276 @@ ON vulnerability_records(cve_id);
 CREATE INDEX IF NOT EXISTS idx_vulnerability_records_time
 ON vulnerability_records(disclosure_time);
 
+CREATE TABLE IF NOT EXISTS ransomware_live_victims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    victim_id TEXT NOT NULL UNIQUE,
+    group_name TEXT NOT NULL,
+    victim_name TEXT NOT NULL,
+    website TEXT NOT NULL,
+    country_code TEXT NOT NULL,
+    activity TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    attacked_at TEXT NOT NULL,
+    post_url TEXT NOT NULL,
+    permalink TEXT NOT NULL,
+    screenshot_url TEXT NOT NULL,
+    description TEXT NOT NULL,
+    press_url TEXT NOT NULL,
+    raw_json TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ransomware_live_victims_attacked_at
+ON ransomware_live_victims(attacked_at);
+
+CREATE INDEX IF NOT EXISTS idx_ransomware_live_victims_discovered_at
+ON ransomware_live_victims(discovered_at);
+
+CREATE INDEX IF NOT EXISTS idx_ransomware_live_victims_last_seen_at
+ON ransomware_live_victims(last_seen_at);
+
+CREATE TABLE IF NOT EXISTS platform_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL UNIQUE,
+    account_label TEXT NOT NULL,
+    login_url TEXT NOT NULL,
+    homepage_url TEXT NOT NULL,
+    requires_login INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    storage_state_path TEXT NOT NULL,
+    last_verified_at TEXT,
+    expires_hint TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exposure_watchlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    organization_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exposure_watch_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    term TEXT NOT NULL,
+    term_type TEXT NOT NULL,
+    weight INTEGER NOT NULL DEFAULT 10,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(watchlist_id, term, term_type),
+    FOREIGN KEY (watchlist_id) REFERENCES exposure_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exposure_watch_terms_watchlist
+ON exposure_watch_terms(watchlist_id, enabled);
+
+CREATE TABLE IF NOT EXISTS document_hits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    platform_type TEXT NOT NULL,
+    discovery_source TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    normalized_title TEXT NOT NULL,
+    title TEXT NOT NULL,
+    access_state TEXT NOT NULL,
+    confidence_score INTEGER NOT NULL DEFAULT 0,
+    risk_score INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT 'low',
+    review_status TEXT NOT NULL DEFAULT 'new',
+    matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    file_count INTEGER NOT NULL DEFAULT 0,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    share_owner TEXT NOT NULL DEFAULT '',
+    disclosure_time TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_snapshot_id INTEGER,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(watchlist_id, platform, canonical_url, normalized_title),
+    FOREIGN KEY (watchlist_id) REFERENCES exposure_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_hits_watchlist
+ON document_hits(watchlist_id, risk_score, last_seen_at);
+
+CREATE INDEX IF NOT EXISTS idx_document_hits_review_status
+ON document_hits(review_status, access_state);
+
+CREATE TABLE IF NOT EXISTS document_hit_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hit_id INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,
+    source_query TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    page_url TEXT NOT NULL,
+    page_title TEXT NOT NULL,
+    html_path TEXT NOT NULL DEFAULT '',
+    screenshot_path TEXT NOT NULL DEFAULT '',
+    ocr_text TEXT NOT NULL DEFAULT '',
+    preview_text TEXT NOT NULL DEFAULT '',
+    file_list_json TEXT NOT NULL DEFAULT '[]',
+    access_state TEXT NOT NULL,
+    matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (hit_id) REFERENCES document_hits(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_hit_snapshots_hit
+ON document_hit_snapshots(hit_id, fetched_at);
+
+CREATE TABLE IF NOT EXISTS document_hit_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hit_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    reviewer TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (hit_id) REFERENCES document_hits(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_hit_reviews_hit
+ON document_hit_reviews(hit_id, created_at);
+
+CREATE TABLE IF NOT EXISTS exposure_scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    source_families_json TEXT NOT NULL DEFAULT '[]',
+    requested_terms_json TEXT NOT NULL DEFAULT '[]',
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    errors_json TEXT NOT NULL DEFAULT '[]',
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    FOREIGN KEY (watchlist_id) REFERENCES exposure_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exposure_scan_runs_watchlist
+ON exposure_scan_runs(watchlist_id, finished_at);
+
+CREATE TABLE IF NOT EXISTS code_watchlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    organization_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    notes TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS code_watch_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    term TEXT NOT NULL,
+    term_type TEXT NOT NULL,
+    weight INTEGER NOT NULL DEFAULT 10,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(watchlist_id, term, term_type),
+    FOREIGN KEY (watchlist_id) REFERENCES code_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_watch_terms_watchlist
+ON code_watch_terms(watchlist_id, enabled);
+
+CREATE TABLE IF NOT EXISTS code_hits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    repository_name TEXT NOT NULL,
+    repository_owner TEXT NOT NULL,
+    repository_url TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    branch TEXT NOT NULL DEFAULT '',
+    file_url TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'public',
+    language TEXT NOT NULL DEFAULT '',
+    sensitive_type TEXT NOT NULL,
+    matched_rule TEXT NOT NULL DEFAULT '',
+    matched_term TEXT NOT NULL DEFAULT '',
+    risk_score INTEGER NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL DEFAULT 'low',
+    review_status TEXT NOT NULL DEFAULT 'new',
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    last_snapshot_id INTEGER,
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(watchlist_id, platform, file_url, sensitive_type, matched_term),
+    FOREIGN KEY (watchlist_id) REFERENCES code_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_hits_watchlist
+ON code_hits(watchlist_id, risk_score, last_seen_at);
+
+CREATE INDEX IF NOT EXISTS idx_code_hits_review_status
+ON code_hits(review_status, platform);
+
+CREATE TABLE IF NOT EXISTS code_hit_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hit_id INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,
+    search_url TEXT NOT NULL DEFAULT '',
+    page_url TEXT NOT NULL DEFAULT '',
+    html_path TEXT NOT NULL DEFAULT '',
+    screenshot_path TEXT NOT NULL DEFAULT '',
+    code_fragment TEXT NOT NULL DEFAULT '',
+    masked_fragment TEXT NOT NULL DEFAULT '',
+    raw_artifact_path TEXT NOT NULL DEFAULT '',
+    line_start INTEGER NOT NULL DEFAULT 0,
+    line_end INTEGER NOT NULL DEFAULT 0,
+    language TEXT NOT NULL DEFAULT '',
+    findings_json TEXT NOT NULL DEFAULT '[]',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (hit_id) REFERENCES code_hits(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_hit_snapshots_hit
+ON code_hit_snapshots(hit_id, fetched_at);
+
+CREATE TABLE IF NOT EXISTS code_hit_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hit_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    reviewer TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (hit_id) REFERENCES code_hits(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_hit_reviews_hit
+ON code_hit_reviews(hit_id, created_at);
+
+CREATE TABLE IF NOT EXISTS code_scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    platforms_json TEXT NOT NULL DEFAULT '[]',
+    requested_terms_json TEXT NOT NULL DEFAULT '[]',
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    errors_json TEXT NOT NULL DEFAULT '[]',
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    FOREIGN KEY (watchlist_id) REFERENCES code_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_scan_runs_watchlist
+ON code_scan_runs(watchlist_id, finished_at);
+
 CREATE TABLE IF NOT EXISTS normalized_intelligence_events (
     event_id TEXT PRIMARY KEY,
     source_kind TEXT NOT NULL,
@@ -225,7 +495,98 @@ CREATE TABLE IF NOT EXISTS normalized_intelligence_cache_state (
     event_count INTEGER NOT NULL,
     refreshed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS monitoring_keywords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL,
+    category TEXT NOT NULL,
+    weight INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    match_mode TEXT NOT NULL DEFAULT 'contains',
+    updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_monitoring_keywords_unique
+ON monitoring_keywords(keyword, category);
+
+CREATE TABLE IF NOT EXISTS monitoring_keyword_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    event_key TEXT NOT NULL DEFAULT '',
+    match_signature TEXT NOT NULL,
+    match_keywords_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    response_json TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    sent_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(event_id, match_signature)
+);
+
+CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event
+ON monitoring_keyword_notifications(event_id);
+
+CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_status
+ON monitoring_keyword_notifications(status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event_key
+ON monitoring_keyword_notifications(event_key, status, dry_run);
 """
+
+
+LEGACY_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
+    "exposure_watchlists": {
+        "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    },
+    "monitoring_keyword_notifications": {
+        "event_key": "TEXT NOT NULL DEFAULT ''",
+    },
+}
+
+
+def _list_table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {str(row[1]) for row in rows}
+
+
+def _ensure_legacy_columns(connection: sqlite3.Connection) -> None:
+    for table_name, columns in LEGACY_COLUMN_ADDITIONS.items():
+        existing_columns = _list_table_columns(connection, table_name)
+        if not existing_columns:
+            continue
+        for column_name, column_sql in columns.items():
+            if column_name in existing_columns:
+                continue
+            connection.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"
+            )
+            existing_columns.add(column_name)
+
+
+def _ensure_schema(connection: sqlite3.Connection) -> None:
+    for statement in [item.strip() for item in SCHEMA.split(";") if item.strip()]:
+        try:
+            connection.execute(statement)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            # Older databases in the workspace may have pre-existing tables with
+            # narrower schemas. Ignore index-creation failures that only stem from
+            # missing legacy columns so we can still create newly added tables.
+            if "no such column" in message:
+                continue
+            raise
+    _ensure_legacy_columns(connection)
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event_key
+        ON monitoring_keyword_notifications(event_key, status, dry_run)
+        """
+    )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -233,9 +594,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     resolved = db_path.resolve()
     last_error: Exception | None = None
     for attempt in range(1, 6):
-        connection = sqlite3.connect(db_path, factory=ManagedConnection)
+        connection = sqlite3.connect(db_path, factory=ManagedConnection, timeout=30.0)
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA busy_timeout=30000")
             skip_wsl_checks = _should_skip_wal(resolved)
             if not skip_wsl_checks:
                 try:
@@ -254,8 +616,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
             if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
                 with _SCHEMA_INIT_LOCK:
                     if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
-                        if not _has_core_schema(connection):
-                            connection.executescript(SCHEMA)
+                        _ensure_schema(connection)
                         _SCHEMA_INIT_FINGERPRINTS.clear()
                         _SCHEMA_INIT_FINGERPRINTS.add(fingerprint)
             return connection
@@ -554,6 +915,7 @@ def upsert_forum_detail(connection: sqlite3.Connection, **kwargs) -> int:
         "content": kwargs.get("content", ""),
         "authors": kwargs.get("authors", ""),
         "timestamps": kwargs.get("timestamps", ""),
+        "published_at_utc": kwargs.get("published_at_utc", ""),
         "attachments": kwargs.get("attachments", ""),
         "victims": victims_str,
         "attackers": attackers_str,
@@ -792,6 +1154,112 @@ def replace_vulnerability_records(connection: sqlite3.Connection, rows: list[dic
         upsert_vulnerability_record(connection, row)
 
 
+def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict) -> int:
+    raw_json = payload.get("raw_json")
+    if isinstance(raw_json, str):
+        raw_json_text = raw_json
+    else:
+        raw_json_text = json.dumps(raw_json if raw_json is not None else payload, ensure_ascii=False)
+
+    cursor = connection.execute(
+        """
+        SELECT id
+        FROM ransomware_live_victims
+        WHERE victim_id = ?
+        """,
+        (payload["victim_id"],),
+    )
+    row = cursor.fetchone()
+    if row:
+        record_id = int(row[0])
+        connection.execute(
+            """
+            UPDATE ransomware_live_victims
+            SET group_name = ?, victim_name = ?, website = ?, country_code = ?, activity = ?,
+                discovered_at = ?, attacked_at = ?, post_url = ?, permalink = ?, screenshot_url = ?,
+                description = ?, press_url = ?, raw_json = ?, last_seen_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload.get("group_name", ""),
+                payload.get("victim_name", ""),
+                payload.get("website", ""),
+                payload.get("country_code", ""),
+                payload.get("activity", ""),
+                payload.get("discovered_at", ""),
+                payload.get("attacked_at", ""),
+                payload.get("post_url", ""),
+                payload.get("permalink", ""),
+                payload.get("screenshot_url", ""),
+                payload.get("description", ""),
+                payload.get("press_url", ""),
+                raw_json_text,
+                payload.get("last_seen_at", ""),
+                record_id,
+            ),
+        )
+        return record_id
+
+    cursor = connection.execute(
+        """
+        INSERT INTO ransomware_live_victims (
+            victim_id, group_name, victim_name, website, country_code, activity,
+            discovered_at, attacked_at, post_url, permalink, screenshot_url,
+            description, press_url, raw_json, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["victim_id"],
+            payload.get("group_name", ""),
+            payload.get("victim_name", ""),
+            payload.get("website", ""),
+            payload.get("country_code", ""),
+            payload.get("activity", ""),
+            payload.get("discovered_at", ""),
+            payload.get("attacked_at", ""),
+            payload.get("post_url", ""),
+            payload.get("permalink", ""),
+            payload.get("screenshot_url", ""),
+            payload.get("description", ""),
+            payload.get("press_url", ""),
+            raw_json_text,
+            payload.get("last_seen_at", ""),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_ransomware_live_victims(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, victim_id, group_name, victim_name, website, country_code, activity,
+               discovered_at, attacked_at, post_url, permalink, screenshot_url,
+               description, press_url, raw_json, last_seen_at
+        FROM ransomware_live_victims
+        ORDER BY datetime(COALESCE(attacked_at, discovered_at)) DESC, id DESC
+        """
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_ransomware_live_sync_state(connection: sqlite3.Connection) -> dict[str, object]:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count,
+               MAX(last_seen_at) AS latest_seen_at,
+               MAX(COALESCE(attacked_at, discovered_at)) AS latest_disclosure_time
+        FROM ransomware_live_victims
+        """
+    ).fetchone()
+    if row is None:
+        return {
+            "count": 0,
+            "latest_seen_at": "",
+            "latest_disclosure_time": "",
+        }
+    return dict(row)
+
+
 def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
     cursor = connection.execute(
         """
@@ -949,3 +1417,1007 @@ def upsert_normalized_intelligence_cache_state(
         """,
         (source_signature, event_count, refreshed_at),
     )
+
+
+def list_monitoring_keywords(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, keyword, category, weight, enabled, match_mode, updated_at
+        FROM monitoring_keywords
+        ORDER BY category, keyword
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        rows.append(payload)
+    return rows
+
+
+def replace_monitoring_keywords(connection: sqlite3.Connection, rows: list[dict]) -> None:
+    connection.execute("DELETE FROM monitoring_keywords")
+    if not rows:
+        return
+    connection.executemany(
+        """
+        INSERT INTO monitoring_keywords (
+            keyword, category, weight, enabled, match_mode, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                str(row.get("keyword") or "").strip(),
+                str(row.get("category") or "").strip(),
+                int(row.get("weight") or 0),
+                int(bool(row.get("enabled", True))),
+                str(row.get("match_mode") or "contains").strip() or "contains",
+                str(row.get("updated_at") or ""),
+            )
+            for row in rows
+            if str(row.get("keyword") or "").strip()
+        ],
+    )
+
+
+def get_monitoring_keyword_notification(
+    connection: sqlite3.Connection,
+    event_id: str,
+    match_signature: str,
+) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, event_id, event_key, match_signature, match_keywords_json, status, dry_run,
+               response_json, error_message, sent_at, created_at, updated_at
+        FROM monitoring_keyword_notifications
+        WHERE event_id = ? AND match_signature = ?
+        """,
+        (event_id, match_signature),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["dry_run"] = bool(payload.get("dry_run"))
+    return payload
+
+
+def get_monitoring_keyword_notification_by_event_key(
+    connection: sqlite3.Connection,
+    event_key: str,
+) -> dict | None:
+    normalized_key = str(event_key or "").strip()
+    if not normalized_key:
+        return None
+    cursor = connection.execute(
+        """
+        SELECT id, event_id, event_key, match_signature, match_keywords_json, status, dry_run,
+               response_json, error_message, sent_at, created_at, updated_at
+        FROM monitoring_keyword_notifications
+        WHERE event_key = ? AND status = 'sent' AND dry_run = 0
+        ORDER BY datetime(updated_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (normalized_key,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["dry_run"] = bool(payload.get("dry_run"))
+    return payload
+
+
+def list_monitoring_keyword_notifications(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, event_id, event_key, match_signature, match_keywords_json, status, dry_run,
+               response_json, error_message, sent_at, created_at, updated_at
+        FROM monitoring_keyword_notifications
+        ORDER BY datetime(updated_at) DESC, id DESC
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["dry_run"] = bool(payload.get("dry_run"))
+        rows.append(payload)
+    return rows
+
+
+def upsert_monitoring_keyword_notification(connection: sqlite3.Connection, payload: dict) -> None:
+    connection.execute(
+        """
+        INSERT INTO monitoring_keyword_notifications (
+            event_id, event_key, match_signature, match_keywords_json, status, dry_run,
+            response_json, error_message, sent_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_id, match_signature) DO UPDATE SET
+            event_key = excluded.event_key,
+            match_keywords_json = excluded.match_keywords_json,
+            status = excluded.status,
+            dry_run = excluded.dry_run,
+            response_json = excluded.response_json,
+            error_message = excluded.error_message,
+            sent_at = excluded.sent_at,
+            updated_at = excluded.updated_at
+        """,
+        (
+            str(payload.get("event_id") or "").strip(),
+            str(payload.get("event_key") or "").strip(),
+            str(payload.get("match_signature") or "").strip(),
+            str(payload.get("match_keywords_json") or "[]"),
+            str(payload.get("status") or "").strip(),
+            int(bool(payload.get("dry_run"))),
+            str(payload.get("response_json") or "{}"),
+            str(payload.get("error_message") or ""),
+            payload.get("sent_at"),
+            str(payload.get("created_at") or ""),
+            str(payload.get("updated_at") or ""),
+        ),
+    )
+
+
+def list_platform_sessions(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, platform, account_label, login_url, homepage_url, requires_login, status,
+               storage_state_path, last_verified_at, expires_hint, last_error, metadata_json, updated_at
+        FROM platform_sessions
+        ORDER BY platform
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["requires_login"] = bool(payload.get("requires_login"))
+        rows.append(payload)
+    return rows
+
+
+def get_platform_session(connection: sqlite3.Connection, platform: str) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, platform, account_label, login_url, homepage_url, requires_login, status,
+               storage_state_path, last_verified_at, expires_hint, last_error, metadata_json, updated_at
+        FROM platform_sessions
+        WHERE platform = ?
+        """,
+        (str(platform or "").strip(),),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["requires_login"] = bool(payload.get("requires_login"))
+    return payload
+
+
+def upsert_platform_session(connection: sqlite3.Connection, payload: dict) -> int:
+    platform = str(payload.get("platform") or "").strip()
+    if not platform:
+        raise ValueError("platform is required")
+    existing = get_platform_session(connection, platform)
+    values = (
+        str(payload.get("account_label") or "").strip(),
+        str(payload.get("login_url") or "").strip(),
+        str(payload.get("homepage_url") or "").strip(),
+        int(bool(payload.get("requires_login"))),
+        str(payload.get("status") or "").strip() or "unknown",
+        str(payload.get("storage_state_path") or "").strip(),
+        payload.get("last_verified_at"),
+        str(payload.get("expires_hint") or "").strip(),
+        str(payload.get("last_error") or "").strip(),
+        str(payload.get("metadata_json") or "{}"),
+        str(payload.get("updated_at") or "").strip(),
+    )
+    if existing is not None:
+        connection.execute(
+            """
+            UPDATE platform_sessions
+            SET account_label = ?, login_url = ?, homepage_url = ?, requires_login = ?, status = ?,
+                storage_state_path = ?, last_verified_at = ?, expires_hint = ?, last_error = ?,
+                metadata_json = ?, updated_at = ?
+            WHERE platform = ?
+            """,
+            (*values, platform),
+        )
+        return int(existing["id"])
+    cursor = connection.execute(
+        """
+        INSERT INTO platform_sessions (
+            platform, account_label, login_url, homepage_url, requires_login, status,
+            storage_state_path, last_verified_at, expires_hint, last_error, metadata_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (platform, *values),
+    )
+    return int(cursor.lastrowid)
+
+
+def delete_platform_session(connection: sqlite3.Connection, platform: str) -> None:
+    connection.execute("DELETE FROM platform_sessions WHERE platform = ?", (str(platform or "").strip(),))
+
+
+def list_exposure_watchlists(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, name, organization_name, enabled, notes, metadata_json, created_at, updated_at
+        FROM exposure_watchlists
+        ORDER BY updated_at DESC, id DESC
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        payload["metadata_json"] = str(payload.get("metadata_json") or "{}")
+        rows.append(payload)
+    return rows
+
+
+def get_exposure_watchlist(connection: sqlite3.Connection, watchlist_id: int) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, name, organization_name, enabled, notes, metadata_json, created_at, updated_at
+        FROM exposure_watchlists
+        WHERE id = ?
+        """,
+        (int(watchlist_id),),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["enabled"] = bool(payload.get("enabled"))
+    payload["metadata_json"] = str(payload.get("metadata_json") or "{}")
+    return payload
+
+
+def upsert_exposure_watchlist(connection: sqlite3.Connection, payload: dict) -> int:
+    watchlist_id = payload.get("id")
+    values = (
+        str(payload.get("name") or "").strip(),
+        str(payload.get("organization_name") or "").strip(),
+        int(bool(payload.get("enabled", True))),
+        str(payload.get("notes") or "").strip(),
+        str(payload.get("metadata_json") or "{}"),
+        str(payload.get("created_at") or "").strip(),
+        str(payload.get("updated_at") or "").strip(),
+    )
+    if not values[0]:
+        raise ValueError("watchlist name is required")
+    if not values[1]:
+        raise ValueError("organization_name is required")
+    if watchlist_id:
+        connection.execute(
+            """
+            UPDATE exposure_watchlists
+            SET name = ?, organization_name = ?, enabled = ?, notes = ?, metadata_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (values[0], values[1], values[2], values[3], values[4], values[6], int(watchlist_id)),
+        )
+        return int(watchlist_id)
+    cursor = connection.execute(
+        """
+        INSERT INTO exposure_watchlists (
+            name, organization_name, enabled, notes, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
+    return int(cursor.lastrowid)
+
+
+def list_exposure_watch_terms(connection: sqlite3.Connection, watchlist_id: int | None = None) -> list[dict]:
+    if watchlist_id is None:
+        cursor = connection.execute(
+            """
+            SELECT id, watchlist_id, term, term_type, weight, enabled, created_at, updated_at
+            FROM exposure_watch_terms
+            ORDER BY watchlist_id, weight DESC, term
+            """
+        )
+    else:
+        cursor = connection.execute(
+            """
+            SELECT id, watchlist_id, term, term_type, weight, enabled, created_at, updated_at
+            FROM exposure_watch_terms
+            WHERE watchlist_id = ?
+            ORDER BY weight DESC, term
+            """,
+            (int(watchlist_id),),
+        )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        rows.append(payload)
+    return rows
+
+
+def replace_exposure_watch_terms(connection: sqlite3.Connection, watchlist_id: int, rows: list[dict]) -> None:
+    connection.execute("DELETE FROM exposure_watch_terms WHERE watchlist_id = ?", (int(watchlist_id),))
+    if not rows:
+        return
+    connection.executemany(
+        """
+        INSERT INTO exposure_watch_terms (
+            watchlist_id, term, term_type, weight, enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                int(watchlist_id),
+                str(row.get("term") or "").strip(),
+                str(row.get("term_type") or "").strip() or "custom",
+                int(row.get("weight") or 0),
+                int(bool(row.get("enabled", True))),
+                str(row.get("created_at") or ""),
+                str(row.get("updated_at") or ""),
+            )
+            for row in rows
+            if str(row.get("term") or "").strip()
+        ],
+    )
+
+
+def get_document_hit(connection: sqlite3.Connection, hit_id: int) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, watchlist_id, platform, platform_type, discovery_source, canonical_url, normalized_title,
+               title, access_state, confidence_score, risk_score, severity, review_status,
+               matched_terms_json, file_count, evidence_count, share_owner, disclosure_time,
+               first_seen_at, last_seen_at, last_snapshot_id, raw_json
+        FROM document_hits
+        WHERE id = ?
+        """,
+        (int(hit_id),),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_document_hits(
+    connection: sqlite3.Connection,
+    *,
+    watchlist_id: int | None = None,
+    review_status: str | None = None,
+    platform: str | None = None,
+    access_state: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    where_parts = []
+    params: list[object] = []
+    if watchlist_id is not None:
+        where_parts.append("h.watchlist_id = ?")
+        params.append(int(watchlist_id))
+    if review_status:
+        where_parts.append("h.review_status = ?")
+        params.append(str(review_status).strip())
+    if platform:
+        where_parts.append("h.platform = ?")
+        params.append(str(platform).strip())
+    if access_state:
+        where_parts.append("h.access_state = ?")
+        params.append(str(access_state).strip())
+    where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    cursor = connection.execute(
+        f"""
+        SELECT h.id, h.watchlist_id, h.platform, h.platform_type, h.discovery_source, h.canonical_url,
+               h.normalized_title, h.title, h.access_state, h.confidence_score, h.risk_score,
+               h.severity, h.review_status, h.matched_terms_json, h.file_count, h.evidence_count,
+               h.share_owner, h.disclosure_time, h.first_seen_at, h.last_seen_at, h.last_snapshot_id,
+               h.raw_json, w.name AS watchlist_name, w.organization_name
+        FROM document_hits h
+        JOIN exposure_watchlists w
+          ON w.id = h.watchlist_id
+        {where_clause}
+        ORDER BY h.risk_score DESC, datetime(h.last_seen_at) DESC, h.id DESC
+        {limit_clause}
+        """,
+        tuple(params),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
+    signature = (
+        int(payload.get("watchlist_id") or 0),
+        str(payload.get("platform") or "").strip(),
+        str(payload.get("canonical_url") or "").strip(),
+        str(payload.get("normalized_title") or "").strip(),
+    )
+    if not signature[0] or not signature[1] or not signature[2] or not signature[3]:
+        raise ValueError("watchlist_id, platform, canonical_url, and normalized_title are required")
+    cursor = connection.execute(
+        """
+        SELECT id, first_seen_at
+        FROM document_hits
+        WHERE watchlist_id = ? AND platform = ? AND canonical_url = ? AND normalized_title = ?
+        """,
+        signature,
+    )
+    row = cursor.fetchone()
+    values = (
+        str(payload.get("platform_type") or "").strip() or "document_library",
+        str(payload.get("discovery_source") or "").strip(),
+        str(payload.get("title") or "").strip(),
+        str(payload.get("access_state") or "").strip() or "unknown",
+        int(payload.get("confidence_score") or 0),
+        int(payload.get("risk_score") or 0),
+        str(payload.get("severity") or "").strip() or "low",
+        str(payload.get("review_status") or "").strip() or "new",
+        str(payload.get("matched_terms_json") or "[]"),
+        int(payload.get("file_count") or 0),
+        int(payload.get("evidence_count") or 0),
+        str(payload.get("share_owner") or "").strip(),
+        payload.get("disclosure_time"),
+        str(payload.get("last_seen_at") or ""),
+        payload.get("last_snapshot_id"),
+        str(payload.get("raw_json") or "{}"),
+    )
+    if row is not None:
+        connection.execute(
+            """
+            UPDATE document_hits
+            SET platform_type = ?, discovery_source = ?, title = ?, access_state = ?, confidence_score = ?,
+                risk_score = ?, severity = ?, review_status = ?, matched_terms_json = ?, file_count = ?,
+                evidence_count = ?, share_owner = ?, disclosure_time = ?, last_seen_at = ?,
+                last_snapshot_id = ?, raw_json = ?
+            WHERE id = ?
+            """,
+            (*values, int(row["id"])),
+        )
+        return int(row["id"])
+    cursor = connection.execute(
+        """
+        INSERT INTO document_hits (
+            watchlist_id, platform, platform_type, discovery_source, canonical_url, normalized_title, title,
+            access_state, confidence_score, risk_score, severity, review_status, matched_terms_json,
+            file_count, evidence_count, share_owner, disclosure_time, first_seen_at, last_seen_at,
+            last_snapshot_id, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signature[0],
+            signature[1],
+            values[0],
+            values[1],
+            signature[2],
+            signature[3],
+            values[2],
+            values[3],
+            values[4],
+            values[5],
+            values[6],
+            values[7],
+            values[8],
+            values[9],
+            values[10],
+            values[11],
+            values[12],
+            str(payload.get("first_seen_at") or values[13]),
+            values[13],
+            values[14],
+            values[15],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def insert_document_hit_snapshot(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO document_hit_snapshots (
+            hit_id, fetched_at, source_query, source_url, page_url, page_title, html_path, screenshot_path,
+            ocr_text, preview_text, file_list_json, access_state, matched_terms_json, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload.get("hit_id") or 0),
+            str(payload.get("fetched_at") or ""),
+            str(payload.get("source_query") or ""),
+            str(payload.get("source_url") or ""),
+            str(payload.get("page_url") or ""),
+            str(payload.get("page_title") or ""),
+            str(payload.get("html_path") or ""),
+            str(payload.get("screenshot_path") or ""),
+            str(payload.get("ocr_text") or ""),
+            str(payload.get("preview_text") or ""),
+            str(payload.get("file_list_json") or "[]"),
+            str(payload.get("access_state") or "").strip() or "unknown",
+            str(payload.get("matched_terms_json") or "[]"),
+            str(payload.get("raw_json") or "{}"),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_document_hit_snapshots(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, hit_id, fetched_at, source_query, source_url, page_url, page_title, html_path, screenshot_path,
+               ocr_text, preview_text, file_list_json, access_state, matched_terms_json, raw_json
+        FROM document_hit_snapshots
+        WHERE hit_id = ?
+        ORDER BY datetime(fetched_at) DESC, id DESC
+        """,
+        (int(hit_id),),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def update_document_hit_last_snapshot(connection: sqlite3.Connection, hit_id: int, snapshot_id: int) -> None:
+    connection.execute(
+        "UPDATE document_hits SET last_snapshot_id = ?, evidence_count = evidence_count + 1 WHERE id = ?",
+        (int(snapshot_id), int(hit_id)),
+    )
+
+
+def add_document_hit_review(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO document_hit_reviews (hit_id, status, reviewer, note, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload.get("hit_id") or 0),
+            str(payload.get("status") or "").strip() or "triaged",
+            str(payload.get("reviewer") or "").strip(),
+            str(payload.get("note") or ""),
+            str(payload.get("created_at") or ""),
+        ),
+    )
+    connection.execute(
+        "UPDATE document_hits SET review_status = ? WHERE id = ?",
+        (str(payload.get("status") or "").strip() or "triaged", int(payload.get("hit_id") or 0)),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_document_hit_reviews(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, hit_id, status, reviewer, note, created_at
+        FROM document_hit_reviews
+        WHERE hit_id = ?
+        ORDER BY datetime(created_at) DESC, id DESC
+        """,
+        (int(hit_id),),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def insert_exposure_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO exposure_scan_runs (
+            watchlist_id, source_families_json, requested_terms_json, candidate_count,
+            hit_count, error_count, status, errors_json, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload.get("watchlist_id") or 0),
+            str(payload.get("source_families_json") or "[]"),
+            str(payload.get("requested_terms_json") or "[]"),
+            int(payload.get("candidate_count") or 0),
+            int(payload.get("hit_count") or 0),
+            int(payload.get("error_count") or 0),
+            str(payload.get("status") or "").strip() or "succeeded",
+            str(payload.get("errors_json") or "[]"),
+            str(payload.get("started_at") or ""),
+            str(payload.get("finished_at") or ""),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_exposure_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None = None, limit: int | None = 100) -> list[dict]:
+    params: list[object] = []
+    where_clause = ""
+    if watchlist_id is not None:
+        where_clause = "WHERE r.watchlist_id = ?"
+        params.append(int(watchlist_id))
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    cursor = connection.execute(
+        f"""
+        SELECT r.id, r.watchlist_id, r.source_families_json, r.requested_terms_json,
+               r.candidate_count, r.hit_count, r.error_count, r.status, r.errors_json,
+               r.started_at, r.finished_at, w.name AS watchlist_name, w.organization_name
+        FROM exposure_scan_runs r
+        JOIN exposure_watchlists w
+          ON w.id = r.watchlist_id
+        {where_clause}
+        ORDER BY datetime(r.finished_at) DESC, r.id DESC
+        {limit_clause}
+        """,
+        tuple(params),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def list_code_watchlists(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, name, organization_name, enabled, notes, metadata_json, created_at, updated_at
+        FROM code_watchlists
+        ORDER BY updated_at DESC, id DESC
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        payload["metadata_json"] = str(payload.get("metadata_json") or "{}")
+        rows.append(payload)
+    return rows
+
+
+def get_code_watchlist(connection: sqlite3.Connection, watchlist_id: int) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, name, organization_name, enabled, notes, metadata_json, created_at, updated_at
+        FROM code_watchlists
+        WHERE id = ?
+        """,
+        (int(watchlist_id),),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["enabled"] = bool(payload.get("enabled"))
+    payload["metadata_json"] = str(payload.get("metadata_json") or "{}")
+    return payload
+
+
+def upsert_code_watchlist(connection: sqlite3.Connection, payload: dict) -> int:
+    watchlist_id = payload.get("id")
+    values = (
+        str(payload.get("name") or "").strip(),
+        str(payload.get("organization_name") or "").strip(),
+        int(bool(payload.get("enabled", True))),
+        str(payload.get("notes") or ""),
+        str(payload.get("metadata_json") or "{}"),
+        str(payload.get("created_at") or ""),
+        str(payload.get("updated_at") or ""),
+    )
+    if watchlist_id:
+        connection.execute(
+            """
+            UPDATE code_watchlists
+            SET name = ?, organization_name = ?, enabled = ?, notes = ?, metadata_json = ?, created_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (*values, int(watchlist_id)),
+        )
+        return int(watchlist_id)
+    cursor = connection.execute(
+        """
+        INSERT INTO code_watchlists (
+            name, organization_name, enabled, notes, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        values,
+    )
+    return int(cursor.lastrowid)
+
+
+def list_code_watch_terms(connection: sqlite3.Connection, watchlist_id: int) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, watchlist_id, term, term_type, weight, enabled, created_at, updated_at
+        FROM code_watch_terms
+        WHERE watchlist_id = ?
+        ORDER BY enabled DESC, term
+        """,
+        (int(watchlist_id),),
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        rows.append(payload)
+    return rows
+
+
+def replace_code_watch_terms(connection: sqlite3.Connection, watchlist_id: int, rows: list[dict]) -> None:
+    connection.execute("DELETE FROM code_watch_terms WHERE watchlist_id = ?", (int(watchlist_id),))
+    if not rows:
+        return
+    connection.executemany(
+        """
+        INSERT INTO code_watch_terms (
+            watchlist_id, term, term_type, weight, enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                int(watchlist_id),
+                str(row.get("term") or "").strip(),
+                str(row.get("term_type") or "").strip() or "custom",
+                int(row.get("weight") or 0),
+                int(bool(row.get("enabled", True))),
+                str(row.get("created_at") or ""),
+                str(row.get("updated_at") or ""),
+            )
+            for row in rows
+            if str(row.get("term") or "").strip()
+        ],
+    )
+
+
+def get_code_hit(connection: sqlite3.Connection, hit_id: int) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, watchlist_id, platform, repository_name, repository_owner, repository_url, file_path,
+               branch, file_url, visibility, language, sensitive_type, matched_rule, matched_term,
+               risk_score, severity, review_status, evidence_count, first_seen_at, last_seen_at,
+               last_snapshot_id, raw_json
+        FROM code_hits
+        WHERE id = ?
+        """,
+        (int(hit_id),),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_code_hits(
+    connection: sqlite3.Connection,
+    *,
+    watchlist_id: int | None = None,
+    review_status: str | None = None,
+    platform: str | None = None,
+    sensitive_type: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    where_parts = []
+    params: list[object] = []
+    if watchlist_id is not None:
+        where_parts.append("h.watchlist_id = ?")
+        params.append(int(watchlist_id))
+    if review_status:
+        where_parts.append("h.review_status = ?")
+        params.append(str(review_status).strip())
+    if platform:
+        where_parts.append("h.platform = ?")
+        params.append(str(platform).strip())
+    if sensitive_type:
+        where_parts.append("h.sensitive_type = ?")
+        params.append(str(sensitive_type).strip())
+    where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    cursor = connection.execute(
+        f"""
+        SELECT h.id, h.watchlist_id, h.platform, h.repository_name, h.repository_owner, h.repository_url,
+               h.file_path, h.branch, h.file_url, h.visibility, h.language, h.sensitive_type, h.matched_rule,
+               h.matched_term, h.risk_score, h.severity, h.review_status, h.evidence_count, h.first_seen_at,
+               h.last_seen_at, h.last_snapshot_id, h.raw_json, w.name AS watchlist_name, w.organization_name
+        FROM code_hits h
+        JOIN code_watchlists w
+          ON w.id = h.watchlist_id
+        {where_clause}
+        ORDER BY h.risk_score DESC, datetime(h.last_seen_at) DESC, h.id DESC
+        {limit_clause}
+        """,
+        tuple(params),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
+    signature = (
+        int(payload.get("watchlist_id") or 0),
+        str(payload.get("platform") or "").strip(),
+        str(payload.get("file_url") or "").strip(),
+        str(payload.get("sensitive_type") or "").strip(),
+        str(payload.get("matched_term") or "").strip(),
+    )
+    if not all(signature):
+        raise ValueError("watchlist_id, platform, file_url, sensitive_type, and matched_term are required")
+    cursor = connection.execute(
+        """
+        SELECT id
+        FROM code_hits
+        WHERE watchlist_id = ? AND platform = ? AND file_url = ? AND sensitive_type = ? AND matched_term = ?
+        """,
+        signature,
+    )
+    row = cursor.fetchone()
+    values = (
+        str(payload.get("repository_name") or "").strip(),
+        str(payload.get("repository_owner") or "").strip(),
+        str(payload.get("repository_url") or "").strip(),
+        str(payload.get("file_path") or "").strip(),
+        str(payload.get("branch") or "").strip(),
+        str(payload.get("visibility") or "").strip() or "public",
+        str(payload.get("language") or "").strip(),
+        str(payload.get("matched_rule") or "").strip(),
+        int(payload.get("risk_score") or 0),
+        str(payload.get("severity") or "").strip() or "low",
+        str(payload.get("review_status") or "").strip() or "new",
+        int(payload.get("evidence_count") or 0),
+        str(payload.get("last_seen_at") or ""),
+        payload.get("last_snapshot_id"),
+        str(payload.get("raw_json") or "{}"),
+    )
+    if row is not None:
+        connection.execute(
+            """
+            UPDATE code_hits
+            SET repository_name = ?, repository_owner = ?, repository_url = ?, file_path = ?, branch = ?,
+                visibility = ?, language = ?, matched_rule = ?, risk_score = ?, severity = ?, review_status = ?,
+                evidence_count = ?, last_seen_at = ?, last_snapshot_id = ?, raw_json = ?
+            WHERE id = ?
+            """,
+            (*values, int(row["id"])),
+        )
+        return int(row["id"])
+    cursor = connection.execute(
+        """
+        INSERT INTO code_hits (
+            watchlist_id, platform, repository_name, repository_owner, repository_url, file_path, branch,
+            file_url, visibility, language, sensitive_type, matched_rule, matched_term, risk_score, severity,
+            review_status, evidence_count, first_seen_at, last_seen_at, last_snapshot_id, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signature[0],
+            signature[1],
+            values[0],
+            values[1],
+            values[2],
+            values[3],
+            values[4],
+            signature[2],
+            values[5],
+            values[6],
+            signature[3],
+            values[7],
+            signature[4],
+            values[8],
+            values[9],
+            values[10],
+            values[11],
+            str(payload.get("first_seen_at") or values[12]),
+            values[12],
+            values[13],
+            values[14],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def insert_code_hit_snapshot(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO code_hit_snapshots (
+            hit_id, fetched_at, search_url, page_url, html_path, screenshot_path, code_fragment, masked_fragment,
+            raw_artifact_path, line_start, line_end, language, findings_json, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload.get("hit_id") or 0),
+            str(payload.get("fetched_at") or ""),
+            str(payload.get("search_url") or ""),
+            str(payload.get("page_url") or ""),
+            str(payload.get("html_path") or ""),
+            str(payload.get("screenshot_path") or ""),
+            str(payload.get("code_fragment") or ""),
+            str(payload.get("masked_fragment") or ""),
+            str(payload.get("raw_artifact_path") or ""),
+            int(payload.get("line_start") or 0),
+            int(payload.get("line_end") or 0),
+            str(payload.get("language") or ""),
+            str(payload.get("findings_json") or "[]"),
+            str(payload.get("raw_json") or "{}"),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_code_hit_snapshots(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, hit_id, fetched_at, search_url, page_url, html_path, screenshot_path, code_fragment,
+               masked_fragment, raw_artifact_path, line_start, line_end, language, findings_json, raw_json
+        FROM code_hit_snapshots
+        WHERE hit_id = ?
+        ORDER BY datetime(fetched_at) DESC, id DESC
+        """,
+        (int(hit_id),),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def update_code_hit_last_snapshot(connection: sqlite3.Connection, hit_id: int, snapshot_id: int) -> None:
+    connection.execute(
+        "UPDATE code_hits SET last_snapshot_id = ?, evidence_count = evidence_count + 1 WHERE id = ?",
+        (int(snapshot_id), int(hit_id)),
+    )
+
+
+def add_code_hit_review(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO code_hit_reviews (hit_id, status, reviewer, note, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload.get("hit_id") or 0),
+            str(payload.get("status") or "").strip() or "triaged",
+            str(payload.get("reviewer") or "").strip(),
+            str(payload.get("note") or ""),
+            str(payload.get("created_at") or ""),
+        ),
+    )
+    connection.execute(
+        "UPDATE code_hits SET review_status = ? WHERE id = ?",
+        (str(payload.get("status") or "").strip() or "triaged", int(payload.get("hit_id") or 0)),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_code_hit_reviews(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, hit_id, status, reviewer, note, created_at
+        FROM code_hit_reviews
+        WHERE hit_id = ?
+        ORDER BY datetime(created_at) DESC, id DESC
+        """,
+        (int(hit_id),),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def insert_code_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO code_scan_runs (
+            watchlist_id, platforms_json, requested_terms_json, candidate_count, hit_count,
+            error_count, status, errors_json, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload.get("watchlist_id") or 0),
+            str(payload.get("platforms_json") or "[]"),
+            str(payload.get("requested_terms_json") or "[]"),
+            int(payload.get("candidate_count") or 0),
+            int(payload.get("hit_count") or 0),
+            int(payload.get("error_count") or 0),
+            str(payload.get("status") or "").strip() or "succeeded",
+            str(payload.get("errors_json") or "[]"),
+            str(payload.get("started_at") or ""),
+            str(payload.get("finished_at") or ""),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_code_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None = None, limit: int | None = 100) -> list[dict]:
+    params: list[object] = []
+    where_clause = ""
+    if watchlist_id is not None:
+        where_clause = "WHERE r.watchlist_id = ?"
+        params.append(int(watchlist_id))
+    limit_clause = f"LIMIT {int(limit)}" if limit else ""
+    cursor = connection.execute(
+        f"""
+        SELECT r.id, r.watchlist_id, r.platforms_json, r.requested_terms_json, r.candidate_count,
+               r.hit_count, r.error_count, r.status, r.errors_json, r.started_at, r.finished_at,
+               w.name AS watchlist_name, w.organization_name
+        FROM code_scan_runs r
+        JOIN code_watchlists w
+          ON w.id = r.watchlist_id
+        {where_clause}
+        ORDER BY datetime(r.finished_at) DESC, r.id DESC
+        {limit_clause}
+        """,
+        tuple(params),
+    )
+    return [dict(row) for row in cursor.fetchall()]

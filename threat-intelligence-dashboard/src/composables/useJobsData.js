@@ -7,6 +7,19 @@ const jobsData = ref({
   failed_jobs_24h: 0,
   recent_failures: [],
   site_health: [],
+  browser_runtime: {
+    browser_queue: 'browser_render',
+    browser_concurrency: 2,
+    browser_worker_count: 0,
+    browser_worker_names: [],
+    local_process_pool: {
+      max_workers: 2,
+      running_or_pending: 0,
+      job_ids: [],
+    },
+    worker_queues: [],
+    worker_counts: {},
+  },
   updated_at: '',
 })
 const loading = ref(false)

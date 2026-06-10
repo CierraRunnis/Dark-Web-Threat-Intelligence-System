@@ -13,8 +13,11 @@ node_modules/
 dist/
 threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
+threat-intelligence-dashboard/.npm-cache/
+threat-intelligence-dashboard/.codex-vite.log
 
 # Runtime data and crawler artifacts
+darkweb_collector/.runtime/
 darkweb_collector/data/
 darkweb_collector/output/
 darkweb_collector/C*/
@@ -22,6 +25,8 @@ darkweb_collector/C*/
 # OS / editor
 .DS_Store
 Thumbs.db
+.codex-backups/
+_tmp_kaiti_report.txt
 
 # Archives and downloads
 *.tar.gz
