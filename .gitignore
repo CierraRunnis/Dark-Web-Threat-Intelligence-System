@@ -13,8 +13,6 @@ node_modules/
 dist/
 threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
-threat-intelligence-dashboard/.npm-cache/
-threat-intelligence-dashboard/.codex-vite.log
 
 # Runtime data and crawler artifacts
 darkweb_collector/.runtime/

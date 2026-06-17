@@ -18,6 +18,11 @@ export function useCodeMonitoringApi() {
     loadSessions() {
       return requestJson('/api/platform-sessions?module=code_monitoring')
     },
+    autoDetectSessions() {
+      return requestJson('/api/platform-sessions/auto-detect?module=code_monitoring', {
+        method: 'POST',
+      })
+    },
     launchLogin(platform) {
       return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/launch-login`, {
         method: 'POST',
@@ -50,6 +55,11 @@ export function useCodeMonitoringApi() {
         body: JSON.stringify(payload),
       })
     },
+    deleteWatchlist(watchlistId) {
+      return requestJson(`/api/code-monitoring/watchlists/${watchlistId}`, {
+        method: 'DELETE',
+      })
+    },
     runScan(watchlistId, payload) {
       return requestJson(`/api/code-monitoring/watchlists/${watchlistId}/scan`, {
         method: 'POST',
@@ -63,12 +73,37 @@ export function useCodeMonitoringApi() {
         limit: params.limit,
       })}`)
     },
+    loadContinuousStatus(params = {}) {
+      return requestJson(`/api/code-monitoring/continuous-status${buildQuery({
+        watchlist_id: params.watchlistId,
+      })}`)
+    },
+    runContinuousOnce() {
+      return requestJson('/api/code-monitoring/continuous/run', {
+        method: 'POST',
+      })
+    },
+    startContinuous(payload) {
+      return requestJson('/api/code-monitoring/continuous/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    },
+    stopContinuous(payload) {
+      return requestJson('/api/code-monitoring/continuous/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    },
     loadHits(params = {}) {
       return requestJson(`/api/code-monitoring/hits${buildQuery({
         watchlist_id: params.watchlistId,
         review_status: params.reviewStatus,
         platform: params.platform,
         sensitive_type: params.sensitiveType,
+        include_suppressed: params.includeSuppressed,
         limit: params.limit,
       })}`)
     },

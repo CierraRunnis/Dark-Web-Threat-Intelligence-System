@@ -5,21 +5,26 @@ from datetime import datetime, timedelta, timezone
 import base64
 from html import unescape
 from html.parser import HTMLParser
+from hashlib import sha1
 import json
 import logging
 from pathlib import Path
 import re
+import ssl
 from typing import Any
 from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from darkweb_collector.db import (
     add_code_hit_review,
+    delete_code_watchlist,
+    get_code_search_state,
     get_code_hit,
     get_code_watchlist,
     get_db_connection,
     insert_code_hit_snapshot,
     insert_code_scan_run,
+    list_code_search_states,
     list_code_hit_reviews,
     list_code_hit_snapshots,
     list_code_hits,
@@ -28,6 +33,7 @@ from darkweb_collector.db import (
     list_code_watchlists,
     replace_code_watch_terms,
     update_code_hit_last_snapshot,
+    upsert_code_search_state,
     upsert_code_hit,
     upsert_code_watchlist,
 )
@@ -44,7 +50,9 @@ SHANGHAI_TZ = timezone(timedelta(hours=8))
 DEFAULT_CODE_PLATFORMS = ["github", "gitlab", "gitee"]
 DEFAULT_FILE_EXTENSIONS = ["env", "yaml", "yml", "json", "ini", "conf", "properties", "py", "js", "ts", "java"]
 LEGACY_NARROW_FILE_EXTENSIONS = ["env", "yaml", "yml", "json"]
-DEFAULT_SEARCH_PAGE_LIMIT = 3
+DEFAULT_SEARCH_PAGE_LIMIT = 0
+DEFAULT_MAX_RESULTS_PER_TERM = 0
+UNLIMITED_SEARCH_PAGE_SAFETY_CAP = 50
 DEFAULT_RULE_KEYS = [
     "api_key",
     "token",
@@ -60,6 +68,16 @@ DEFAULT_CODE_TERMS = [
     {"term": "示例企业", "term_type": "company_name", "weight": 0, "enabled": True},
     {"term": "example.com", "term_type": "domain", "weight": 0, "enabled": True},
 ]
+DEFAULT_ENTERPRISE_PROFILE = {
+    "official_names": [],
+    "brand_aliases": [],
+    "english_aliases": [],
+    "root_domains": [],
+    "trusted_subdomain_patterns": [],
+    "internal_system_keywords": [],
+    "negative_aliases": [],
+    "short_alias_guard": [],
+}
 SEARCH_URL_TEMPLATES = {
     "github": "https://github.com/search?q={query}&type=code",
     "gitlab": "https://gitlab.com/search?search={query}&nav_source=navbar&type=blobs",
@@ -67,6 +85,18 @@ SEARCH_URL_TEMPLATES = {
 }
 GITEE_WIDGET_API_BASE = "https://so.gitee.com/v1"
 GITEE_REPO_SEARCH_WIDGET = "wong1slagnlmzwvsu5ya"
+GITEE_WIDGET_PAGE_SIZE = 20
+SEARCH_CHALLENGE_MARKERS: tuple[str, ...] = (
+    "安全验证码",
+    "独立验证",
+    "security verification",
+    "verify you are human",
+    "cf-challenge",
+    "please move your mouse or press a key",
+    "please wait while we verify",
+    "just a moment",
+)
+GITEE_WIDGET_MAX_OFFSET = 180
 REPO_FALLBACK_FILE_EXTENSIONS = [
     "env", "yaml", "yml", "json", "ini", "conf", "properties",
     "py", "js", "ts", "java", "go", "rb", "php", "sh", "toml", "xml", "txt", "csv",
@@ -146,6 +176,18 @@ def _parse_json(value: Any, default: Any) -> Any:
         return default
 
 
+def _is_access_limited_scan_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    markers = (
+        "login_required",
+        "captcha_or_security_verification",
+        "login_or_challenge_required",
+        "rate_limited",
+        "http_search_fetch_failed",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _watchlist_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
     data = _parse_json((payload or {}).get("metadata_json"), {})
     return data if isinstance(data, dict) else {}
@@ -176,12 +218,132 @@ def _normalize_code_file_extensions(value: Any) -> list[str]:
     return extensions
 
 
+def _normalize_profile_list(value: Any, *, lower: bool = False) -> list[str]:
+    return [item for item in _normalize_string_list(value, lower=lower, fallback=[]) if item]
+
+
+def _normalize_domain_value(value: str) -> str:
+    text = _normalize_text(value).lower().lstrip("@")
+    if text.startswith("*."):
+        text = text[2:]
+    while text.startswith("."):
+        text = text[1:]
+    return text
+
+
+def _domain_pattern_from_root(domain: str) -> str:
+    normalized = _normalize_domain_value(domain)
+    return f"*.{normalized}" if normalized else ""
+
+
+def _metadata_enterprise_profile(metadata: dict[str, Any] | None, *, organization_name: str = "", terms: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    profile_payload = ((metadata or {}).get("enterprise_profile") or {}) if isinstance(metadata, dict) else {}
+    profile_payload = profile_payload if isinstance(profile_payload, dict) else {}
+    term_rows = terms if isinstance(terms, list) else []
+
+    official_names = _normalize_profile_list(profile_payload.get("official_names"))
+    brand_aliases = _normalize_profile_list(profile_payload.get("brand_aliases"))
+    english_aliases = _normalize_profile_list(profile_payload.get("english_aliases"), lower=True)
+    root_domains = [_normalize_domain_value(item) for item in _normalize_profile_list(profile_payload.get("root_domains"), lower=True)]
+    trusted_subdomain_patterns = []
+    for item in _normalize_profile_list(profile_payload.get("trusted_subdomain_patterns"), lower=True):
+        normalized = _normalize_text(item).lower()
+        if normalized:
+            trusted_subdomain_patterns.append(normalized if normalized.startswith("*.") else _domain_pattern_from_root(normalized))
+    internal_system_keywords = _normalize_profile_list(profile_payload.get("internal_system_keywords"), lower=True)
+    negative_aliases = _normalize_profile_list(profile_payload.get("negative_aliases"), lower=True)
+    short_alias_guard = _normalize_profile_list(profile_payload.get("short_alias_guard"), lower=True)
+
+    if organization_name:
+        normalized_org = _normalize_text(organization_name)
+        if normalized_org and normalized_org not in official_names:
+            official_names.append(normalized_org)
+
+    for row in term_rows:
+        if not bool(row.get("enabled", True)):
+            continue
+        term = _normalize_text(row.get("term"))
+        term_type = _normalize_text(row.get("term_type"))
+        if not term:
+            continue
+        if term_type == "domain":
+            normalized_domain = _normalize_domain_value(term)
+            if normalized_domain and normalized_domain not in root_domains:
+                root_domains.append(normalized_domain)
+            pattern = _domain_pattern_from_root(normalized_domain)
+            if pattern and pattern not in trusted_subdomain_patterns:
+                trusted_subdomain_patterns.append(pattern)
+            continue
+        if term_type == "company_name":
+            if term not in official_names:
+                official_names.append(term)
+            continue
+        lowered_term = term.lower()
+        if re.search(r"[a-z]", lowered_term):
+            if lowered_term not in english_aliases:
+                english_aliases.append(lowered_term)
+            if len(re.sub(r"[^a-z0-9]", "", lowered_term)) <= 4 and lowered_term not in short_alias_guard:
+                short_alias_guard.append(lowered_term)
+        elif term not in brand_aliases:
+            brand_aliases.append(term)
+
+    for domain in list(root_domains):
+        pattern = _domain_pattern_from_root(domain)
+        if pattern and pattern not in trusted_subdomain_patterns:
+            trusted_subdomain_patterns.append(pattern)
+
+    return {
+        "official_names": official_names,
+        "brand_aliases": brand_aliases,
+        "english_aliases": english_aliases,
+        "root_domains": root_domains,
+        "trusted_subdomain_patterns": trusted_subdomain_patterns,
+        "internal_system_keywords": internal_system_keywords,
+        "negative_aliases": negative_aliases,
+        "short_alias_guard": short_alias_guard,
+    }
+
+
+def _watchlist_enterprise_profile(watchlist: dict[str, Any] | None, terms: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    metadata = _watchlist_metadata(watchlist or {})
+    return _metadata_enterprise_profile(
+        metadata,
+        organization_name=str((watchlist or {}).get("organization_name") or ""),
+        terms=terms,
+    )
+
+
+def _payload_enterprise_profile(payload: dict[str, Any] | None) -> dict[str, Any]:
+    profile_payload = ((payload or {}).get("enterprise_profile") or {}) if isinstance(payload, dict) else {}
+    return _metadata_enterprise_profile(
+        {"enterprise_profile": profile_payload},
+        organization_name=str((payload or {}).get("organization_name") or ""),
+        terms=list((payload or {}).get("terms") or []),
+    )
+
+
+def _enterprise_profile_enabled(profile: dict[str, Any] | None) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    return any(bool(profile.get(key)) for key in DEFAULT_ENTERPRISE_PROFILE)
+
+
 def _normalize_search_page_limit(value: Any) -> int:
     try:
-        limit = int(value or DEFAULT_SEARCH_PAGE_LIMIT)
+        limit = DEFAULT_SEARCH_PAGE_LIMIT if value is None or value == "" else int(value)
     except (TypeError, ValueError):
         limit = DEFAULT_SEARCH_PAGE_LIMIT
-    return max(1, min(limit, 10))
+    if limit <= 0:
+        return 0
+    return min(limit, UNLIMITED_SEARCH_PAGE_SAFETY_CAP)
+
+
+def _normalize_result_budget(value: Any) -> int:
+    try:
+        limit = DEFAULT_MAX_RESULTS_PER_TERM if value is None or value == "" else int(value)
+    except (TypeError, ValueError):
+        limit = DEFAULT_MAX_RESULTS_PER_TERM
+    return max(0, limit)
 
 
 def _code_output_root() -> Path:
@@ -190,8 +352,12 @@ def _code_output_root() -> Path:
     return path
 
 
+def _watchlist_output_root(watchlist_name: str) -> Path:
+    return _code_output_root() / safe_stem(watchlist_name, "watchlist")
+
+
 def _query_output_dir(watchlist_name: str, platform_key: str, term: str) -> Path:
-    base = _code_output_root() / safe_stem(watchlist_name, "watchlist") / safe_stem(platform_key, "platform") / safe_stem(term, "term")
+    base = _watchlist_output_root(watchlist_name) / safe_stem(platform_key, "platform") / safe_stem(term, "term")
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -210,6 +376,9 @@ def _load_storage_state_path(platform_key: str) -> str | None:
     row = rows.get(platform_key)
     if not row or not row.get("configured"):
         return None
+    raw_path = str(row.get("storage_state_path") or "").strip()
+    if raw_path and Path(raw_path).exists():
+        return raw_path
     path = platform_storage_state_path(platform_key)
     return str(path) if path.exists() else None
 
@@ -396,6 +565,8 @@ def _candidate_priority(candidate: dict[str, Any], enabled_rule_keys: list[str])
     file_path = str(candidate.get("filePath") or "").lower()
     snippet_text = str(candidate.get("snippetText") or "")
     hint_score = int(candidate.get("riskScoreHint") or 0)
+    query_priority_hint = int(candidate.get("queryPriorityHint") or 0)
+    novelty_hint = int(candidate.get("noveltyHint") or 0)
     score = 0
     if file_path.endswith(".env") or "/.env" in file_path:
         score += 80
@@ -410,7 +581,7 @@ def _candidate_priority(candidate: dict[str, Any], enabled_rule_keys: list[str])
         for marker in ("password", "secret", "token", "redis://", "db_host", "aws_secret_access_key", "jwt"):
             if marker in lowered:
                 score += 25
-    return max(score, hint_score)
+    return max(score, hint_score) + query_priority_hint + novelty_hint
 
 
 def _file_path_priority(file_path: str) -> int:
@@ -480,6 +651,77 @@ def _expanded_search_queries(term: str, enabled_rule_keys: list[str]) -> list[st
     return queries[:8]
 
 
+def _query_priority_bonus(query: str, term: str) -> int:
+    normalized_query = _normalize_text(query).lower()
+    normalized_term = _normalize_text(term).lower()
+    bonus = 0
+    if normalized_query.startswith("@"):
+        bonus += 45
+    if normalized_term and normalized_query != normalized_term:
+        bonus += 20
+    for marker in ("token", "password", "secret", "jwt", "redis", "database", "private key"):
+        if marker in normalized_query:
+            bonus += 12
+    return bonus
+
+
+def _domain_search_label(value: str) -> str:
+    normalized = _normalize_domain_value(value)
+    parts = [part for part in normalized.split(".") if part]
+    return parts[0] if parts else ""
+
+
+def _repo_seed_queries(term: str, term_type: str, enterprise_profile: dict[str, Any] | None = None) -> list[str]:
+    normalized_term = _normalize_text(term)
+    normalized_term_type = _normalize_text(term_type)
+    profile = enterprise_profile if isinstance(enterprise_profile, dict) else {}
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add_query(value: str) -> None:
+        text = _normalize_text(value)
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            queries.append(text)
+
+    add_query(normalized_term)
+    domain_like = "." in normalized_term and " " not in normalized_term
+    if normalized_term_type == "domain" or domain_like:
+        label = _domain_search_label(normalized_term)
+        if len(label) >= 2:
+            add_query(label)
+
+    for domain in profile.get("root_domains") or []:
+        add_query(str(domain))
+        label = _domain_search_label(str(domain))
+        if len(label) >= 2:
+            add_query(label)
+
+    for field_name in ("official_names", "brand_aliases", "english_aliases"):
+        for item in profile.get(field_name) or []:
+            add_query(str(item))
+            if len(queries) >= 8:
+                return queries[:8]
+    return queries[:8]
+
+
+def _effective_search_page_limit(search_page_limit: int) -> int:
+    return UNLIMITED_SEARCH_PAGE_SAFETY_CAP if int(search_page_limit or 0) <= 0 else int(search_page_limit)
+
+
+def _gitee_widget_max_pages() -> int:
+    return max(1, (GITEE_WIDGET_MAX_OFFSET // GITEE_WIDGET_PAGE_SIZE) + 1)
+
+
+def _candidate_evaluation_limit(max_results_per_term: int, search_page_limit: int) -> int | None:
+    base = int(max_results_per_term or 0)
+    pages = _effective_search_page_limit(search_page_limit)
+    if base <= 0:
+        return None
+    return min(200, max(12, base * pages * 4))
+
+
 def _search_page_url(platform_key: str, search_url: str, page: int) -> str:
     if page <= 1:
         return search_url
@@ -494,6 +736,149 @@ def _search_page_url(platform_key: str, search_url: str, page: int) -> str:
     else:
         return search_url
     return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _candidate_identity(candidate: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(candidate.get("repositoryUrl") or "").strip(),
+            str(candidate.get("branch") or "").strip(),
+            str(candidate.get("filePath") or "").strip(),
+            str(candidate.get("fileUrl") or "").strip(),
+        ]
+    )
+
+
+def _candidate_signature(candidates: list[dict[str, Any]]) -> str:
+    payload = [_candidate_identity(item) for item in candidates if _candidate_identity(item)]
+    return sha1(_json_dumps(payload).encode("utf-8")).hexdigest() if payload else ""
+
+
+def _candidate_keys(candidates: list[dict[str, Any]], limit: int = 200) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = _candidate_identity(item)
+        if key and key not in seen:
+            seen.add(key)
+            rows.append(key)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _candidate_keys_json(candidates: list[dict[str, Any]], limit: int = 200) -> str:
+    return _json_dumps(_candidate_keys(candidates, limit=limit))
+
+
+def _repository_urls(candidates: list[dict[str, Any]], limit: int = 200) -> list[str]:
+    payload: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        repo_url = str(item.get("repositoryUrl") or "").strip()
+        if repo_url and repo_url not in seen:
+            seen.add(repo_url)
+            payload.append(repo_url)
+        if len(payload) >= limit:
+            break
+    return payload
+
+
+def _repository_urls_json(candidates: list[dict[str, Any]], limit: int = 200) -> str:
+    return _json_dumps(_repository_urls(candidates, limit=limit))
+
+
+def _load_json_string_list(value: Any) -> list[str]:
+    rows = _parse_json(value, [])
+    return [str(item).strip() for item in rows if str(item).strip()] if isinstance(rows, list) else []
+
+
+def _merge_string_lists(current: list[str], previous: list[str], limit: int = 200) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for item in [*(current or []), *(previous or [])]:
+        text = _normalize_text(item)
+        if text and text not in seen:
+            seen.add(text)
+            rows.append(text)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _search_state_query_key(term: str, query: str) -> str:
+    normalized_term = _normalize_text(term).lower()
+    normalized_query = _normalize_text(query).lower()
+    if not normalized_query or normalized_query == normalized_term:
+        return "base"
+    digest = sha1(normalized_query.encode("utf-8")).hexdigest()[:16]
+    return f"query:{digest}"
+
+
+def _state_string_union(states: list[dict[str, Any]], field_name: str, limit: int = 200) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for state in states:
+        for item in _load_json_string_list((state or {}).get(field_name)):
+            if item and item not in seen:
+                seen.add(item)
+                rows.append(item)
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def _persist_search_state(
+    watchlist_id: int,
+    platform_key: str,
+    term: str,
+    query_key: str,
+    next_search_state: dict[str, Any] | None,
+    started_at: str,
+) -> None:
+    if not next_search_state:
+        return
+    now = _now_utc_iso()
+    with get_db_connection() as connection:
+        upsert_code_search_state(
+            connection,
+            {
+                "watchlist_id": int(watchlist_id),
+                "platform": platform_key,
+                "term": term,
+                "query_key": query_key,
+                "last_page_scanned": int(next_search_state.get("last_page_scanned") or 0),
+                "last_candidate_signature": next_search_state.get("last_candidate_signature") or "",
+                "last_candidate_keys_json": next_search_state.get("last_candidate_keys_json") or "[]",
+                "last_repository_urls_json": next_search_state.get("last_repository_urls_json") or "[]",
+                "last_run_started_at": started_at,
+                "last_run_finished_at": now,
+                "updated_at": now,
+            },
+        )
+        connection.commit()
+
+
+def _apply_incremental_hints(
+    candidates: list[dict[str, Any]],
+    *,
+    previous_candidate_keys: list[str],
+    previous_repository_urls: list[str],
+    new_page_bonus: int = 60,
+) -> list[dict[str, Any]]:
+    previous_key_set = set(previous_candidate_keys)
+    previous_repo_set = set(previous_repository_urls)
+    rows: list[dict[str, Any]] = []
+    for item in candidates:
+        key = _candidate_identity(item)
+        repo_url = str(item.get("repositoryUrl") or "").strip()
+        novelty = new_page_bonus
+        if key and key not in previous_key_set:
+            novelty += 30
+        if repo_url and repo_url not in previous_repo_set:
+            novelty += 20
+        rows.append({**item, "noveltyHint": novelty})
+    return rows
 
 
 def _parse_code_search_results(platform: ExposurePlatform, html: str, requested_url: str) -> list[dict[str, Any]]:
@@ -584,17 +969,136 @@ def _cookie_header_from_storage_state(storage_state_path: str | None, domain_fra
     return "; ".join(cookies)
 
 
-def _http_get_json(url: str, *, headers: dict[str, str], timeout: int = 60) -> Any:
-    request = Request(url, headers=headers)
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310
-        text = response.read().decode("utf-8", errors="replace")
-    return json.loads(text)
+def _exception_chain_messages(exc: Exception) -> list[str]:
+    messages: list[str] = []
+    seen: set[int] = set()
+    current: Exception | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = _normalize_text(current)
+        if text:
+            messages.append(text)
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, Exception) and id(reason) not in seen:
+            current = reason
+            continue
+        cause = getattr(current, "__cause__", None)
+        if isinstance(cause, Exception) and id(cause) not in seen:
+            current = cause
+            continue
+        context = getattr(current, "__context__", None)
+        if isinstance(context, Exception) and id(context) not in seen:
+            current = context
+            continue
+        current = None
+    return messages
 
 
-def _http_get_html(url: str, *, headers: dict[str, str], timeout: int = 60) -> str:
-    request = Request(url, headers=headers)
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return response.read().decode("utf-8", errors="replace")
+def _is_ssl_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, ssl.SSLError):
+        return True
+    lowered = " | ".join(_exception_chain_messages(exc)).lower()
+    markers = (
+        "ssl:",
+        "unexpected eof while reading",
+        "eof occurred in violation of protocol",
+        "tlsv1",
+        "wrong version number",
+        "decryption failed or bad record mac",
+        "sslv3",
+        "certificate verify failed",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _has_search_challenge_text(text: str, current_url: str = "") -> bool:
+    lowered = f"{text}\n{current_url}".lower()
+    return any(marker.lower() in lowered for marker in SEARCH_CHALLENGE_MARKERS)
+
+
+def _read_http_text(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int = 60,
+    platform_key: str = "",
+    retries: int = 1,
+) -> tuple[str, str]:
+    attempts = max(1, retries + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        request = Request(url, headers=headers)
+        try:
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310
+                text = response.read().decode("utf-8", errors="replace")
+                current_url = ""
+                try:
+                    current_url = str(response.geturl() or url)
+                except Exception:
+                    current_url = url
+                return text, current_url
+        except Exception as exc:
+            last_exc = exc
+            if _is_ssl_transport_error(exc) and attempt + 1 < attempts:
+                continue
+            if _is_ssl_transport_error(exc):
+                raise RuntimeError("ssl_transport_error") from exc
+            raise
+    if last_exc is not None:
+        raise last_exc
+    return "", url
+
+
+def _http_get_json(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int = 60,
+    platform_key: str = "",
+    retries: int = 1,
+) -> Any:
+    text, current_url = _read_http_text(
+        url,
+        headers=headers,
+        timeout=timeout,
+        platform_key=platform_key,
+        retries=retries,
+    )
+    if platform_key == "gitee" and _has_search_challenge_text(text, current_url):
+        raise RuntimeError("captcha_or_security_verification")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        if platform_key == "gitee" and ("<html" in text.lower() or _has_search_challenge_text(text, current_url)):
+            raise RuntimeError("captcha_or_security_verification") from exc
+        raise
+
+
+def _http_get_html(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int = 60,
+    platform_key: str = "",
+    retries: int = 1,
+) -> str:
+    text, _ = _read_http_text(
+        url,
+        headers=headers,
+        timeout=timeout,
+        platform_key=platform_key,
+        retries=retries,
+    )
+    return text
+
+
+def _is_repo_scan_blocker(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return "captcha_or_security_verification" in lowered or "ssl_transport_error" in lowered
+
+
+def _gitee_cookie_header() -> str:
+    return _cookie_header_from_storage_state(_load_storage_state_path("gitee"), "gitee.com")
 
 
 def _search_request_headers(platform_key: str, storage_state_path: str | None) -> dict[str, str]:
@@ -636,7 +1140,7 @@ def _gitlab_project_blob_search(repository_url: str, term: str, storage_state_pa
         headers["Cookie"] = cookie_header
     encoded_project = quote_plus(repo_path)
     api_url = f"https://gitlab.com/api/v4/projects/{encoded_project}/search?scope=blobs&search={quote_plus(term)}"
-    rows = _http_get_json(api_url, headers=headers, timeout=60)
+    rows = _http_get_json(api_url, headers=headers, timeout=60, platform_key="gitlab", retries=1)
     if not isinstance(rows, list):
         return []
     repository_owner = "/".join(parts[:-1])
@@ -674,7 +1178,7 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     for page in range(1, max(1, page_limit) + 1):
-        url = f"https://gitlab.com/api/v4/projects?search={quote_plus(term)}&simple=true&per_page=10&order_by=last_activity_at&sort=desc&page={page}"
+        url = f"https://gitlab.com/api/v4/projects?search={quote_plus(term)}&simple=true&per_page=50&order_by=last_activity_at&sort=desc&page={page}"
         rows = _http_get_json(
             url,
             headers={
@@ -682,6 +1186,8 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
                 "Accept": "application/json",
             },
             timeout=60,
+            platform_key="gitlab",
+            retries=1,
         )
         if not isinstance(rows, list) or not rows:
             break
@@ -689,6 +1195,7 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
         for item in rows:
             repo_url = _normalize_text(item.get("web_url"))
             path_with_namespace = _normalize_text(item.get("path_with_namespace"))
+            default_branch = _normalize_text(item.get("default_branch")) or "main"
             if not repo_url or not path_with_namespace or "/" not in path_with_namespace or repo_url in seen:
                 continue
             seen.add(repo_url)
@@ -700,6 +1207,9 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
                     "repositoryOwner": "/".join(parts[:-1]),
                     "repositoryName": parts[-1],
                     "repositoryUrl": repo_url,
+                    "projectId": item.get("id"),
+                    "pathWithNamespace": path_with_namespace,
+                    "branch": default_branch,
                 }
             )
             new_count += 1
@@ -708,20 +1218,207 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
     return results
 
 
+def _gitlab_project_ref(repo_candidate: dict[str, Any]) -> str:
+    project_id = repo_candidate.get("projectId")
+    if project_id not in (None, ""):
+        return quote_plus(str(project_id))
+    path_with_namespace = _normalize_text(repo_candidate.get("pathWithNamespace"))
+    if path_with_namespace:
+        return quote_plus(path_with_namespace)
+    repository_url = _normalize_text(repo_candidate.get("repositoryUrl"))
+    if not repository_url:
+        return ""
+    parsed = urlparse(repository_url)
+    repo_path = parsed.path.strip("/")
+    return quote_plus(repo_path) if repo_path else ""
+
+
+def _gitlab_repo_tree(repo_candidate: dict[str, Any], *, page_limit: int = 8) -> list[dict[str, Any]]:
+    project_ref = _gitlab_project_ref(repo_candidate)
+    branch = _normalize_text(repo_candidate.get("branch")) or "main"
+    if not project_ref:
+        return []
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    per_page = 100
+    for page in range(1, max(1, page_limit) + 1):
+        url = f"https://gitlab.com/api/v4/projects/{project_ref}/repository/tree?recursive=true&per_page={per_page}&page={page}"
+        if branch:
+            url = f"{url}&ref={quote_plus(branch)}"
+        rows = _http_get_json(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+            },
+            timeout=60,
+            platform_key="gitlab",
+            retries=1,
+        )
+        if not isinstance(rows, list) or not rows:
+            break
+        new_count = 0
+        for item in rows:
+            item_type = _normalize_text(item.get("type"))
+            file_path = _normalize_text(item.get("path"))
+            blob_id = _normalize_text(item.get("id"))
+            key = f"{item_type}|{file_path}|{blob_id}"
+            if not item_type or not file_path or key in seen:
+                continue
+            seen.add(key)
+            results.append(item)
+            new_count += 1
+        if len(rows) < per_page or new_count == 0:
+            break
+    return results
+
+
+def _gitlab_blob_content(repo_candidate: dict[str, Any], file_path: str) -> str:
+    project_ref = _gitlab_project_ref(repo_candidate)
+    branch = _normalize_text(repo_candidate.get("branch")) or "main"
+    if not project_ref or not file_path:
+        return ""
+    encoded_path = "/".join(quote_plus(part) for part in str(file_path or "").split("/"))
+    url = f"https://gitlab.com/api/v4/projects/{project_ref}/repository/files/{encoded_path}/raw"
+    if branch:
+        url = f"{url}?ref={quote_plus(branch)}"
+    try:
+        return _http_get_text(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/plain",
+            },
+            timeout=45,
+        )
+    except Exception:
+        return ""
+
+
+def _gitlab_repo_candidates_to_code_results(
+    repo_candidates: list[dict[str, Any]],
+    term: str,
+    extensions: list[str],
+    enabled_rule_keys: list[str],
+    max_results: int,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    first_issue = ""
+    effective_max = max_results if max_results > 0 else 60
+    for repo_candidate in repo_candidates[: min(16, max(8, effective_max))]:
+        owner = _normalize_text(repo_candidate.get("repositoryOwner"))
+        repo_name = _normalize_text(repo_candidate.get("repositoryName"))
+        repo_url = _normalize_text(repo_candidate.get("repositoryUrl"))
+        branch = _normalize_text(repo_candidate.get("branch")) or "main"
+        if not owner or not repo_name or not repo_url:
+            continue
+        try:
+            tree = _gitlab_repo_tree(repo_candidate, page_limit=8)
+        except Exception as exc:
+            if not first_issue:
+                first_issue = str(exc)
+            continue
+        candidate_paths = []
+        for item in tree:
+            file_path = _normalize_text(item.get("path"))
+            if item.get("type") != "blob" or not _matches_extension(file_path, extensions):
+                continue
+            candidate_paths.append((_file_path_priority(file_path), file_path))
+        candidate_paths.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        for _, file_path in candidate_paths[:40]:
+            dedupe_key = f"{repo_url}|{branch}|{file_path}"
+            if dedupe_key in seen:
+                continue
+            code_text = _gitlab_blob_content(repo_candidate, file_path)
+            if not code_text:
+                continue
+            classification = _classify_code_hit(term, file_path, code_text, enabled_rule_keys)
+            if not classification:
+                continue
+            seen.add(dedupe_key)
+            results.append(
+                {
+                    "platform": "gitlab",
+                    "platformLabel": "GitLab",
+                    "fileUrl": f"{repo_url}/-/blob/{branch}/{file_path}",
+                    "title": file_path,
+                    "repositoryOwner": owner,
+                    "repositoryName": repo_name,
+                    "repositoryUrl": repo_url,
+                    "branch": branch,
+                    "filePath": file_path,
+                    "lineStart": 0,
+                    "lineEnd": 0,
+                    "snippetText": code_text[:1200],
+                    "resultLayerHint": classification["result_layer"],
+                    "riskScoreHint": classification["risk_score"],
+                    "severityHint": classification["severity"],
+                }
+            )
+            if len(results) >= effective_max:
+                results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
+                return results
+    if not results and first_issue:
+        raise RuntimeError(first_issue)
+    results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
+    return results
+
+
 def _gitlab_repo_fallback_code_search(
     term: str,
     storage_state_path: str | None,
     extensions: list[str],
+    enabled_rule_keys: list[str],
     max_results: int,
+    query_terms: list[str] | None = None,
     page_limit: int = 1,
 ) -> list[dict[str, Any]]:
-    repos = _gitlab_repo_search(term, page_limit=page_limit)
+    repos: list[dict[str, Any]] = []
+    repo_seen: set[str] = set()
+    first_issue = ""
+    effective_max = max_results if max_results > 0 else 60
+    for query in query_terms or [term]:
+        try:
+            repo_rows = _gitlab_repo_search(query, page_limit=page_limit)
+        except Exception as exc:
+            if not first_issue:
+                first_issue = str(exc)
+            continue
+        for item in repo_rows:
+            repo_url = _normalize_text(item.get("repositoryUrl"))
+            if not repo_url or repo_url in repo_seen:
+                continue
+            repo_seen.add(repo_url)
+            repos.append(item)
+            if len(repos) >= max(12, effective_max * 2):
+                break
+        if len(repos) >= max(12, effective_max * 2):
+            break
+
+    try:
+        public_results = _gitlab_repo_candidates_to_code_results(
+            repos,
+            term,
+            extensions,
+            enabled_rule_keys,
+            effective_max,
+        )
+    except Exception as exc:
+        public_results = []
+        if not first_issue:
+            first_issue = str(exc)
+    if public_results:
+        return public_results
+
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for repo in repos[: min(6, max_results or 6)]:
+    for repo in repos[: min(10, effective_max)]:
         try:
             nested_candidates = _gitlab_project_blob_search(repo["repositoryUrl"], term, storage_state_path)
-        except Exception:
+        except Exception as exc:
+            if not first_issue:
+                first_issue = str(exc)
             continue
         for item in nested_candidates:
             file_path = str(item.get("filePath") or "")
@@ -730,8 +1427,10 @@ def _gitlab_repo_fallback_code_search(
                 continue
             seen.add(key)
             results.append(item)
-            if len(results) >= max_results:
+            if len(results) >= effective_max:
                 return results
+    if not results and first_issue:
+        raise RuntimeError(first_issue)
     return results
 
 
@@ -806,9 +1505,8 @@ def _github_repo_tree(owner: str, repo: str, branch: str) -> list[dict[str, Any]
 
 
 def _http_get_text(url: str, *, headers: dict[str, str], timeout: int = 60) -> str:
-    request = Request(url, headers=headers)
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return response.read().decode("utf-8", errors="replace")
+    text, _ = _read_http_text(url, headers=headers, timeout=timeout, retries=1)
+    return text
 
 
 def _github_blob_content(owner: str, repo: str, branch: str, file_path: str) -> str:
@@ -838,7 +1536,9 @@ def _github_repo_fallback_code_search(
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     fallback_extensions = _repo_fallback_extensions(extensions)
-    for repo in repos[: min(5, max_results or 5)]:
+    effective_max = max_results if max_results > 0 else 60
+    repo_cap = effective_max if effective_max > 0 else len(repos)
+    for repo in repos[: min(10, repo_cap)]:
         owner = _normalize_text(repo.get("repositoryOwner"))
         repo_name = _normalize_text(repo.get("repositoryName"))
         repo_url = _normalize_text(repo.get("repositoryUrl"))
@@ -885,27 +1585,47 @@ def _github_repo_fallback_code_search(
             }
             seen.add(key)
             results.append(candidate)
-            if len(results) >= max_results:
+            if len(results) >= effective_max:
                 return results
     return results
 
 
-def _gitee_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
+def _collect_gitee_repo_search_window(
+    term: str,
+    *,
+    start_page: int = 1,
+    page_count: int = 1,
+    initial_seen: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    size = 20
-    for page in range(1, max(1, page_limit) + 1):
+    seen: set[str] = set(initial_seen or set())
+    size = GITEE_WIDGET_PAGE_SIZE
+    max_pages = _gitee_widget_max_pages()
+    first_page = max(1, int(start_page or 1))
+    total_pages = max(1, int(page_count or 1))
+    if first_page > max_pages:
+        return [], max_pages
+    last_page_scanned = first_page - 1
+    for page in range(first_page, min(max_pages, first_page + total_pages - 1) + 1):
         from_offset = (page - 1) * size
         url = f"{GITEE_WIDGET_API_BASE}/search/widget/{GITEE_REPO_SEARCH_WIDGET}?q={quote_plus(term)}&from={from_offset}&size={size}"
-        rows = _http_get_json(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-                "Referer": "https://search.gitee.com/",
-            },
-            timeout=60,
-        )
+        try:
+            rows = _http_get_json(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/json",
+                    "Referer": "https://search.gitee.com/",
+                },
+                timeout=60,
+                platform_key="gitee",
+                retries=1,
+            )
+        except Exception:
+            if page == first_page and not results:
+                raise
+            break
+        last_page_scanned = page
         hits = (((rows or {}).get("hits") or {}).get("hits") or []) if isinstance(rows, dict) else []
         if not hits:
             break
@@ -937,31 +1657,114 @@ def _gitee_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
             )
             new_count += 1
         if new_count == 0:
-            break
+            continue
+    return results, last_page_scanned
+
+
+def _gitee_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
+    results, _ = _collect_gitee_repo_search_window(term, start_page=1, page_count=page_limit)
     return results
 
 
 def _gitee_repo_default_branch(owner: str, repo: str) -> str:
     url = f"https://gitee.com/api/v5/repos/{owner}/{repo}"
-    payload = _http_get_json(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60)
+    try:
+        payload = _http_get_json(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=60,
+            platform_key="gitee",
+            retries=1,
+        )
+    except Exception:
+        return ""
     if not isinstance(payload, dict):
-        return "master"
-    return _normalize_text(payload.get("default_branch")) or "master"
+        return ""
+    return _normalize_text(payload.get("default_branch"))
 
 
 def _gitee_repo_tree(owner: str, repo: str, branch: str) -> list[dict[str, Any]]:
     url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/git/trees/{quote_plus(branch)}?recursive=1"
-    payload = _http_get_json(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": f"https://gitee.com/{owner}/{repo}",
+    }
+    cookie_header = _gitee_cookie_header()
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    payload = _http_get_json(url, headers=headers, timeout=60, platform_key="gitee", retries=1)
     if not isinstance(payload, dict):
         return []
     tree = payload.get("tree") or []
     return tree if isinstance(tree, list) else []
 
 
+def _gitee_repo_tree_with_branch(owner: str, repo: str, preferred_branch: str = "") -> tuple[str, list[dict[str, Any]]]:
+    first_issue = ""
+    branch_candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_branch(value: str) -> None:
+        branch = _normalize_text(value)
+        if branch and branch not in seen:
+            seen.add(branch)
+            branch_candidates.append(branch)
+
+    add_branch(preferred_branch)
+    add_branch(_gitee_repo_default_branch(owner, repo))
+    for branch in ("master", "main", "develop", "dev"):
+        add_branch(branch)
+
+    for branch in branch_candidates:
+        try:
+            tree = _gitee_repo_tree(owner, repo, branch)
+        except Exception as exc:
+            if not first_issue:
+                first_issue = str(exc)
+            continue
+        if tree:
+            return branch, tree
+    if first_issue:
+        raise RuntimeError(first_issue)
+    return branch_candidates[0] if branch_candidates else "master", []
+
+
 def _gitee_blob_content(owner: str, repo: str, branch: str, file_path: str) -> str:
     encoded_path = "/".join(quote_plus(part) for part in file_path.split("/"))
+    raw_url = f"https://gitee.com/{owner}/{repo}/raw/{quote_plus(branch)}/{encoded_path}"
+    referer = f"https://gitee.com/{owner}/{repo}/blob/{quote_plus(branch)}/{encoded_path}"
+    raw_headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/plain",
+        "Referer": referer,
+    }
+    cookie_header = _gitee_cookie_header()
+    if cookie_header:
+        raw_headers["Cookie"] = cookie_header
+    for headers in (raw_headers, {k: v for k, v in raw_headers.items() if k != "Cookie"}):
+        try:
+            text = _http_get_text(
+                raw_url,
+                headers=headers,
+                timeout=45,
+            )
+            if _normalize_text(text):
+                return text
+        except Exception:
+            continue
+    encoded_path = "/".join(quote_plus(part) for part in file_path.split("/"))
     url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{encoded_path}?ref={quote_plus(branch)}"
-    payload = _http_get_json(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60)
+    try:
+        payload = _http_get_json(
+            url,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=60,
+            platform_key="gitee",
+            retries=1,
+        )
+    except Exception:
+        return ""
     if isinstance(payload, dict):
         if payload.get("type") == "file" and payload.get("encoding") == "base64" and payload.get("content"):
             try:
@@ -971,31 +1774,46 @@ def _gitee_blob_content(owner: str, repo: str, branch: str, file_path: str) -> s
     return ""
 
 
-def _gitee_repo_code_search(term: str, extensions: list[str], enabled_rule_keys: list[str], page_limit: int = 1) -> list[dict[str, Any]]:
-    repo_candidates = _gitee_repo_search(term, page_limit=page_limit)
+def _gitee_repo_candidates_to_code_results(
+    repo_candidates: list[dict[str, Any]],
+    term: str,
+    extensions: list[str],
+    enabled_rule_keys: list[str],
+    max_results: int = 24,
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for repo_candidate in repo_candidates:
+    first_issue = ""
+    effective_max = max_results if max_results > 0 else 24
+    repo_cap = min(len(repo_candidates), max(4, min(8, effective_max * 2)))
+    for repo_candidate in repo_candidates[:repo_cap]:
         owner = _normalize_text(repo_candidate.get("repositoryOwner"))
         repo = _normalize_text(repo_candidate.get("repositoryName"))
         repo_url = _normalize_text(repo_candidate.get("repositoryUrl"))
         if not owner or not repo or not repo_url:
             continue
         try:
-            branch = _gitee_repo_default_branch(owner, repo)
-            tree = _gitee_repo_tree(owner, repo, branch)
-        except Exception:
+            branch, tree = _gitee_repo_tree_with_branch(owner, repo, _normalize_text(repo_candidate.get("branch")))
+        except Exception as exc:
+            if not first_issue:
+                first_issue = str(exc)
             continue
+        candidate_paths = []
         for item in tree:
             file_path = _normalize_text(item.get("path"))
             if item.get("type") != "blob" or not _matches_extension(file_path, extensions):
                 continue
+            candidate_paths.append((_file_path_priority(file_path), file_path))
+        candidate_paths.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        for _, file_path in candidate_paths[:24]:
             dedupe_key = f"{repo_url}|{branch}|{file_path}"
             if dedupe_key in seen:
                 continue
             try:
                 code_text = _gitee_blob_content(owner, repo, branch, file_path)
-            except Exception:
+            except Exception as exc:
+                if not first_issue:
+                    first_issue = str(exc)
                 code_text = ""
             if not code_text:
                 continue
@@ -1023,21 +1841,84 @@ def _gitee_repo_code_search(term: str, extensions: list[str], enabled_rule_keys:
                     "severityHint": classification["severity"],
                 }
             )
+            if len(results) >= effective_max:
+                results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
+                return results
+    if not results and _is_repo_scan_blocker(first_issue):
+        raise RuntimeError(first_issue)
     results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
     return results
 
 
+def _gitee_repo_code_search_incremental(
+    term: str,
+    extensions: list[str],
+    enabled_rule_keys: list[str],
+    *,
+    page_limit: int,
+    previous_state: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    effective_limit = min(_effective_search_page_limit(page_limit), _gitee_widget_max_pages())
+    state = previous_state or {}
+    previous_signature = _normalize_text(state.get("last_candidate_signature"))
+    previous_last_page = int(state.get("last_page_scanned") or 0)
+    previous_candidate_keys = _load_json_string_list(state.get("last_candidate_keys_json"))
+    previous_repository_urls = _load_json_string_list(state.get("last_repository_urls_json"))
+
+    first_repo_rows, _ = _collect_gitee_repo_search_window(term, start_page=1, page_count=1)
+    first_signature = _candidate_signature(first_repo_rows)
+    signature_changed = not previous_signature or previous_signature != first_signature
+    if signature_changed or previous_last_page <= 0:
+        cursor_mode = "full"
+        repo_candidates = list(first_repo_rows)
+        last_page_scanned = 1 if first_repo_rows else 0
+        if effective_limit > 1:
+            more_repo_rows, last_page_scanned = _collect_gitee_repo_search_window(
+                term,
+                start_page=2,
+                page_count=effective_limit - 1,
+                initial_seen={_candidate_identity(item) for item in first_repo_rows if _candidate_identity(item)},
+            )
+            repo_candidates.extend(more_repo_rows)
+    else:
+        cursor_mode = "incremental"
+        repo_candidates, last_page_scanned = _collect_gitee_repo_search_window(
+            term,
+            start_page=max(2, previous_last_page + 1),
+            page_count=effective_limit,
+        )
+
+    results = _gitee_repo_candidates_to_code_results(
+        repo_candidates,
+        term,
+        extensions,
+        enabled_rule_keys,
+        max_results=max(12, min(24, effective_limit * 8)),
+    )
+    current_candidate_keys = _candidate_keys(results)
+    current_repository_urls = _repository_urls(results)
+    if cursor_mode == "incremental" and not signature_changed:
+        current_candidate_keys = _merge_string_lists(current_candidate_keys, previous_candidate_keys)
+        current_repository_urls = _merge_string_lists(current_repository_urls, previous_repository_urls)
+    next_state = {
+        "last_page_scanned": max(last_page_scanned, 1 if first_repo_rows else 0),
+        "last_candidate_signature": first_signature,
+        "last_candidate_keys_json": _json_dumps(current_candidate_keys),
+        "last_repository_urls_json": _json_dumps(current_repository_urls),
+        "cursor_mode": cursor_mode,
+        "signature_changed": signature_changed,
+    }
+    return results, next_state
+
+
+def _gitee_repo_code_search(term: str, extensions: list[str], enabled_rule_keys: list[str], page_limit: int = 1) -> list[dict[str, Any]]:
+    repo_candidates = _gitee_repo_search(term, page_limit=page_limit)
+    return _gitee_repo_candidates_to_code_results(repo_candidates, term, extensions, enabled_rule_keys)
+
+
 def _detect_code_search_issue(platform: ExposurePlatform, html: str, page_url: str, page_title: str) -> str:
     lowered = f"{html}\n{page_url}\n{page_title}".lower()
-    challenge_signals = (
-        "安全验证码" in html
-        or "安全验证" in html
-        or "verify you are human" in lowered
-        or "cf-challenge" in lowered
-        or "please move your mouse or press a key" in lowered
-        or "please wait while we verify" in lowered
-        or "just a moment" in lowered
-    )
+    challenge_signals = _has_search_challenge_text(html, f"{page_url}\n{page_title}")
     if challenge_signals:
         return f"{platform.key}:captcha_or_security_verification"
     if "/users/sign_in" in lowered or "just a moment" in lowered or "cf-challenge" in lowered:
@@ -1049,7 +1930,31 @@ def _detect_code_search_issue(platform: ExposurePlatform, html: str, page_url: s
     return ""
 
 
+def _extract_embedded_raw_lines(html: str) -> list[str]:
+    text = str(html or "")
+    decoder = json.JSONDecoder()
+    scanned: set[str] = set()
+    for candidate_text in (text, unescape(text)):
+        if not candidate_text or candidate_text in scanned:
+            continue
+        scanned.add(candidate_text)
+        for match in re.finditer(r'"rawLines"\s*:\s*', candidate_text):
+            try:
+                value, _ = decoder.raw_decode(candidate_text[match.end():])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, list):
+                continue
+            rows = [str(item).rstrip() for item in value if str(item).strip()]
+            if rows:
+                return rows
+    return []
+
+
 def _extract_code_text(html: str) -> str:
+    embedded_lines = _extract_embedded_raw_lines(html)
+    if embedded_lines:
+        return "\n".join(embedded_lines)
     selectors = [
         r"<div[^>]*id=\"LC\d+\"[^>]*>(.*?)</div>",
         r"<td[^>]*class=\"[^\"]*(?:blob-code|code-content|line_content)[^\"]*\"[^>]*>(.*?)</td>",
@@ -1079,6 +1984,9 @@ def _extract_code_lines(html: str) -> list[tuple[int, str]]:
                 rows.append((int(line_no), cleaned))
         if rows:
             return rows
+    embedded_lines = _extract_embedded_raw_lines(html)
+    if embedded_lines:
+        return [(index + 1, line) for index, line in enumerate(embedded_lines) if line.strip()]
     code_text = _extract_code_text(html)
     if not code_text:
         return []
@@ -1098,28 +2006,58 @@ def _read_text_file(path_value: Any) -> str:
         return ""
 
 
+def _payload_candidate_snippet(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    candidate = payload.get("candidate")
+    if not isinstance(candidate, dict):
+        return ""
+    for key in ("snippetText", "codeText", "text"):
+        text = str(candidate.get(key) or "")
+        if _normalize_text(text):
+            return text
+    return ""
+
+
+def _snapshot_analysis_text(latest_snapshot: dict[str, Any], raw_payload: dict[str, Any]) -> str:
+    raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    latest_snapshot = latest_snapshot if isinstance(latest_snapshot, dict) else {}
+    source_texts = [str(raw_payload.get("code_text") or "")]
+    artifact_payload = _parse_json(_read_text_file(latest_snapshot.get("rawArtifactPath") or latest_snapshot.get("raw_artifact_path")), {})
+    if isinstance(artifact_payload, dict):
+        source_texts.extend(
+            [
+                str(artifact_payload.get("code_text") or ""),
+                _payload_candidate_snippet(artifact_payload),
+                str(artifact_payload.get("code_fragment") or ""),
+            ]
+        )
+    source_texts.extend(
+        [
+            _payload_candidate_snippet(raw_payload),
+            str(raw_payload.get("code_fragment") or ""),
+            str(latest_snapshot.get("codeFragment") or latest_snapshot.get("code_fragment") or ""),
+            str(raw_payload.get("masked_fragment") or ""),
+            str(latest_snapshot.get("maskedFragment") or latest_snapshot.get("masked_fragment") or ""),
+        ]
+    )
+    for code_text in source_texts:
+        if _normalize_text(code_text):
+            return code_text
+    return ""
+
+
 def _build_code_lines_from_text(code_text: str) -> list[tuple[int, str]]:
     return [(index + 1, line.rstrip()) for index, line in enumerate(str(code_text or "").splitlines()) if line.strip()]
 
 
 def _load_snapshot_code_lines(latest_snapshot: dict[str, Any], raw_payload: dict[str, Any]) -> list[tuple[int, str]]:
-    candidate = raw_payload.get("candidate") if isinstance(raw_payload, dict) else {}
-    candidate = candidate if isinstance(candidate, dict) else {}
     html_text = _read_text_file(latest_snapshot.get("htmlPath"))
     code_lines = _extract_code_lines(html_text) if html_text else []
     if code_lines:
         return code_lines
-    artifact_payload = _parse_json(_read_text_file(latest_snapshot.get("rawArtifactPath")), {})
-    if isinstance(artifact_payload, dict):
-        code_text = str(
-            artifact_payload.get("code_text")
-            or ((artifact_payload.get("candidate") or {}) if isinstance(artifact_payload.get("candidate"), dict) else {}).get("snippetText")
-            or ""
-        )
-        if code_text:
-            return _build_code_lines_from_text(code_text)
-    code_text = str(candidate.get("snippetText") or "")
-    if code_text:
+    code_text = _snapshot_analysis_text(latest_snapshot, raw_payload)
+    if _normalize_text(code_text):
         return _build_code_lines_from_text(code_text)
     return []
 
@@ -1139,13 +2077,20 @@ def _line_window(code_lines: list[tuple[int, str]], start_line: int, end_line: i
     )
 
 
-def _mask_preview_text(text: str, findings: list[dict[str, Any]]) -> str:
+def _mask_preview_text(text: str, findings: list[dict[str, Any]] | None) -> str:
     masked = str(text or "")
-    for finding in findings:
+    for finding in findings or []:
         value = str(finding.get("value") or "")
         if value:
             masked = masked.replace(value, _mask_value(value))
     return masked
+
+
+def _normalize_findings_payload(value: Any) -> list[dict[str, Any]]:
+    rows = _parse_json(value, [])
+    if not isinstance(rows, list):
+        return []
+    return [item for item in rows if isinstance(item, dict)]
 
 
 def _line_match_score(line_text: str, probe: str) -> int:
@@ -1293,6 +2238,147 @@ def _term_matches_context(term: str, candidate: dict[str, Any], code_text: str) 
     return lowered in haystack
 
 
+def _contains_text_anchor(haystack: str, anchor: str) -> bool:
+    lowered_haystack = str(haystack or "").lower()
+    lowered_anchor = _normalize_text(anchor).lower()
+    if not lowered_haystack or not lowered_anchor:
+        return False
+    if re.search(r"[a-z0-9]", lowered_anchor) and re.fullmatch(r"[a-z0-9_.-]+", lowered_anchor):
+        pattern = rf"(?<![a-z0-9]){re.escape(lowered_anchor)}(?![a-z0-9])"
+        return bool(re.search(pattern, lowered_haystack))
+    return lowered_anchor in lowered_haystack
+
+
+def _find_domain_anchor_matches(text: str, root_domain: str) -> list[dict[str, str]]:
+    lowered_text = str(text or "").lower()
+    normalized_domain = _normalize_domain_value(root_domain)
+    if not lowered_text or not normalized_domain:
+        return []
+    rows: list[dict[str, str]] = []
+    root_pattern = re.compile(rf"(?<![a-z0-9.-]){re.escape(normalized_domain)}(?![a-z0-9.-])")
+    email_pattern = re.compile(rf"@[a-z0-9._%+-]+@?{re.escape(normalized_domain)}(?![a-z0-9.-])")
+    subdomain_pattern = re.compile(rf"(?<![a-z0-9.-])([a-z0-9-]+\.)+{re.escape(normalized_domain)}(?![a-z0-9.-])")
+    for match in root_pattern.finditer(lowered_text):
+        rows.append({"type": "root_domain", "label": "企业主域名", "value": match.group(0)})
+        break
+    for match in email_pattern.finditer(lowered_text):
+        rows.append({"type": "email_domain", "label": "企业邮箱域名", "value": match.group(0).lstrip("@")})
+        break
+    for match in subdomain_pattern.finditer(lowered_text):
+        value = match.group(0)
+        if value != normalized_domain:
+            rows.append({"type": "subdomain", "label": "企业子域名", "value": value})
+            break
+    return rows
+
+
+def _find_pattern_anchor_match(text: str, pattern: str) -> dict[str, str] | None:
+    lowered_text = str(text or "").lower()
+    normalized = _normalize_text(pattern).lower()
+    if not lowered_text or not normalized.startswith("*."):
+        return None
+    base = _normalize_domain_value(normalized)
+    if not base:
+        return None
+    compiled = re.compile(rf"(?<![a-z0-9.-])([a-z0-9-]+\.)+{re.escape(base)}(?![a-z0-9.-])")
+    match = compiled.search(lowered_text)
+    if not match:
+        return None
+    return {"type": "subdomain", "label": "企业子域名", "value": match.group(0)}
+
+
+def _detect_system_keywords(text: str, profile: dict[str, Any]) -> list[str]:
+    lowered_text = str(text or "").lower()
+    rows: list[str] = []
+    for keyword in profile.get("internal_system_keywords") or []:
+        normalized = _normalize_text(keyword).lower()
+        if normalized and normalized in lowered_text and normalized not in rows:
+            rows.append(normalized)
+    return rows
+
+
+def _is_negative_alias(alias: str, profile: dict[str, Any]) -> bool:
+    lowered_alias = _normalize_text(alias).lower()
+    return lowered_alias in {item.lower() for item in profile.get("negative_aliases") or []}
+
+
+def _enterprise_match_level(anchors: list[dict[str, str]], system_keywords: list[str]) -> str:
+    anchor_types = {item.get("type") for item in anchors}
+    if anchor_types & {"official_name", "root_domain", "email_domain", "subdomain"}:
+        return "strong"
+    if anchor_types & {"brand_alias", "english_alias"}:
+        return "alias"
+    if anchor_types & {"weak_alias"} and system_keywords:
+        return "weak"
+    return "none"
+
+
+def _evaluate_enterprise_match(
+    profile: dict[str, Any],
+    term: str,
+    candidate: dict[str, Any],
+    code_text: str,
+) -> dict[str, Any]:
+    texts = [
+        str(candidate.get("repositoryOwner") or ""),
+        str(candidate.get("repositoryName") or ""),
+        str(candidate.get("repositoryUrl") or ""),
+        str(candidate.get("filePath") or ""),
+        str(candidate.get("fileUrl") or ""),
+        str(candidate.get("title") or ""),
+        str(code_text or "")[:12000],
+    ]
+    combined = "\n".join(texts)
+    anchors: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add_anchor(anchor_type: str, label: str, value: str) -> None:
+        normalized_value = _normalize_text(value)
+        if not normalized_value:
+            return
+        key = f"{anchor_type}|{normalized_value.lower()}"
+        if key in seen:
+            return
+        seen.add(key)
+        anchors.append({"type": anchor_type, "label": label, "value": normalized_value})
+
+    for official_name in profile.get("official_names") or []:
+        if _contains_text_anchor(combined, official_name):
+            add_anchor("official_name", "企业全称", official_name)
+
+    for domain in profile.get("root_domains") or []:
+        for item in _find_domain_anchor_matches(combined, domain):
+            add_anchor(str(item.get("type") or "root_domain"), str(item.get("label") or "企业域名"), str(item.get("value") or domain))
+
+    for pattern in profile.get("trusted_subdomain_patterns") or []:
+        match = _find_pattern_anchor_match(combined, pattern)
+        if match:
+            add_anchor(str(match.get("type") or "subdomain"), str(match.get("label") or "企业子域名"), str(match.get("value") or ""))
+
+    guarded_aliases = {item.lower() for item in profile.get("short_alias_guard") or []}
+    for alias in profile.get("brand_aliases") or []:
+        if _is_negative_alias(alias, profile) or not _contains_text_anchor(combined, alias):
+            continue
+        anchor_type = "weak_alias" if alias.lower() in guarded_aliases or len(re.sub(r"[^a-z0-9]", "", alias.lower())) <= 4 else "brand_alias"
+        add_anchor(anchor_type, "品牌别名", alias)
+
+    for alias in profile.get("english_aliases") or []:
+        if _is_negative_alias(alias, profile) or not _contains_text_anchor(combined, alias):
+            continue
+        anchor_type = "weak_alias" if alias.lower() in guarded_aliases or len(re.sub(r"[^a-z0-9]", "", alias.lower())) <= 4 else "english_alias"
+        add_anchor(anchor_type, "英文别名", alias)
+
+    system_keywords = _detect_system_keywords(combined, profile)
+    level = _enterprise_match_level(anchors, system_keywords)
+    return {
+        "valid": level != "none",
+        "level": level,
+        "anchors": anchors,
+        "system_keywords": system_keywords,
+        "term": _normalize_text(term),
+    }
+
+
 def _collect_findings(code_text: str, enabled_rule_keys: list[str]) -> list[dict[str, Any]]:
     enabled = [SENSITIVE_RULE_MAP[key] for key in enabled_rule_keys if key in SENSITIVE_RULE_MAP]
     findings: list[dict[str, Any]] = []
@@ -1358,6 +2444,8 @@ def _looks_literal_secret(value: str) -> bool:
     if "-----begin" in lowered and "private key-----" in lowered:
         return True
     if "://" in text:
+        return True
+    if re.search(r"[:=]\s*['\"][A-Za-z0-9_./+\-=:@]{16,}", text):
         return True
     if re.search(r"[:=]\s*['\"][^'\"]{6,}['\"]", text):
         return True
@@ -1430,9 +2518,372 @@ def _collect_clue_markers(term: str, code_text: str) -> list[str]:
     return markers
 
 
-def _score_clue_hit(term: str, file_path: str, code_text: str) -> tuple[int, str, list[str]]:
+def _term_type_bonus(term_type: str) -> int:
+    normalized = _normalize_text(term_type)
+    if normalized == "domain":
+        return 12
+    if normalized in {"project", "product"}:
+        return 8
+    if normalized == "company_name":
+        return 4
+    return 0
+
+
+def _is_demo_or_mock_context(file_path: str, code_text: str) -> bool:
+    lowered = "\n".join([str(file_path or ""), str(code_text or "")[:12000]]).lower()
+    markers = (
+        "seed",
+        "demo",
+        "sample",
+        "example",
+        "faker",
+        "password123",
+        "hashedpassword",
+        "create users",
+        "create materials",
+        "localhost",
+        "127.0.0.1",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_documentation_context(file_path: str, code_text: str) -> bool:
+    lowered_path = str(file_path or "").lower()
+    lowered = "\n".join([lowered_path, str(code_text or "")[:8000].lower()])
+    markers = (
+        "readme",
+        "/docs/",
+        "doc/",
+        "tutorial",
+        "guide",
+        "example",
+        "quickstart",
+        "usage:",
+    )
+    return lowered_path.endswith((".md", ".rst", ".adoc")) or any(marker in lowered for marker in markers)
+
+
+def _is_auth_flow_context(file_path: str, code_text: str) -> bool:
+    lowered = "\n".join([str(file_path or ""), str(code_text or "")[:12000]]).lower()
+    markers = (
+        "authenticate_user",
+        "create_access_token",
+        "www-authenticate",
+        "incorrect username or password",
+        "user_input",
+        "conf_password",
+        "form_data.password",
+        "password = user_input",
+        "token = access_token",
+        "login(",
+        "async_step_user",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_hashed_secret_context(code_text: str) -> bool:
+    lowered = str(code_text or "").lower()
+    markers = (
+        "hashedpassword",
+        "hashed_password",
+        "bcrypt.hash",
+        "get_password_hash",
+        "password_hash(",
+        "sha256(",
+        "argon2",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_local_default_config_context(code_text: str, findings: list[dict[str, Any]]) -> bool:
+    lowered = str(code_text or "").lower()
+    markers = (
+        "localhost",
+        "127.0.0.1",
+        "redis://localhost",
+        "redis://127.0.0.1",
+        "jdbc:postgresql://localhost",
+        "mysql://localhost",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    return _is_local_db_connection(findings)
+
+
+def _is_log_or_comment_context(code_text: str) -> bool:
+    lowered = str(code_text or "").lower()
+    markers = (
+        "traceback",
+        "exception",
+        "logger.",
+        "console.error",
+        "console.log",
+        "incorrect username or password",
+        "token expired",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_public_api_example_context(code_text: str) -> bool:
+    lowered = str(code_text or "").lower()
+    markers = (
+        "get_api_key(",
+        "_get_api_key",
+        "os.getenv",
+        "process.env",
+        "dotenv",
+        "api key from env",
+        "示例token",
+        "example token",
+        "replace with real token",
+        "需要替换为真实的token",
+        "注册获取",
+        "replace it with your own token",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_local_db_connection(findings: list[dict[str, Any]]) -> bool:
+    for finding in findings:
+        value = str(finding.get("value") or "").lower()
+        if "localhost" in value or "127.0.0.1" in value:
+            return True
+    return False
+
+
+def _is_public_market_context(file_path: str, code_text: str) -> bool:
+    lowered = "\n".join([str(file_path or ""), str(code_text or "")[:12000]]).lower()
+    chinese_markers = ("行情", "证券", "研报", "收盘价", "净利润", "主力资金", "股票", "a股", "新能源", "市值")
+    english_markers = (
+        r"\bticker\b",
+        r"\bsymbol\b",
+        r"\bstock\b",
+        r"\bstocks\b",
+        r"\bmarket data\b",
+        r"\ba-share\b",
+        r"\ba shares\b",
+        r"\bmarketcap\b",
+        r"\brealtime\b",
+        r"\bkline\b",
+        r"\bnews\b",
+        r"\bfinance\b",
+        r"\btushare\b",
+        r"\bpro_api\b",
+    )
+    signal_count = sum(1 for marker in chinese_markers if marker in lowered)
+    signal_count += sum(1 for marker in english_markers if re.search(marker, lowered))
+    ticker_code_match = re.search(r"\b\d{6}\.(?:sz|ss|hk)\b", lowered)
+    return bool(ticker_code_match) or signal_count >= 2
+
+
+def _is_contact_directory_context(file_path: str, code_text: str) -> bool:
+    lowered = "\n".join([str(file_path or ""), str(code_text or "")[:12000]]).lower()
+    email_hits = re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", lowered)
+    phone_like_hits = re.findall(r"(?:\+?\d[\d\s-]{7,}\d)", lowered)
+    directory_markers = (
+        "suppliercontact",
+        "contact",
+        "phone",
+        "email",
+        "vendor",
+        "employee",
+        "department",
+    )
+    return (
+        len(email_hits) >= 2
+        or (email_hits and phone_like_hits)
+    ) and any(marker in lowered for marker in directory_markers)
+
+
+def _is_domain_inventory_context(file_path: str, code_text: str) -> bool:
+    lowered_path = str(file_path or "").lower()
+    lowered = str(code_text or "").lower()[:16000]
+    path_markers = (
+        "domain-list",
+        "domainlist",
+        "domains",
+        "site/",
+        "sites/",
+        "ioc",
+        "indicator",
+        "allowlist",
+        "blocklist",
+        "whitelist",
+        "blacklist",
+    )
+    domain_hits = re.findall(r"\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\b", lowered)
+    unique_domains = {item for item in domain_hits if "." in item}
+    quoted_domain_lines = 0
+    for raw_line in lowered.splitlines()[:200]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.fullmatch(r'["\']?[a-z0-9][a-z0-9.-]*\.[a-z]{2,}["\']?\s*,?', line):
+            quoted_domain_lines += 1
+    has_list_shape = quoted_domain_lines >= 3 or (
+        len(unique_domains) >= 4
+        and len(unique_domains) >= max(3, int(len(lowered.splitlines()[:120]) * 0.08))
+    )
+    structured_suffix = lowered_path.endswith((".json", ".txt", ".csv", ".yml", ".yaml"))
+    return has_list_shape and (structured_suffix or any(marker in lowered_path for marker in path_markers))
+
+
+def _is_reference_catalog_context(file_path: str, code_text: str) -> bool:
+    lowered_path = str(file_path or "").lower()
+    lowered = str(code_text or "").lower()[:16000]
+    structured_suffix = lowered_path.endswith((".json", ".txt", ".csv", ".js", ".ts", ".py", ".yml", ".yaml"))
+
+    location_signals = 0
+    for marker in ("place_id", "lat :", "lat:", "lng :", "lng:", "location : {", "location: {", "google . maps", "google.maps", "poi"):
+        if marker in lowered:
+            location_signals += 1
+
+    bank_signals = 0
+    for marker in ("bankcard", "cardbin", "bankbin", "unionpay", "借记卡", "贷记卡", "银行卡", "银行"):
+        if marker in lowered_path or marker in lowered:
+            bank_signals += 1
+    if re.search(r'"\d{6}"\s*:\s*"', lowered) or re.search(r"\[\s*['\"]\d{6}['\"]\s*,", lowered):
+        bank_signals += 2
+    if re.search(r"\bcode\s*:\s*['\"]", lowered) and re.search(r"\bname\s*:\s*['\"]", lowered):
+        bank_signals += 1
+
+    company_directory_signals = 0
+    for marker in ("glassdoor.com", "/salary/", "@@", "company salaries", "salary/"):
+        if marker in lowered:
+            company_directory_signals += 1
+    unique_domains = {item for item in re.findall(r"\b[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\b", lowered) if "." in item}
+    if len(unique_domains) >= 3:
+        company_directory_signals += 1
+
+    keyword_corpus_signals = 0
+    for marker in ("tags = [", "keywords = [", "keyword = [", "synonyms = [", "aliases = [", "alias = ["):
+        if marker in lowered:
+            keyword_corpus_signals += 1
+
+    structured_entry_lines = 0
+    nested_string_array_lines = 0
+    for raw_line in lowered.splitlines()[:160]:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.fullmatch(r'["\'].*["\']\s*,?', line):
+            structured_entry_lines += 1
+        elif re.fullmatch(r"\[\s*['\"].*['\"].*\]\s*,?", line):
+            structured_entry_lines += 1
+        elif re.search(r'["\']?\d{4,}["\']?\s*:\s*["\']', line):
+            structured_entry_lines += 1
+        elif re.search(r"\b(?:code|name|title|place_id)\s*:", line):
+            structured_entry_lines += 1
+        if re.fullmatch(r"\[\s*['\"].*['\"](?:\s*,\s*['\"].*['\"])*\s*\]\s*,?", line):
+            nested_string_array_lines += 1
+
+    if structured_suffix and location_signals >= 2:
+        return True
+    if structured_suffix and bank_signals >= 2 and structured_entry_lines >= 2:
+        return True
+    if structured_suffix and company_directory_signals >= 2:
+        return True
+    if structured_suffix and keyword_corpus_signals >= 1 and nested_string_array_lines >= 3:
+        return True
+    if structured_suffix and structured_entry_lines >= 4 and ("banks" in lowered_path or "bank" in lowered_path or "locations" in lowered_path):
+        return True
+    return False
+
+
+def _detect_system_access_signals(code_text: str, enterprise_match: dict[str, Any]) -> list[str]:
+    lowered = str(code_text or "").lower()
+    rows: list[str] = []
+    for keyword in enterprise_match.get("system_keywords") or []:
+        if keyword not in rows:
+            rows.append(keyword)
+    access_markers = {
+        "zapi.login": "login-call",
+        "login(": "login-call",
+        "authenticate(": "authenticate-call",
+        "api_token": "api-token-usage",
+        "requests.post": "http-client-call",
+        "session.": "session-usage",
+        "connect(": "connect-call",
+        "jdbc:": "database-connection",
+        "redis://": "redis-connection",
+        "zabbixapi": "zabbix-client",
+    }
+    for marker, label in access_markers.items():
+        if marker in lowered and label not in rows:
+            rows.append(label)
+    return rows
+
+
+def _promotion_reason_payload(
+    enterprise_match: dict[str, Any],
+    findings: list[dict[str, Any]],
+    *,
+    credential_literal_detected: bool,
+    system_access_signals: list[str],
+    demo_or_mock: bool,
+    public_market: bool,
+    contact_directory: bool,
+    domain_inventory: bool,
+    reference_catalog: bool,
+    auth_flow: bool,
+    documentation: bool,
+    hashed_secret: bool,
+    local_default: bool,
+    public_api_example: bool,
+    log_or_comment: bool,
+) -> list[str]:
+    reasons: list[str] = []
+    anchor_labels = [item.get("label") for item in enterprise_match.get("anchors") or [] if item.get("label")]
+    if anchor_labels:
+        reasons.append(f"企业锚点：{' / '.join(anchor_labels[:4])}")
+    if credential_literal_detected:
+        reasons.append("存在硬编码字面量凭据")
+    if system_access_signals:
+        reasons.append(f"检测到系统访问能力：{' / '.join(system_access_signals[:4])}")
+    if demo_or_mock:
+        reasons.append("检测到演示/种子/本地化上下文，风险已降权")
+    if public_market:
+        reasons.append("检测到证券/行情上下文，风险已降权")
+    if contact_directory:
+        reasons.append("检测到联系人/目录型邮箱上下文，风险已降权")
+    if domain_inventory:
+        reasons.append("检测到域名清单/站点列表上下文，风险已降权")
+    if reference_catalog:
+        reasons.append("检测到公开参考数据集/字典上下文，风险已降权")
+    if auth_flow:
+        reasons.append("检测到认证/登录业务流程上下文，风险已降权")
+    if documentation:
+        reasons.append("检测到 README/文档/教程上下文，风险已降权")
+    if hashed_secret:
+        reasons.append("检测到哈希/加密口令上下文，风险已降权")
+    if local_default:
+        reasons.append("检测到本地默认配置上下文，风险已降权")
+    if public_api_example:
+        reasons.append("检测到环境变量/API示例上下文，风险已降权")
+    if log_or_comment:
+        reasons.append("检测到日志/注释型上下文，风险已降权")
+    if any(str(item.get("ruleKey") or "") == "db_url" for item in findings) and not _is_local_db_connection(findings):
+        reasons.append("检测到非本地数据库连接串")
+    return reasons
+
+
+def _score_clue_hit(
+    term: str,
+    file_path: str,
+    code_text: str,
+    term_type: str = "",
+    enterprise_match: dict[str, Any] | None = None,
+) -> tuple[int, str, list[str]]:
     markers = _collect_clue_markers(term, code_text)
     score = _file_exposure_bonus(file_path)
+    score += _term_type_bonus(term_type)
+    match_level = str((enterprise_match or {}).get("level") or "none")
+    if match_level == "strong":
+        score += 18
+    elif match_level == "alias":
+        score += 10
+    elif match_level == "weak":
+        score += 4
     if markers:
         score += min(28, sum(next((weight for key, weight in CLUE_MARKERS if key == marker), 10) for marker in markers[:4]))
     lowered_term = _normalize_text(term).lower()
@@ -1445,6 +2896,11 @@ def _score_clue_hit(term: str, file_path: str, code_text: str) -> tuple[int, str
         score += 8
     if "config" in lowered_code and "password" in lowered_code:
         score += 6
+    normalized_term = _normalize_text(term)
+    if len(normalized_term) <= 3 and "." not in normalized_term:
+        score = max(0, score - 10)
+    if enterprise_match is not None and match_level == "none":
+        score = 0
     score = min(score, 100)
     severity = _severity_from_score(score)
     return score, severity, markers
@@ -1459,10 +2915,13 @@ def _build_code_clue_reasons(matched_term: str, file_path: str, markers: list[st
     return reasons
 
 
-def _code_result_layer(sensitive_type: str, raw_payload: dict[str, Any] | None = None) -> str:
+def _code_result_layer(sensitive_type: str, raw_payload: dict[str, Any] | None = None, persisted_layer: str = "") -> str:
     payload_layer = _normalize_text((raw_payload or {}).get("result_layer"))
     if payload_layer in {"clue", "sensitive"}:
         return payload_layer
+    persisted_text = _normalize_text(persisted_layer)
+    if persisted_text in {"clue", "sensitive"}:
+        return persisted_text
     return "clue" if str(sensitive_type or "").strip() == CODE_CLUE_RULE_KEY else "sensitive"
 
 
@@ -1490,10 +2949,148 @@ def _build_code_risk_reasons(matched_term: str, file_path: str, findings: list[d
     return reasons
 
 
-def _classify_code_hit(term: str, file_path: str, code_text: str, enabled_rule_keys: list[str]) -> dict[str, Any] | None:
+def _suppression_reason_payload(
+    *,
+    demo_or_mock: bool,
+    public_market: bool,
+    contact_directory: bool,
+    domain_inventory: bool,
+    reference_catalog: bool,
+    auth_flow: bool,
+    documentation: bool,
+    hashed_secret: bool,
+    local_default: bool,
+    public_api_example: bool,
+    log_or_comment: bool,
+) -> list[str]:
+    reasons: list[str] = []
+    if public_market:
+        reasons.append("公开证券/行情/金融信息上下文")
+    if contact_directory:
+        reasons.append("联系人/目录型邮箱上下文")
+    if domain_inventory:
+        reasons.append("域名清单/站点列表上下文")
+    if reference_catalog:
+        reasons.append("公开参考数据集/字典上下文")
+    if demo_or_mock:
+        reasons.append("演示/种子/测试数据上下文")
+    if auth_flow:
+        reasons.append("认证/登录业务流程上下文")
+    if documentation:
+        reasons.append("README/文档/教程上下文")
+    if hashed_secret:
+        reasons.append("哈希/加密口令上下文")
+    if local_default:
+        reasons.append("本地默认配置上下文")
+    if public_api_example:
+        reasons.append("公共 API/环境变量示例上下文")
+    if log_or_comment:
+        reasons.append("日志/报错/注释型上下文")
+    return reasons
+
+
+def _classify_code_hit(
+    term: str,
+    file_path: str,
+    code_text: str,
+    enabled_rule_keys: list[str],
+    term_type: str = "",
+    enterprise_match: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    enterprise_payload = enterprise_match if enterprise_match is not None else {"valid": True, "level": "none", "anchors": [], "system_keywords": []}
+    if not bool(enterprise_payload.get("valid", True)):
+        return None
     findings = _collect_findings(code_text, enabled_rule_keys)
+    risk_context_text = _extract_snippet(code_text, findings) if findings else str(code_text or "")
+    full_context_text = str(code_text or "")
+    credential_literal_detected = any(_looks_literal_secret(str(item.get("value") or "")) for item in findings)
+    system_access_signals = _detect_system_access_signals(risk_context_text, enterprise_payload)
+    system_access_detected = bool(system_access_signals)
+    anchor_types = {item.get("type") for item in enterprise_payload.get("anchors") or []}
+    strong_enterprise = bool(anchor_types & {"official_name", "root_domain", "email_domain", "subdomain"})
+    hard_compromise_context = bool(anchor_types & {"root_domain", "email_domain", "subdomain"}) and credential_literal_detected and system_access_detected
+    demo_or_mock = _is_demo_or_mock_context(file_path, full_context_text)
+    public_market = _is_public_market_context(file_path, full_context_text)
+    contact_directory = _is_contact_directory_context(file_path, full_context_text)
+    domain_inventory = _is_domain_inventory_context(file_path, full_context_text)
+    reference_catalog = _is_reference_catalog_context(file_path, full_context_text)
+    auth_flow = _is_auth_flow_context(file_path, full_context_text)
+    documentation = _is_documentation_context(file_path, full_context_text)
+    hashed_secret = _is_hashed_secret_context(full_context_text)
+    local_default = _is_local_default_config_context(full_context_text, findings)
+    public_api_example = _is_public_api_example_context(full_context_text)
+    log_or_comment = _is_log_or_comment_context(full_context_text)
+    suppressible_context = not hard_compromise_context
+    suppression_reasons = _suppression_reason_payload(
+        demo_or_mock=demo_or_mock if suppressible_context else False,
+        public_market=public_market if suppressible_context else False,
+        contact_directory=contact_directory if suppressible_context else False,
+        domain_inventory=domain_inventory if suppressible_context else False,
+        reference_catalog=reference_catalog if suppressible_context else False,
+        auth_flow=auth_flow if suppressible_context else False,
+        documentation=documentation if suppressible_context else False,
+        hashed_secret=hashed_secret if suppressible_context else False,
+        local_default=local_default if suppressible_context else False,
+        public_api_example=public_api_example if suppressible_context else False,
+        log_or_comment=log_or_comment if suppressible_context else False,
+    )
+    promotion_reasons = _promotion_reason_payload(
+        enterprise_payload,
+        findings,
+        credential_literal_detected=credential_literal_detected,
+        system_access_signals=system_access_signals,
+        demo_or_mock=demo_or_mock if suppressible_context else False,
+        public_market=public_market if suppressible_context else False,
+        contact_directory=contact_directory if suppressible_context else False,
+        domain_inventory=domain_inventory if suppressible_context else False,
+        reference_catalog=reference_catalog if suppressible_context else False,
+        auth_flow=auth_flow if suppressible_context else False,
+        documentation=documentation if suppressible_context else False,
+        hashed_secret=hashed_secret if suppressible_context else False,
+        local_default=local_default if suppressible_context else False,
+        public_api_example=public_api_example if suppressible_context else False,
+        log_or_comment=log_or_comment if suppressible_context else False,
+    )
+    suppressed = suppressible_context and bool(suppression_reasons)
     if findings:
         risk_score, severity = _score_code_hit(file_path, findings)
+        finding_keys = {str(item.get("ruleKey") or "") for item in findings}
+        if suppressible_context and demo_or_mock and not credential_literal_detected:
+            risk_score = max(18, risk_score - 14)
+        if hard_compromise_context:
+            risk_score = max(risk_score + 16, 76)
+        elif strong_enterprise and credential_literal_detected and finding_keys & {"token", "ak_sk", "private_key"} and not public_market and not public_api_example:
+            risk_score = max(risk_score + 14, 72)
+        elif strong_enterprise and "db_url" in finding_keys and credential_literal_detected and not _is_local_db_connection(findings):
+            risk_score = max(risk_score + 12, 68)
+        elif str(enterprise_payload.get("level") or "") == "alias" and credential_literal_detected and finding_keys & {"token", "ak_sk"}:
+            risk_score = max(risk_score + 8, 58)
+        if not bool(anchor_types & {"root_domain", "email_domain", "subdomain"}) and (public_market or public_api_example):
+            risk_score = min(risk_score, 24)
+        if suppressible_context and public_market and not credential_literal_detected and not system_access_detected:
+            risk_score = min(risk_score, 20)
+        elif suppressible_context and contact_directory and not credential_literal_detected and not system_access_detected:
+            risk_score = min(risk_score, 24)
+        elif suppressible_context and domain_inventory and not credential_literal_detected and not system_access_detected:
+            risk_score = min(risk_score, 20)
+        elif suppressible_context and reference_catalog and not credential_literal_detected and not system_access_detected:
+            risk_score = min(risk_score, 18)
+        elif suppressible_context and demo_or_mock and not credential_literal_detected and not system_access_detected:
+            risk_score = min(risk_score, 24)
+        if suppressible_context and auth_flow and not credential_literal_detected:
+            risk_score = min(risk_score, 28)
+        if suppressible_context and documentation and not system_access_detected:
+            risk_score = min(risk_score, 24)
+        if suppressible_context and hashed_secret and not credential_literal_detected:
+            risk_score = min(risk_score, 22)
+        if suppressible_context and local_default:
+            risk_score = min(risk_score, 24)
+        if suppressible_context and public_api_example and not credential_literal_detected:
+            risk_score = min(risk_score, 24)
+        if suppressible_context and log_or_comment and not credential_literal_detected:
+            risk_score = min(risk_score, 22)
+        risk_score = min(risk_score, 100)
+        severity = _severity_from_score(risk_score)
         return {
             "result_layer": "sensitive",
             "sensitive_type": findings[0]["ruleKey"],
@@ -1502,9 +3099,67 @@ def _classify_code_hit(term: str, file_path: str, code_text: str, enabled_rule_k
             "severity": severity,
             "findings": findings,
             "clue_markers": [],
+            "enterprise_match_level": str(enterprise_payload.get("level") or "none"),
+            "enterprise_anchors": list(enterprise_payload.get("anchors") or []),
+            "risk_promotion_reasons": promotion_reasons,
+            "credential_literal_detected": credential_literal_detected,
+            "system_access_detected": system_access_detected,
+            "system_access_signals": system_access_signals,
+            "suppressed": suppressed,
+            "suppression_reasons": suppression_reasons,
+            "display_bucket": "suppressed" if suppressed else "primary",
         }
-    clue_score, clue_severity, clue_markers = _score_clue_hit(term, file_path, code_text)
+    clue_score, clue_severity, clue_markers = _score_clue_hit(
+        term,
+        file_path,
+        code_text,
+        term_type=term_type,
+        enterprise_match=enterprise_match,
+    )
+    if public_market:
+        clue_score = min(clue_score, 18)
+    elif contact_directory:
+        clue_score = min(clue_score, 24)
+    elif domain_inventory:
+        clue_score = min(clue_score, 18)
+    elif reference_catalog:
+        clue_score = min(clue_score, 18)
+    elif demo_or_mock:
+        clue_score = min(clue_score, 24)
+    if auth_flow:
+        clue_score = min(clue_score, 24)
+    if documentation:
+        clue_score = min(clue_score, 18)
+    if hashed_secret:
+        clue_score = min(clue_score, 20)
+    if local_default:
+        clue_score = min(clue_score, 22)
+    if public_api_example:
+        clue_score = min(clue_score, 22)
+    if log_or_comment:
+        clue_score = min(clue_score, 20)
+    clue_severity = _severity_from_score(clue_score)
     if clue_score < 28:
+        if enterprise_match is not None and enterprise_payload.get("valid") and (enterprise_payload.get("anchors") or []):
+            suppressed_score = max(12, min(clue_score or 18, 24))
+            return {
+                "result_layer": "clue",
+                "sensitive_type": CODE_CLUE_RULE_KEY,
+                "matched_rule": CODE_CLUE_RULE_LABEL,
+                "risk_score": suppressed_score,
+                "severity": _severity_from_score(suppressed_score),
+                "findings": [],
+                "clue_markers": clue_markers,
+                "enterprise_match_level": str(enterprise_payload.get("level") or "none"),
+                "enterprise_anchors": list(enterprise_payload.get("anchors") or []),
+                "risk_promotion_reasons": promotion_reasons,
+                "credential_literal_detected": False,
+                "system_access_detected": system_access_detected,
+                "system_access_signals": system_access_signals,
+                "suppressed": True,
+                "suppression_reasons": list(suppression_reasons) + ["企业相关但未达到泄露证据阈值"],
+                "display_bucket": "suppressed",
+            }
         return None
     return {
         "result_layer": "clue",
@@ -1514,6 +3169,15 @@ def _classify_code_hit(term: str, file_path: str, code_text: str, enabled_rule_k
         "severity": clue_severity,
         "findings": [],
         "clue_markers": clue_markers,
+        "enterprise_match_level": str(enterprise_payload.get("level") or "none"),
+        "enterprise_anchors": list(enterprise_payload.get("anchors") or []),
+        "risk_promotion_reasons": promotion_reasons,
+        "credential_literal_detected": False,
+        "system_access_detected": system_access_detected,
+        "system_access_signals": system_access_signals,
+        "suppressed": False,
+        "suppression_reasons": [],
+        "display_bucket": "primary",
     }
 
 
@@ -1610,10 +3274,17 @@ def _hydrate_detail_snapshot(platform: ExposurePlatform, detail_url: str, search
     }
 
 
-def _fetch_code_search_page(platform: ExposurePlatform, search_url: str, storage_state_path: str | None) -> dict[str, Any]:
+def _fetch_code_search_page(
+    platform: ExposurePlatform,
+    search_url: str,
+    storage_state_path: str | None,
+    *,
+    allow_browser_fallback: bool = True,
+    http_timeout: int = 45,
+) -> dict[str, Any]:
     headers = _search_request_headers(platform.key, storage_state_path)
     try:
-        html = _http_get_html(search_url, headers=headers, timeout=45)
+        html = _http_get_html(search_url, headers=headers, timeout=http_timeout, platform_key=platform.key, retries=1)
         issue = _detect_code_search_issue(platform, html, search_url, "")
         if not issue:
             return {
@@ -1624,12 +3295,30 @@ def _fetch_code_search_page(platform: ExposurePlatform, search_url: str, storage
             }
     except Exception:
         pass
+    if not allow_browser_fallback:
+        raise RuntimeError(f"http_search_fetch_failed:{search_url}")
     return fetch_page_artifacts_with_session(
         search_url,
         storage_state_path=storage_state_path,
         wait_seconds=3,
         timeout_seconds=45,
     )
+
+
+def _lightweight_code_fetch(platform: ExposurePlatform, file_url: str) -> str:
+    storage_state = _load_storage_state_path(platform.key)
+    raw_url = _raw_file_url(platform.key, str(file_url or ""))
+    if not raw_url or raw_url == file_url:
+        return ""
+    try:
+        text = _http_get_text(
+            raw_url,
+            headers=_search_request_headers(platform.key, storage_state),
+            timeout=30,
+        )
+        return text if _normalize_text(text) else ""
+    except Exception:
+        return ""
 
 
 def _collect_search_results_across_pages(
@@ -1645,10 +3334,28 @@ def _collect_search_results_across_pages(
     for page in range(1, max(1, page_limit) + 1):
         paged_url = _search_page_url(platform.key, search_url, page)
         try:
-            search_page = _fetch_code_search_page(platform, paged_url, storage_state_path)
+            search_page = _fetch_code_search_page(
+                platform,
+                paged_url,
+                storage_state_path,
+                allow_browser_fallback=(page == 1),
+                http_timeout=(45 if page == 1 else 12),
+            )
         except Exception as exc:
-            issue = f"{platform.key}:page_{page}:{exc}"
-            break
+            if page > 1:
+                try:
+                    search_page = _fetch_code_search_page(
+                        platform,
+                        paged_url,
+                        storage_state_path,
+                        allow_browser_fallback=True,
+                        http_timeout=45,
+                    )
+                except Exception:
+                    break
+            else:
+                issue = f"{platform.key}:page_{page}:{exc}"
+                break
         page_issue = _detect_code_search_issue(
             platform,
             str(search_page.get("html") or ""),
@@ -1656,7 +3363,8 @@ def _collect_search_results_across_pages(
             str(search_page.get("title") or ""),
         )
         if page_issue:
-            issue = page_issue if page == 1 else issue
+            if page == 1:
+                issue = page_issue
             break
         page_rows = _parse_code_search_results(
             platform,
@@ -1678,6 +3386,136 @@ def _collect_search_results_across_pages(
     return results, issue
 
 
+def _collect_search_results_incremental(
+    platform: ExposurePlatform,
+    search_url: str,
+    storage_state_path: str | None,
+    *,
+    page_limit: int,
+    previous_state: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    effective_limit = max(1, _effective_search_page_limit(page_limit))
+    state = previous_state or {}
+    previous_signature = _normalize_text(state.get("last_candidate_signature"))
+    previous_last_page = int(state.get("last_page_scanned") or 0)
+    previous_candidate_keys = _load_json_string_list(state.get("last_candidate_keys_json"))
+    previous_repository_urls = _load_json_string_list(state.get("last_repository_urls_json"))
+    first_page_url = _search_page_url(platform.key, search_url, 1)
+    try:
+        first_page = _fetch_code_search_page(
+            platform,
+            first_page_url,
+            storage_state_path,
+            allow_browser_fallback=True,
+            http_timeout=45,
+        )
+    except Exception as exc:
+        return [], f"{platform.key}:page_1:{exc}", {}
+    first_issue = _detect_code_search_issue(
+        platform,
+        str(first_page.get("html") or ""),
+        str(first_page.get("url") or first_page_url),
+        str(first_page.get("title") or ""),
+    )
+    if first_issue:
+        return [], first_issue, {}
+    first_rows = _parse_code_search_results(
+        platform,
+        str(first_page.get("html") or ""),
+        str(first_page.get("url") or first_page_url),
+    )
+    first_signature = _candidate_signature(first_rows)
+    signature_changed = not previous_signature or previous_signature != first_signature
+    if signature_changed or previous_last_page <= 0:
+        page_sequence = list(range(1, effective_limit + 1))
+        mode = "full"
+    else:
+        page_sequence = list(range(max(2, previous_last_page + 1), max(2, previous_last_page + 1) + effective_limit))
+        mode = "incremental"
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    last_page_scanned = 1 if first_rows else 0
+    if mode == "incremental":
+        last_page_scanned = previous_last_page
+    if mode == "full":
+        for item in first_rows:
+            key = _candidate_identity(item)
+            if key and key not in seen:
+                seen.add(key)
+                results.append(item)
+    issue = ""
+    first_window_page = page_sequence[0] if page_sequence else 1
+    for page in page_sequence:
+        if mode == "full" and page == 1:
+            continue
+        paged_url = _search_page_url(platform.key, search_url, page)
+        try:
+            search_page = _fetch_code_search_page(
+                platform,
+                paged_url,
+                storage_state_path,
+                allow_browser_fallback=(page == first_window_page),
+                http_timeout=(45 if page == 1 else 12),
+            )
+        except Exception as exc:
+            if page > 1:
+                try:
+                    search_page = _fetch_code_search_page(
+                        platform,
+                        paged_url,
+                        storage_state_path,
+                        allow_browser_fallback=True,
+                        http_timeout=45,
+                    )
+                except Exception:
+                    break
+            else:
+                issue = f"{platform.key}:page_{page}:{exc}"
+                break
+        page_issue = _detect_code_search_issue(
+            platform,
+            str(search_page.get("html") or ""),
+            str(search_page.get("url") or paged_url),
+            str(search_page.get("title") or ""),
+        )
+        if page_issue:
+            if page == 1:
+                issue = page_issue
+            break
+        last_page_scanned = page
+        page_rows = _parse_code_search_results(
+            platform,
+            str(search_page.get("html") or ""),
+            str(search_page.get("url") or paged_url),
+        )
+        if not page_rows:
+            break
+        new_count = 0
+        for item in page_rows:
+            key = _candidate_identity(item)
+            if key and key not in seen:
+                seen.add(key)
+                results.append(item)
+                new_count += 1
+        if new_count == 0 and mode == "full":
+            break
+    current_candidates = results if results else first_rows
+    current_candidate_keys = _candidate_keys(current_candidates)
+    current_repository_urls = _repository_urls(current_candidates)
+    if mode == "incremental" and not signature_changed:
+        current_candidate_keys = _merge_string_lists(current_candidate_keys, previous_candidate_keys)
+        current_repository_urls = _merge_string_lists(current_repository_urls, previous_repository_urls)
+    next_state = {
+        "last_page_scanned": max(last_page_scanned, 1 if first_rows else 0),
+        "last_candidate_signature": first_signature,
+        "last_candidate_keys_json": _json_dumps(current_candidate_keys),
+        "last_repository_urls_json": _json_dumps(current_repository_urls),
+        "cursor_mode": mode,
+        "signature_changed": signature_changed,
+    }
+    return results, issue, next_state
+
+
 def ensure_default_code_watchlist() -> dict[str, Any]:
     with get_db_connection() as connection:
         existing = list_code_watchlists(connection)
@@ -1691,9 +3529,10 @@ def ensure_default_code_watchlist() -> dict[str, Any]:
                 "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
                 "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
                 "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
-                "max_results_per_term": int(metadata.get("max_results_per_term") or 5),
+                "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
                 "detail_fetch": bool(metadata.get("detail_fetch", True)),
                 "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
+                "enterprise_profile": _watchlist_enterprise_profile(watchlist, terms),
             }
         now = _now_utc_iso()
         watchlist_id = upsert_code_watchlist(
@@ -1708,9 +3547,10 @@ def ensure_default_code_watchlist() -> dict[str, Any]:
                         "platforms": DEFAULT_CODE_PLATFORMS,
                         "file_extensions": DEFAULT_FILE_EXTENSIONS,
                         "search_page_limit": DEFAULT_SEARCH_PAGE_LIMIT,
-                        "max_results_per_term": 5,
+                        "max_results_per_term": DEFAULT_MAX_RESULTS_PER_TERM,
                         "detail_fetch": True,
                         "enabled_rule_keys": DEFAULT_RULE_KEYS,
+                        "enterprise_profile": DEFAULT_ENTERPRISE_PROFILE,
                     }
                 ),
                 "created_at": now,
@@ -1733,9 +3573,16 @@ def ensure_default_code_watchlist() -> dict[str, Any]:
         "platforms": list(DEFAULT_CODE_PLATFORMS),
         "file_extensions": list(DEFAULT_FILE_EXTENSIONS),
         "search_page_limit": DEFAULT_SEARCH_PAGE_LIMIT,
-        "max_results_per_term": 5,
+        "max_results_per_term": DEFAULT_MAX_RESULTS_PER_TERM,
         "detail_fetch": True,
         "enabled_rule_keys": list(DEFAULT_RULE_KEYS),
+        "enterprise_profile": _payload_enterprise_profile(
+            {
+                "organization_name": "绀轰緥浼佷笟",
+                "terms": DEFAULT_CODE_TERMS,
+                "enterprise_profile": DEFAULT_ENTERPRISE_PROFILE,
+            }
+        ),
     }
 
 
@@ -1753,9 +3600,10 @@ def list_code_watchlists_payload() -> list[dict[str, Any]]:
                     "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
                     "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
                     "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
-                    "max_results_per_term": int(metadata.get("max_results_per_term") or 5),
+                    "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
                     "detail_fetch": bool(metadata.get("detail_fetch", True)),
                     "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
+                    "enterprise_profile": _watchlist_enterprise_profile(row, list_code_watch_terms(connection, int(row["id"]))),
                 }
             )
         return payloads
@@ -1763,6 +3611,7 @@ def list_code_watchlists_payload() -> list[dict[str, Any]]:
 
 def save_code_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
     now = _now_utc_iso()
+    enterprise_profile = _payload_enterprise_profile(payload)
     with get_db_connection() as connection:
         watchlist_id = upsert_code_watchlist(
             connection,
@@ -1777,9 +3626,10 @@ def save_code_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         "platforms": _normalize_string_list(payload.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
                         "file_extensions": _normalize_code_file_extensions(payload.get("file_extensions")),
                         "search_page_limit": _normalize_search_page_limit(payload.get("search_page_limit")),
-                        "max_results_per_term": int(payload.get("max_results_per_term") or 5),
+                        "max_results_per_term": _normalize_result_budget(payload.get("max_results_per_term")),
                         "detail_fetch": bool(payload.get("detail_fetch", True)),
                         "enabled_rule_keys": _normalize_string_list(payload.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
+                        "enterprise_profile": enterprise_profile,
                     }
                 ),
                 "created_at": payload.get("created_at") or now,
@@ -1810,10 +3660,41 @@ def save_code_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
             "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
             "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
-            "max_results_per_term": int(metadata.get("max_results_per_term") or 5),
+            "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
             "detail_fetch": bool(metadata.get("detail_fetch", True)),
             "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
+            "enterprise_profile": _watchlist_enterprise_profile(watchlist or {}, list_code_watch_terms(connection, watchlist_id)),
         }
+
+
+def delete_code_watchlist_payload(watchlist_id: int) -> dict[str, Any]:
+    ensure_default_code_watchlist()
+    with get_db_connection() as connection:
+        watchlist = get_code_watchlist(connection, int(watchlist_id))
+        if watchlist is None:
+            raise ValueError(f"watchlist not found: {watchlist_id}")
+        watchlist_name = str(watchlist.get("name") or "")
+        delete_code_watchlist(connection, int(watchlist_id))
+        connection.commit()
+    output_dir = _watchlist_output_root(watchlist_name)
+    if output_dir.exists():
+        for child in sorted(output_dir.rglob("*"), reverse=True):
+            try:
+                if child.is_file():
+                    child.unlink()
+                else:
+                    child.rmdir()
+            except Exception:
+                pass
+        try:
+            output_dir.rmdir()
+        except Exception:
+            pass
+    return {
+        "removed": True,
+        "watchlistId": int(watchlist_id),
+        "watchlistName": watchlist_name,
+    }
 
 
 def scan_code_watchlist_once(
@@ -1836,21 +3717,27 @@ def scan_code_watchlist_once(
             return {"watchlist_id": watchlist_id, "scanned_terms": 0, "candidates": 0, "hits": 0, "message": "watchlist disabled"}
         terms = [item for item in list_code_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
     metadata = _watchlist_metadata(watchlist)
+    enterprise_profile = _watchlist_enterprise_profile(watchlist, terms)
     selected_platforms = _normalize_string_list(platforms or metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS)
     selected_extensions = _normalize_code_file_extensions(file_extensions or metadata.get("file_extensions"))
-    selected_search_page_limit = _normalize_search_page_limit(search_page_limit or metadata.get("search_page_limit"))
+    selected_search_page_limit = _normalize_search_page_limit(
+        search_page_limit if search_page_limit is not None else metadata.get("search_page_limit")
+    )
     selected_rule_keys = _normalize_string_list(enabled_rule_keys or metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS)
-    selected_max_results = int(max_results_per_term or metadata.get("max_results_per_term") or 5)
+    selected_max_results = _normalize_result_budget(max_results_per_term if max_results_per_term is not None else metadata.get("max_results_per_term"))
     selected_detail_fetch = bool(detail_fetch if detail_fetch is not None else metadata.get("detail_fetch", True))
 
     total_candidates = 0
     total_hits = 0
+    clue_hits = 0
+    sensitive_hits = 0
     errors: list[str] = []
     seen_urls: set[str] = set()
     now = _now_utc_iso()
 
     for term_row in terms:
         term = _normalize_text(term_row.get("term"))
+        term_type = _normalize_text(term_row.get("term_type"))
         if not term:
             continue
         for platform_key in selected_platforms:
@@ -1860,15 +3747,68 @@ def scan_code_watchlist_once(
                 errors.append(f"{platform_key}:{term}:{exc}")
                 continue
             storage_state = _load_storage_state_path(platform.key)
+            search_state = None
+            known_candidate_keys: list[str] = []
+            known_repository_urls: list[str] = []
+            query_search_states: dict[str, dict[str, Any]] = {}
+            with get_db_connection() as connection:
+                search_states = list_code_search_states(
+                    connection,
+                    watchlist_id=int(watchlist["id"]),
+                    platform=platform.key,
+                    term=term,
+                )
+            query_search_states = {
+                str(item.get("query_key") or "base"): item
+                for item in search_states
+            }
+            search_state = query_search_states.get("base")
+            known_candidate_keys = _state_string_union(search_states, "last_candidate_keys_json")
+            known_repository_urls = _state_string_union(search_states, "last_repository_urls_json")
             if platform.key == "gitee":
-                try:
-                    candidates = _gitee_repo_code_search(term, selected_extensions, selected_rule_keys, page_limit=selected_search_page_limit)
-                except Exception as exc:
-                    errors.append(f"{platform.key}:{term}:{exc}")
+                candidates = []
+                gitee_seen: set[str] = set()
+                for query in _repo_seed_queries(term, term_type, enterprise_profile):
+                    query_key = _search_state_query_key(term, query)
+                    try:
+                        query_candidates, next_search_state = _gitee_repo_code_search_incremental(
+                            query,
+                            selected_extensions,
+                            selected_rule_keys,
+                            page_limit=selected_search_page_limit,
+                            previous_state=query_search_states.get(query_key),
+                        )
+                    except Exception as exc:
+                        if query_key == "base":
+                            errors.append(f"{platform.key}:{term}:{exc}")
+                        continue
+                    _persist_search_state(int(watchlist["id"]), platform.key, term, query_key, next_search_state, started_at)
+                    query_candidates = _apply_incremental_hints(
+                        query_candidates,
+                        previous_candidate_keys=known_candidate_keys,
+                        previous_repository_urls=known_repository_urls,
+                        new_page_bonus=60 if (next_search_state or {}).get("cursor_mode") == "incremental" else 0,
+                    )
+                    for item in query_candidates:
+                        key = _candidate_identity(item)
+                        if not key or key in gitee_seen:
+                            continue
+                        gitee_seen.add(key)
+                        candidates.append(
+                            {
+                                **item,
+                                "queryPriorityHint": int(item.get("queryPriorityHint") or 0) + _query_priority_bonus(query, term),
+                            }
+                        )
+                    known_candidate_keys = _merge_string_lists(_candidate_keys(query_candidates), known_candidate_keys)
+                    known_repository_urls = _merge_string_lists(_repository_urls(query_candidates), known_repository_urls)
+                if not candidates and errors and any(item.startswith(f"{platform.key}:{term}:") for item in errors):
                     continue
-                filtered_candidates = candidates[:selected_max_results]
-                total_candidates += len(filtered_candidates)
-                for candidate in filtered_candidates:
+                candidates.sort(key=lambda item: _candidate_priority(item, selected_rule_keys), reverse=True)
+                evaluation_limit = _candidate_evaluation_limit(selected_max_results, selected_search_page_limit)
+                evaluation_candidates = candidates if evaluation_limit is None else candidates[:evaluation_limit]
+                total_candidates += len(evaluation_candidates)
+                for candidate in evaluation_candidates:
                     file_url = str(candidate.get("fileUrl") or "")
                     if not file_url or file_url in seen_urls:
                         continue
@@ -1881,7 +3821,19 @@ def scan_code_watchlist_once(
                         "screenshot_png": b"",
                         "code_text": str(candidate.get("snippetText") or ""),
                     }
-                    classification = _classify_code_hit(term, str(candidate.get("filePath") or ""), detail["code_text"], selected_rule_keys)
+                    enterprise_match = (
+                        _evaluate_enterprise_match(enterprise_profile, term, candidate, detail["code_text"])
+                        if _enterprise_profile_enabled(enterprise_profile)
+                        else None
+                    )
+                    classification = _classify_code_hit(
+                        term,
+                        str(candidate.get("filePath") or ""),
+                        detail["code_text"],
+                        selected_rule_keys,
+                        term_type=term_type,
+                        enterprise_match=enterprise_match,
+                    )
                     if not classification:
                         continue
                     if selected_detail_fetch and not str(detail.get("html") or "").strip():
@@ -1889,15 +3841,31 @@ def scan_code_watchlist_once(
                             detail.update(_hydrate_detail_snapshot(platform, file_url, detail["search_url"]))
                         except Exception:
                             pass
-                    classification = _classify_code_hit(term, str(candidate.get("filePath") or ""), str(detail.get("code_text") or ""), selected_rule_keys)
+                    enterprise_match = (
+                        _evaluate_enterprise_match(enterprise_profile, term, candidate, str(detail.get("code_text") or ""))
+                        if _enterprise_profile_enabled(enterprise_profile)
+                        else None
+                    )
+                    classification = _classify_code_hit(
+                        term,
+                        str(candidate.get("filePath") or ""),
+                        str(detail.get("code_text") or ""),
+                        selected_rule_keys,
+                        term_type=term_type,
+                        enterprise_match=enterprise_match,
+                    )
                     if not classification:
                         continue
                     findings = classification["findings"]
                     snippet = _extract_snippet(detail["code_text"], findings)
                     masked_snippet = _mask_snippet(snippet, findings)
                     if classification["result_layer"] == "clue":
+                        preview_snapshot = {
+                            "lineStart": int(candidate.get("lineStart") or 0),
+                            "lineEnd": int(candidate.get("lineEnd") or candidate.get("lineStart") or 0),
+                        }
                         snippet = _mask_preview_text(
-                            _rebuild_code_preview(term, {"lineStart": 0, "lineEnd": 0}, {"candidate": candidate}, findings),
+                            _rebuild_code_preview(term, preview_snapshot, {"candidate": candidate, "code_text": detail["code_text"]}, findings),
                             findings,
                         )
                         masked_snippet = snippet
@@ -1913,6 +3881,14 @@ def scan_code_watchlist_once(
                         "masked_fragment": masked_snippet,
                         "result_layer": classification["result_layer"],
                         "clue_markers": classification["clue_markers"],
+                        "code_text": detail["code_text"][:40000],
+                        "term_type": term_type,
+                        "enterprise_match_level": classification.get("enterprise_match_level"),
+                        "enterprise_anchors": classification.get("enterprise_anchors") or [],
+                        "risk_promotion_reasons": classification.get("risk_promotion_reasons") or [],
+                        "credential_literal_detected": bool(classification.get("credential_literal_detected")),
+                        "system_access_detected": bool(classification.get("system_access_detected")),
+                        "system_access_signals": classification.get("system_access_signals") or [],
                     }
                     with get_db_connection() as connection:
                         hit_id = upsert_code_hit(
@@ -1931,6 +3907,7 @@ def scan_code_watchlist_once(
                                 "sensitive_type": classification["sensitive_type"],
                                 "matched_rule": classification["matched_rule"],
                                 "matched_term": term,
+                                "result_layer": classification["result_layer"],
                                 "risk_score": risk_score,
                                 "severity": severity,
                                 "first_seen_at": now,
@@ -1960,44 +3937,83 @@ def scan_code_watchlist_once(
                         update_code_hit_last_snapshot(connection, hit_id, snapshot_id)
                         connection.commit()
                     total_hits += 1
+                    if classification["result_layer"] == "clue":
+                        clue_hits += 1
+                    else:
+                        sensitive_hits += 1
                 continue
             search_url = _search_url(platform.key, term)
-            candidates, search_issue = _collect_search_results_across_pages(
+            candidates, search_issue, next_search_state = _collect_search_results_incremental(
                 platform,
                 search_url,
                 storage_state,
                 page_limit=selected_search_page_limit,
+                previous_state=search_state,
             )
+            _persist_search_state(int(watchlist["id"]), platform.key, term, "base", next_search_state, started_at)
             if search_issue:
                 errors.append(f"{search_issue}:{term}")
                 continue
             filtered_candidates = [item for item in candidates if _matches_extension(item.get("filePath") or "", selected_extensions)]
-            if not filtered_candidates:
-                expanded_candidates: list[dict[str, Any]] = []
-                expanded_seen: set[str] = set()
+            filtered_candidates = _apply_incremental_hints(
+                filtered_candidates,
+                previous_candidate_keys=known_candidate_keys,
+                previous_repository_urls=known_repository_urls,
+                new_page_bonus=60 if (next_search_state or {}).get("cursor_mode") == "incremental" else 0,
+            )
+            known_candidate_keys = _merge_string_lists(_candidate_keys(filtered_candidates), known_candidate_keys)
+            known_repository_urls = _merge_string_lists(_repository_urls(filtered_candidates), known_repository_urls)
+            expanded_candidates: list[dict[str, Any]] = []
+            expanded_seen: set[str] = {
+                f"{item.get('repositoryUrl')}|{item.get('branch')}|{item.get('filePath')}|{item.get('fileUrl')}"
+                for item in filtered_candidates
+            }
+            domain_like_term = "." in term and " " not in term
+            if domain_like_term or not filtered_candidates:
                 for query in _expanded_search_queries(term, selected_rule_keys):
                     expanded_search_url = _search_url(platform.key, query)
-                    expanded_rows, expanded_issue = _collect_search_results_across_pages(
+                    query_key = _search_state_query_key(term, query)
+                    query_bonus = _query_priority_bonus(query, term)
+                    expanded_rows, expanded_issue, expanded_next_state = _collect_search_results_incremental(
                         platform,
                         expanded_search_url,
                         storage_state,
-                        page_limit=max(1, min(selected_search_page_limit, 2)),
+                        page_limit=max(1, min(_effective_search_page_limit(selected_search_page_limit), 2)),
+                        previous_state=query_search_states.get(query_key),
+                    )
+                    _persist_search_state(
+                        int(watchlist["id"]),
+                        platform.key,
+                        term,
+                        query_key,
+                        expanded_next_state,
+                        started_at,
                     )
                     if expanded_issue:
                         continue
+                    expanded_rows = _apply_incremental_hints(
+                        expanded_rows,
+                        previous_candidate_keys=known_candidate_keys,
+                        previous_repository_urls=known_repository_urls,
+                        new_page_bonus=60 if (expanded_next_state or {}).get("cursor_mode") == "incremental" else 0,
+                    )
                     for item in expanded_rows:
                         file_path = str(item.get("filePath") or "")
                         key = f"{item.get('repositoryUrl')}|{item.get('branch')}|{file_path}|{item.get('fileUrl')}"
                         if key in expanded_seen or not _matches_extension(file_path, _repo_fallback_extensions(selected_extensions)):
                             continue
                         expanded_seen.add(key)
+                        item = {**item, "queryPriorityHint": query_bonus}
                         expanded_candidates.append(item)
+                    known_candidate_keys = _merge_string_lists(_candidate_keys(expanded_rows), known_candidate_keys)
+                    known_repository_urls = _merge_string_lists(_repository_urls(expanded_rows), known_repository_urls)
                     if len(expanded_candidates) >= max(selected_max_results * 2, 12):
                         break
-                filtered_candidates = expanded_candidates
+                filtered_candidates.extend(expanded_candidates)
             if platform.key == "gitlab" and not filtered_candidates:
                 project_candidates = [item for item in candidates if item.get("repositoryUrl")]
-                for project_candidate in project_candidates[:selected_max_results]:
+                project_candidate_limit = selected_max_results if selected_max_results > 0 else 12
+                for project_candidate in project_candidates[:project_candidate_limit]:
                     try:
                         nested_candidates = _gitlab_project_blob_search(
                             project_candidate["repositoryUrl"],
@@ -2025,8 +4041,10 @@ def scan_code_watchlist_once(
                         term,
                         storage_state,
                         _repo_fallback_extensions(selected_extensions),
+                        selected_rule_keys,
                         max(selected_max_results * 2, 12),
-                        page_limit=max(1, min(selected_search_page_limit, 3)),
+                        query_terms=_repo_seed_queries(term, term_type, enterprise_profile),
+                        page_limit=max(1, min(_effective_search_page_limit(selected_search_page_limit), 3)),
                     )
                 except Exception as exc:
                     errors.append(f"{platform.key}:{term}:repo_fallback:{exc}")
@@ -2037,7 +4055,7 @@ def scan_code_watchlist_once(
                         selected_extensions,
                         selected_rule_keys,
                         max(selected_max_results * 2, 12),
-                        page_limit=max(1, min(selected_search_page_limit, 3)),
+                        page_limit=max(1, min(_effective_search_page_limit(selected_search_page_limit), 3)),
                     )
                 except Exception as exc:
                     errors.append(f"{platform.key}:{term}:repo_fallback:{exc}")
@@ -2045,9 +4063,10 @@ def scan_code_watchlist_once(
                 key=lambda item: _candidate_priority(item, selected_rule_keys),
                 reverse=True,
             )
-            filtered_candidates = filtered_candidates[:selected_max_results]
-            total_candidates += len(filtered_candidates)
-            for candidate in filtered_candidates:
+            evaluation_limit = _candidate_evaluation_limit(selected_max_results, selected_search_page_limit)
+            evaluation_candidates = filtered_candidates if evaluation_limit is None else filtered_candidates[:evaluation_limit]
+            total_candidates += len(evaluation_candidates)
+            for candidate in evaluation_candidates:
                 file_url = str(candidate.get("fileUrl") or "")
                 if not file_url or file_url in seen_urls:
                     continue
@@ -2076,6 +4095,10 @@ def scan_code_watchlist_once(
                 except Exception as exc:
                     errors.append(f"{platform.key}:{file_url}:{exc}")
                     continue
+                if not selected_detail_fetch and not str(candidate.get("snippetText") or "").strip():
+                    lightweight_text = _lightweight_code_fetch(platform, file_url)
+                    if lightweight_text:
+                        detail["code_text"] = lightweight_text
                 if candidate.get("snippetText") and (
                     not detail.get("code_text")
                     or str(detail.get("code_text") or "").startswith(".turbo-progress-bar")
@@ -2087,11 +4110,23 @@ def scan_code_watchlist_once(
                     snippet_findings = _collect_findings(snippet_text, selected_rule_keys)
                     if snippet_findings and not detail_findings:
                         detail["code_text"] = snippet_text
-                if not _term_matches_context(term, candidate, detail["code_text"]):
+                enterprise_match = (
+                    _evaluate_enterprise_match(enterprise_profile, term, candidate, str(detail.get("code_text") or ""))
+                    if _enterprise_profile_enabled(enterprise_profile)
+                    else None
+                )
+                if enterprise_match is not None and not enterprise_match.get("valid"):
                     continue
                 location = _parse_code_location(platform.key, file_url) or {}
                 effective_file_path = str(candidate.get("filePath") or location.get("file_path") or "")
-                classification = _classify_code_hit(term, effective_file_path, str(detail.get("code_text") or ""), selected_rule_keys)
+                classification = _classify_code_hit(
+                    term,
+                    effective_file_path,
+                    str(detail.get("code_text") or ""),
+                    selected_rule_keys,
+                    term_type=term_type,
+                    enterprise_match=enterprise_match,
+                )
                 if not classification:
                     continue
                 if selected_detail_fetch and not str(detail.get("html") or "").strip():
@@ -2099,14 +4134,30 @@ def scan_code_watchlist_once(
                         detail.update(_hydrate_detail_snapshot(platform, file_url, search_url))
                     except Exception:
                         pass
-                    classification = _classify_code_hit(term, effective_file_path, str(detail.get("code_text") or ""), selected_rule_keys)
+                    enterprise_match = (
+                        _evaluate_enterprise_match(enterprise_profile, term, candidate, str(detail.get("code_text") or ""))
+                        if _enterprise_profile_enabled(enterprise_profile)
+                        else None
+                    )
+                    classification = _classify_code_hit(
+                        term,
+                        effective_file_path,
+                        str(detail.get("code_text") or ""),
+                        selected_rule_keys,
+                        term_type=term_type,
+                        enterprise_match=enterprise_match,
+                    )
                     if not classification:
                         continue
                 findings = classification["findings"]
                 snippet = _extract_snippet(detail["code_text"], findings)
                 masked_snippet = _mask_snippet(snippet, findings)
                 if classification["result_layer"] == "clue":
-                    snippet = _rebuild_code_preview(term, {"lineStart": 0, "lineEnd": 0}, {"candidate": candidate}, findings)
+                    preview_snapshot = {
+                        "lineStart": int(candidate.get("lineStart") or location.get("line_start") or 0),
+                        "lineEnd": int(candidate.get("lineEnd") or location.get("line_end") or candidate.get("lineStart") or location.get("line_start") or 0),
+                    }
+                    snippet = _rebuild_code_preview(term, preview_snapshot, {"candidate": candidate, "code_text": detail["code_text"]}, findings)
                     masked_snippet = snippet
                 risk_score = int(classification["risk_score"])
                 severity = str(classification["severity"])
@@ -2120,6 +4171,14 @@ def scan_code_watchlist_once(
                     "masked_fragment": masked_snippet,
                     "result_layer": classification["result_layer"],
                     "clue_markers": classification["clue_markers"],
+                    "code_text": detail["code_text"][:40000],
+                    "term_type": term_type,
+                    "enterprise_match_level": classification.get("enterprise_match_level"),
+                    "enterprise_anchors": classification.get("enterprise_anchors") or [],
+                    "risk_promotion_reasons": classification.get("risk_promotion_reasons") or [],
+                    "credential_literal_detected": bool(classification.get("credential_literal_detected")),
+                    "system_access_detected": bool(classification.get("system_access_detected")),
+                    "system_access_signals": classification.get("system_access_signals") or [],
                 }
                 with get_db_connection() as connection:
                     hit_id = upsert_code_hit(
@@ -2138,6 +4197,7 @@ def scan_code_watchlist_once(
                             "sensitive_type": classification["sensitive_type"],
                             "matched_rule": classification["matched_rule"],
                             "matched_term": term,
+                            "result_layer": classification["result_layer"],
                             "risk_score": risk_score,
                             "severity": severity,
                             "first_seen_at": now,
@@ -2182,8 +4242,13 @@ def scan_code_watchlist_once(
                     update_code_hit_last_snapshot(connection, hit_id, snapshot_id)
                     connection.commit()
                 total_hits += 1
+                if classification["result_layer"] == "clue":
+                    clue_hits += 1
+                else:
+                    sensitive_hits += 1
 
     finished_at = _now_utc_iso()
+    access_limited_only = bool(errors) and all(_is_access_limited_scan_error(item) for item in errors)
     with get_db_connection() as connection:
         insert_code_scan_run(
             connection,
@@ -2193,8 +4258,10 @@ def scan_code_watchlist_once(
                 "requested_terms_json": _json_dumps([_normalize_text(item.get("term")) for item in terms if _normalize_text(item.get("term"))]),
                 "candidate_count": total_candidates,
                 "hit_count": total_hits,
+                "clue_hit_count": clue_hits,
+                "sensitive_hit_count": sensitive_hits,
                 "error_count": len(errors),
-                "status": "failed" if errors and total_hits == 0 else "partial" if errors else "succeeded",
+                "status": "partial" if errors and (total_hits > 0 or access_limited_only) else "failed" if errors else "succeeded",
                 "errors_json": _json_dumps(errors),
                 "started_at": started_at,
                 "finished_at": finished_at,
@@ -2207,6 +4274,8 @@ def scan_code_watchlist_once(
         "scanned_terms": len(terms),
         "candidates": total_candidates,
         "hits": total_hits,
+        "clue_hits": clue_hits,
+        "sensitive_hits": sensitive_hits,
         "errors": errors,
         "platforms": selected_platforms,
         "file_extensions": selected_extensions,
@@ -2226,31 +4295,84 @@ def list_code_hits_payload(
     platform: str | None = None,
     sensitive_type: str | None = None,
     limit: int | None = 200,
+    include_suppressed: bool = False,
 ) -> list[dict[str, Any]]:
     ensure_default_code_watchlist()
     payloads: list[dict[str, Any]] = []
+    query_limit = None if include_suppressed else limit
     with get_db_connection() as connection:
+        watchlist_profile_cache: dict[int, dict[str, Any]] = {}
+        watchlist_rule_cache: dict[int, list[str]] = {}
         rows = list_code_hits(
             connection,
             watchlist_id=watchlist_id,
             review_status=review_status,
             platform=platform,
             sensitive_type=sensitive_type,
-            limit=limit,
+            limit=query_limit,
         )
         for row in rows:
             raw_payload = _parse_json(row.get("raw_json"), {})
             latest_snapshot = (list_code_hit_snapshots(connection, int(row["id"])) or [{}])[0]
-            findings = _parse_json(latest_snapshot.get("findings_json"), []) if latest_snapshot else []
-            result_layer = _code_result_layer(str(row.get("sensitive_type") or ""), raw_payload)
-            computed_score, computed_severity = (
-                _score_code_hit(str(row.get("file_path") or ""), findings)
-                if result_layer == "sensitive" and findings
-                else _score_clue_hit(str(row.get("matched_term") or ""), str(row.get("file_path") or ""), str((raw_payload or {}).get("code_text") or (raw_payload or {}).get("masked_fragment") or ""))[:2]
-                if result_layer == "clue"
-                else (int(row.get("risk_score") or 0), str(row.get("severity") or "low"))
+            watchlist_key = int(row.get("watchlist_id") or 0)
+            if watchlist_key not in watchlist_profile_cache:
+                metadata = _parse_json(row.get("watchlist_metadata_json"), {})
+                watchlist_profile_cache[watchlist_key] = _metadata_enterprise_profile(
+                    metadata,
+                    organization_name=str(row.get("organization_name") or ""),
+                    terms=list_code_watch_terms(connection, watchlist_key),
+                )
+                watchlist_rule_cache[watchlist_key] = _normalize_string_list(
+                    (metadata or {}).get("enabled_rule_keys"),
+                    fallback=DEFAULT_RULE_KEYS,
+                )
+            term_type = _normalize_text(((raw_payload or {}).get("term_type") or ""))
+            enterprise_profile = watchlist_profile_cache.get(watchlist_key) or {}
+            analysis_text = _snapshot_analysis_text(latest_snapshot, raw_payload)
+            candidate = ((raw_payload or {}).get("candidate") or {}) if isinstance(raw_payload, dict) else {}
+            enterprise_match = (
+                _evaluate_enterprise_match(enterprise_profile, str(row.get("matched_term") or ""), candidate, analysis_text)
+                if _enterprise_profile_enabled(enterprise_profile)
+                else None
             )
-            sensitive_label = CODE_CLUE_RULE_LABEL if result_layer == "clue" else SENSITIVE_RULE_MAP.get(str(row.get("sensitive_type") or ""), SensitiveRule("", "", re.compile(""), 0)).label or row.get("sensitive_type") or ""
+            if enterprise_match is not None and not enterprise_match.get("valid"):
+                continue
+            classification = _classify_code_hit(
+                str(row.get("matched_term") or ""),
+                str(row.get("file_path") or ""),
+                analysis_text,
+                watchlist_rule_cache.get(watchlist_key) or list(DEFAULT_RULE_KEYS),
+                term_type=term_type,
+                enterprise_match=enterprise_match,
+            )
+            if classification is None:
+                continue
+            if bool(classification.get("suppressed")) and not include_suppressed:
+                continue
+            findings = classification.get("findings") or []
+            result_layer = classification.get("result_layer") or _code_result_layer(
+                str(row.get("sensitive_type") or ""),
+                raw_payload,
+                str(row.get("result_layer") or ""),
+            )
+            computed_sensitive_type = str(classification.get("sensitive_type") or row.get("sensitive_type") or "")
+            computed_matched_rule = str(classification.get("matched_rule") or row.get("matched_rule") or "")
+            clue_text = _rebuild_code_preview(
+                str(row.get("matched_term") or ""),
+                {
+                    "htmlPath": latest_snapshot.get("html_path") or latest_snapshot.get("htmlPath") or "",
+                    "rawArtifactPath": latest_snapshot.get("raw_artifact_path") or latest_snapshot.get("rawArtifactPath") or "",
+                    "lineStart": latest_snapshot.get("line_start") or latest_snapshot.get("lineStart") or 0,
+                    "lineEnd": latest_snapshot.get("line_end") or latest_snapshot.get("lineEnd") or 0,
+                    "maskedFragment": latest_snapshot.get("masked_fragment") or latest_snapshot.get("maskedFragment") or "",
+                    "codeFragment": latest_snapshot.get("code_fragment") or latest_snapshot.get("codeFragment") or "",
+                },
+                raw_payload,
+                findings,
+            )
+            computed_score = int(classification.get("risk_score") or row.get("risk_score") or 0)
+            computed_severity = str(classification.get("severity") or row.get("severity") or "low")
+            sensitive_label = CODE_CLUE_RULE_LABEL if result_layer == "clue" else SENSITIVE_RULE_MAP.get(computed_sensitive_type, SensitiveRule("", "", re.compile(""), 0)).label or computed_sensitive_type
             payloads.append(
                 {
                     "id": int(row["id"]),
@@ -2270,23 +4392,29 @@ def list_code_hits_payload(
                     "fileUrl": row.get("file_url") or "",
                     "visibility": row.get("visibility") or "public",
                     "language": row.get("language") or "",
-                    "sensitiveType": row.get("sensitive_type") or "",
+                    "sensitiveType": computed_sensitive_type,
                     "sensitiveLabel": sensitive_label,
-                    "matchedRule": row.get("matched_rule") or "",
+                    "matchedRule": computed_matched_rule,
                     "matchedTerm": row.get("matched_term") or "",
                     "resultLayer": result_layer,
                     "resultLayerLabel": "敏感命中" if result_layer == "sensitive" else "线索命中",
                     "riskScore": computed_score,
                     "severity": computed_severity,
+                    "enterpriseMatchLevel": classification.get("enterprise_match_level") or str((enterprise_match or {}).get("level") or "none"),
+                    "enterpriseAnchors": classification.get("enterprise_anchors") or list((enterprise_match or {}).get("anchors") or []),
+                    "riskPromotionReasons": classification.get("risk_promotion_reasons") or [],
+                    "credentialLiteralDetected": bool(classification.get("credential_literal_detected")),
+                    "systemAccessDetected": bool(classification.get("system_access_detected")),
+                    "suppressed": bool(classification.get("suppressed")),
+                    "suppressionReasons": classification.get("suppression_reasons") or [],
+                    "displayBucket": classification.get("display_bucket") or ("suppressed" if classification.get("suppressed") else "primary"),
                     "reviewStatus": row.get("review_status") or "new",
                     "evidenceCount": int(row.get("evidence_count") or 0),
                     "firstSeenAt": row.get("first_seen_at") or "",
                     "lastSeenAt": row.get("last_seen_at") or "",
                     "lastSnapshotId": row.get("last_snapshot_id"),
-                    "summary": _normalize_text((raw_payload or {}).get("masked_fragment") or "")[:220],
-                    "secretLike": any(bool(item.get("secretLike")) for item in findings)
-                    if findings
-                    else bool(SENSITIVE_RULE_MAP.get(str(row.get("sensitive_type") or ""), SensitiveRule("", "", re.compile(""), 0)).secret_like),
+                    "summary": _normalize_text(clue_text)[:220],
+                    "secretLike": any(bool(item.get("secretLike")) for item in findings),
                 }
             )
     severity_rank = {"high": 3, "medium": 2, "low": 1}
@@ -2299,7 +4427,13 @@ def list_code_hits_payload(
         ),
         reverse=True,
     )
-    return payloads
+    if not include_suppressed:
+        return payloads[: int(limit)] if limit else payloads
+    if not limit:
+        return payloads
+    primary_hits = [item for item in payloads if item.get("displayBucket") != "suppressed"][: int(limit)]
+    suppressed_hits = [item for item in payloads if item.get("displayBucket") == "suppressed"][: int(limit)]
+    return primary_hits + suppressed_hits
 
 
 def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
@@ -2308,6 +4442,7 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
         if row is None:
             return None
         watchlist = get_code_watchlist(connection, int(row["watchlist_id"]))
+        watchlist_terms = list_code_watch_terms(connection, int(row["watchlist_id"]))
         snapshots = list_code_hit_snapshots(connection, hit_id)
         reviews = list_code_hit_reviews(connection, hit_id)
     raw_payload = _parse_json(row.get("raw_json"), {})
@@ -2332,7 +4467,7 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
                 "lineStart": int(item.get("line_start") or 0),
                 "lineEnd": int(item.get("line_end") or 0),
                 "language": item.get("language") or "",
-                "findings": _parse_json(item.get("findings_json"), []),
+                "findings": _normalize_findings_payload(item.get("findings_json")),
             }
         )
     latest_snapshot = formatted_snapshots[0] if formatted_snapshots else {}
@@ -2341,21 +4476,41 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
         preview_assets.append({"kind": "html", "label": "页面快照", "url": latest_snapshot["htmlUrl"]})
     if latest_snapshot.get("rawArtifactUrl"):
         preview_assets.append({"kind": "artifact", "label": "原始抓取", "url": latest_snapshot["rawArtifactUrl"]})
+    term_type = _normalize_text(((raw_payload or {}).get("term_type") or ""))
+    enterprise_profile = _watchlist_enterprise_profile(watchlist, watchlist_terms)
+    analysis_text = _snapshot_analysis_text(latest_snapshot, raw_payload)
+    candidate = ((raw_payload or {}).get("candidate") or {}) if isinstance(raw_payload, dict) else {}
+    enterprise_match = (
+        _evaluate_enterprise_match(enterprise_profile, str(row.get("matched_term") or ""), candidate, analysis_text)
+        if _enterprise_profile_enabled(enterprise_profile)
+        else None
+    )
     findings = latest_snapshot.get("findings") or []
-    result_layer = _code_result_layer(str(row.get("sensitive_type") or ""), raw_payload)
+    classification = _classify_code_hit(
+        str(row.get("matched_term") or ""),
+        str(row.get("file_path") or ""),
+        analysis_text,
+        _normalize_string_list(_watchlist_metadata(watchlist or {}).get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
+        term_type=term_type,
+        enterprise_match=enterprise_match,
+    )
+    if classification is not None:
+        findings = classification.get("findings") or findings
+    result_layer = (classification or {}).get("result_layer") or _code_result_layer(
+        str(row.get("sensitive_type") or ""),
+        raw_payload,
+        str(row.get("result_layer") or ""),
+    )
+    computed_sensitive_type = str((classification or {}).get("sensitive_type") or row.get("sensitive_type") or "")
+    computed_matched_rule = str((classification or {}).get("matched_rule") or row.get("matched_rule") or "")
     code_preview = _rebuild_code_preview(
         str(row.get("matched_term") or ""),
         latest_snapshot,
         raw_payload,
         findings,
     )
-    risk_score, severity = (
-        _score_code_hit(str(row.get("file_path") or ""), findings)
-        if result_layer == "sensitive" and findings
-        else _score_clue_hit(str(row.get("matched_term") or ""), str(row.get("file_path") or ""), code_preview or str(raw_payload.get("masked_fragment") or ""))[:2]
-        if result_layer == "clue"
-        else (int(row.get("risk_score") or 0), str(row.get("severity") or "low"))
-    )
+    risk_score = int((classification or {}).get("risk_score") or row.get("risk_score") or 0)
+    severity = str((classification or {}).get("severity") or row.get("severity") or "low")
     matched_term_contexts = _extract_matched_term_contexts(str(row.get("matched_term") or ""), row, latest_snapshot, raw_payload)
     clue_markers = list(raw_payload.get("clue_markers") or []) if isinstance(raw_payload, dict) else _collect_clue_markers(str(row.get("matched_term") or ""), code_preview)
     risk_reasons = (
@@ -2363,7 +4518,9 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
         if result_layer == "sensitive"
         else _build_code_clue_reasons(str(row.get("matched_term") or ""), str(row.get("file_path") or ""), clue_markers)
     )
-    sensitive_label = CODE_CLUE_RULE_LABEL if result_layer == "clue" else SENSITIVE_RULE_MAP.get(str(row.get("sensitive_type") or ""), SensitiveRule("", "", re.compile(""), 0)).label or row.get("sensitive_type") or ""
+    risk_reasons.extend([item for item in (classification or {}).get("risk_promotion_reasons") or [] if item not in risk_reasons])
+    risk_reasons.extend([item for item in (classification or {}).get("suppression_reasons") or [] if item not in risk_reasons])
+    sensitive_label = CODE_CLUE_RULE_LABEL if result_layer == "clue" else SENSITIVE_RULE_MAP.get(computed_sensitive_type, SensitiveRule("", "", re.compile(""), 0)).label or computed_sensitive_type
     return {
         "id": int(row["id"]),
         "watchlistId": int(row["watchlist_id"]),
@@ -2382,15 +4539,23 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
         "fileUrl": row.get("file_url") or "",
         "visibility": row.get("visibility") or "public",
         "language": row.get("language") or "",
-        "sensitiveType": row.get("sensitive_type") or "",
+        "sensitiveType": computed_sensitive_type,
         "sensitiveLabel": sensitive_label,
-        "matchedRule": row.get("matched_rule") or "",
+        "matchedRule": computed_matched_rule,
         "matchedTerm": row.get("matched_term") or "",
         "resultLayer": result_layer,
         "resultLayerLabel": "敏感命中" if result_layer == "sensitive" else "线索命中",
         "matchedTermContexts": matched_term_contexts,
         "riskScore": risk_score,
         "severity": severity,
+        "enterpriseMatchLevel": (classification or {}).get("enterprise_match_level") or str((enterprise_match or {}).get("level") or "none"),
+        "enterpriseAnchors": (classification or {}).get("enterprise_anchors") or list((enterprise_match or {}).get("anchors") or []),
+        "riskPromotionReasons": (classification or {}).get("risk_promotion_reasons") or [],
+        "credentialLiteralDetected": bool((classification or {}).get("credential_literal_detected")),
+        "systemAccessDetected": bool((classification or {}).get("system_access_detected")),
+        "suppressed": bool((classification or {}).get("suppressed")),
+        "suppressionReasons": (classification or {}).get("suppression_reasons") or [],
+        "displayBucket": (classification or {}).get("display_bucket") or ("suppressed" if (classification or {}).get("suppressed") else "primary"),
         "reviewStatus": row.get("review_status") or "new",
         "evidenceCount": int(row.get("evidence_count") or 0),
         "firstSeenAt": row.get("first_seen_at") or "",
@@ -2450,6 +4615,8 @@ def list_code_scan_runs_payload(watchlist_id: int | None = None, limit: int | No
                 "requestedTerms": _parse_json(row.get("requested_terms_json"), []),
                 "candidateCount": int(row.get("candidate_count") or 0),
                 "hitCount": int(row.get("hit_count") or 0),
+                "clueHitCount": int(row.get("clue_hit_count") or 0),
+                "sensitiveHitCount": int(row.get("sensitive_hit_count") or 0),
                 "errorCount": int(row.get("error_count") or 0),
                 "status": str(row.get("status") or "unknown"),
                 "errors": _parse_json(row.get("errors_json"), []),
@@ -2474,7 +4641,7 @@ def _format_day_bucket(value: str) -> str:
 
 
 def build_code_monitoring_summary() -> dict[str, Any]:
-    rows = list_code_hits_payload(limit=500)
+    rows = list_code_hits_payload(limit=500, include_suppressed=True)
     now = datetime.now(SHANGHAI_TZ).date()
     trend_counter: dict[str, int] = {}
     for offset in range(6, -1, -1):
@@ -2494,9 +4661,14 @@ def build_code_monitoring_summary() -> dict[str, Any]:
     recent_count = 0
     clue_hit_count = 0
     sensitive_hit_count = 0
+    suppressed_hit_count = 0
+    primary_hit_count = 0
     for row in rows:
         platform_counts[row["platformLabel"]] = platform_counts.get(row["platformLabel"], 0) + 1
-        sensitive_label = SENSITIVE_RULE_MAP.get(str(row.get("sensitiveType") or ""), SensitiveRule("", "", re.compile(""), 0)).label or str(row.get("sensitiveType") or "未知")
+        sensitive_label = _normalize_text(row.get("sensitiveLabel")) or (
+            SENSITIVE_RULE_MAP.get(str(row.get("sensitiveType") or ""), SensitiveRule("", "", re.compile(""), 0)).label
+            or str(row.get("sensitiveType") or "未知")
+        )
         sensitive_counts[sensitive_label] = sensitive_counts.get(sensitive_label, 0) + 1
         risk_counts[str(row.get("severity") or "low")] = risk_counts.get(str(row.get("severity") or "low"), 0) + 1
         review_key = str(row.get("reviewStatus") or "new")
@@ -2505,6 +4677,10 @@ def build_code_monitoring_summary() -> dict[str, Any]:
             high_risk_repos.add(str(row.get("repositoryUrl") or ""))
         if bool(row.get("secretLike")):
             secret_like_count += 1
+        if bool(row.get("suppressed")):
+            suppressed_hit_count += 1
+        else:
+            primary_hit_count += 1
         if str(row.get("resultLayer") or "sensitive") == "clue":
             clue_hit_count += 1
         else:
@@ -2528,6 +4704,8 @@ def build_code_monitoring_summary() -> dict[str, Any]:
         "totalHits": len(rows),
         "sensitiveSnippetCount": sensitive_hit_count,
         "clueHitCount": clue_hit_count,
+        "primaryHitCount": primary_hit_count,
+        "suppressedHitCount": suppressed_hit_count,
         "secretLikeCount": secret_like_count,
         "highRiskRepoCount": len([item for item in high_risk_repos if item]),
         "platformCount": len(platform_counts),

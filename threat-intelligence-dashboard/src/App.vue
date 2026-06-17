@@ -36,6 +36,7 @@ const shell = provideShellLayout()
   display: flex;
   flex-direction: column;
   margin-left: var(--ti-sidebar-width);
+  background: #ffffff;
   transition: margin-left 0.3s ease;
 }
 
@@ -47,6 +48,7 @@ const shell = provideShellLayout()
   flex: 1;
   padding: 28px;
   overflow-y: auto;
+  background: #ffffff;
 }
 
 .fade-enter-active,

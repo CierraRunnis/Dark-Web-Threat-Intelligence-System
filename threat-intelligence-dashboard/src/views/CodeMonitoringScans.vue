@@ -7,40 +7,49 @@
           <div class="health-actions">
             <el-button plain :loading="loadingWatchlists" @click="loadWatchlists">刷新配置</el-button>
             <el-button type="success" :loading="scanLoading" @click="runScan">立即扫描</el-button>
+            <el-select v-model="continuousIntervalHours" style="width: 150px">
+              <el-option label="每 1 小时" :value="1" />
+              <el-option label="每 4 小时" :value="4" />
+              <el-option label="每 8 小时" :value="8" />
+            </el-select>
+            <el-button type="success" :loading="continuousLoading" :disabled="continuousStartDisabled" @click="startContinuousScan">开始长期扫描</el-button>
+            <el-button type="danger" plain :loading="continuousLoading" :disabled="continuousStopDisabled" @click="stopContinuousScan">停止长期扫描</el-button>
           </div>
         </div>
         <div class="ti-card-body">
+          <div class="status-grid status-grid--compact">
+            <div class="metric-card">
+              <span>长期任务</span>
+              <strong>{{ continuousStatus.enabled ? '运行中' : '未启动' }}</strong>
+            </div>
+            <div class="metric-card">
+              <span>运行任务数</span>
+              <strong>{{ continuousStatus.active_watchlist_count || 0 }}</strong>
+            </div>
+            <div class="metric-card">
+              <span>扫描间隔</span>
+              <strong>{{ continuousStatus.interval_seconds ? `${Math.round(continuousStatus.interval_seconds / 3600)} 小时` : '未设置' }}</strong>
+            </div>
+            <div class="metric-card">
+              <span>最近后台扫描</span>
+              <strong class="metric-card__value metric-card__value--small">{{ formatDateTime(continuousStatus.last_success_at) || '暂无' }}</strong>
+            </div>
+            <div class="metric-card">
+              <span>长期对象</span>
+              <strong class="metric-card__value metric-card__value--small">{{ continuousStatus.target_watchlist_name || '未绑定' }}</strong>
+            </div>
+            <div class="metric-card">
+              <span>最近分层结果</span>
+              <strong class="metric-card__value metric-card__value--small">{{ `${continuousStatus.sensitive_hit_count || 0} / ${continuousStatus.clue_hit_count || 0}` }}</strong>
+            </div>
+          </div>
+
           <div class="scan-form">
             <div class="scan-form__item">
               <span>监测对象</span>
               <el-select v-model="scanForm.watchlistId" placeholder="选择监测对象">
                 <el-option v-for="item in watchlists" :key="item.id" :label="item.name" :value="item.id" />
               </el-select>
-            </div>
-            <div class="scan-form__item">
-              <span>平台选择</span>
-              <el-select v-model="scanForm.platforms" multiple collapse-tags placeholder="选择平台">
-                <el-option label="GitHub" value="github" />
-                <el-option label="GitLab" value="gitlab" />
-                <el-option label="Gitee" value="gitee" />
-              </el-select>
-            </div>
-            <div class="scan-form__item">
-              <span>文件扩展名</span>
-              <el-select v-model="scanForm.fileExtensions" multiple collapse-tags placeholder="选择扩展名">
-                <el-option v-for="item in fileExtensionOptions" :key="item" :label="item" :value="item" />
-              </el-select>
-            </div>
-            <div class="scan-form__item">
-              <span>每词最大结果数</span>
-              <el-input-number v-model="scanForm.maxResultsPerTerm" :min="1" :max="20" />
-            </div>
-            <div class="scan-form__item">
-              <span>搜索页数</span>
-              <el-input-number v-model="scanForm.searchPageLimit" :min="1" :max="10" />
-            </div>
-            <div class="scan-form__item scan-form__item--switches">
-              <label><el-switch v-model="scanForm.detailFetch" /> 详情抓取</label>
             </div>
           </div>
 
@@ -54,7 +63,10 @@
           </div>
 
           <div class="scan-status">
+            <p class="panel-note">代码监测长期后台扫描按监测对象独立运行，当前页面仅展示所选监测对象的长期任务状态，并沿用该对象的 GitHub / GitLab / Gitee 平台配置、详情抓取和不受限的搜索/结果预算。</p>
+            <p v-if="(continuousStatus.active_watchlist_count || 0) > 1" class="panel-note">当前共有 {{ continuousStatus.active_watchlist_count }} 个监测对象在执行长期扫描。</p>
             <p v-if="lastRunMessage" class="panel-note">{{ lastRunMessage }}</p>
+            <p v-if="continuousStatus.last_error" class="panel-note panel-note--danger">后台扫描错误：{{ continuousStatus.last_error }}</p>
             <p v-if="lastRunErrors.length" class="panel-note panel-note--danger">
               最近扫描错误：{{ lastRunErrors.slice(0, 3).join('；') }}
             </p>
@@ -85,6 +97,8 @@
               </el-table-column>
               <el-table-column prop="candidateCount" label="候选数" width="100" />
               <el-table-column prop="hitCount" label="命中数" width="100" />
+              <el-table-column prop="sensitiveHitCount" label="敏感命中" width="110" />
+              <el-table-column prop="clueHitCount" label="线索命中" width="110" />
               <el-table-column prop="errorCount" label="错误数" width="100" />
               <el-table-column prop="status" label="状态" width="120" />
             </el-table>
@@ -96,7 +110,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
 import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
@@ -106,12 +120,31 @@ const api = useCodeMonitoringApi()
 const loadingWatchlists = ref(false)
 const loadingScans = ref(false)
 const scanLoading = ref(false)
+const continuousLoading = ref(false)
 const watchlists = ref([])
 const scanRuns = ref([])
 const lastRunMessage = ref('')
 const lastRunErrors = ref([])
+const continuousIntervalHours = ref(1)
+const continuousStatus = ref({
+  enabled: false,
+  running: false,
+  started_at: '',
+  last_tick_at: '',
+  last_success_at: '',
+  last_error: '',
+  interval_seconds: 3600,
+  watchlist_count: 0,
+  candidate_count: 0,
+  hit_count: 0,
+  clue_hit_count: 0,
+  sensitive_hit_count: 0,
+  target_watchlist_id: 0,
+  target_watchlist_name: '',
+  active_watchlist_count: 0,
+})
+let continuousTimer = null
 
-const fileExtensionOptions = ['env', 'yaml', 'yml', 'json', 'ini', 'conf', 'properties', 'py', 'js', 'ts', 'java']
 const ruleOptions = [
   { label: 'API Key', value: 'api_key' },
   { label: 'Token', value: 'token' },
@@ -126,13 +159,21 @@ const ruleOptions = [
 
 const scanForm = reactive({
   watchlistId: null,
-  platforms: [],
+  platforms: ['github', 'gitlab', 'gitee'],
   fileExtensions: [],
-  searchPageLimit: 3,
-  maxResultsPerTerm: 5,
+  searchPageLimit: 0,
+  maxResultsPerTerm: 0,
   detailFetch: true,
   enabledRuleKeys: ['api_key', 'token', 'ak_sk', 'db_url', 'jwt_secret', 'redis_url', 'private_key', 'internal_url', 'password'],
 })
+
+const continuousStartDisabled = computed(() => {
+  const selectedId = Number(scanForm.watchlistId || 0)
+  if (!selectedId) return true
+  return Boolean(continuousStatus.value.enabled)
+})
+
+const continuousStopDisabled = computed(() => !continuousStatus.value.enabled)
 
 function formatDateTime(value) {
   return formatShanghaiDateTime(value)
@@ -141,11 +182,11 @@ function formatDateTime(value) {
 function applyWatchlist(payload) {
   if (!payload) return
   scanForm.watchlistId = payload.id
-  scanForm.platforms = Array.isArray(payload.platforms) ? [...payload.platforms] : []
-  scanForm.fileExtensions = Array.isArray(payload.file_extensions) ? [...payload.file_extensions] : []
-  scanForm.searchPageLimit = Number(payload.search_page_limit || 3)
-  scanForm.maxResultsPerTerm = Number(payload.max_results_per_term || 5)
-  scanForm.detailFetch = Boolean(payload.detail_fetch ?? true)
+  scanForm.platforms = ['github', 'gitlab', 'gitee']
+  scanForm.fileExtensions = []
+  scanForm.searchPageLimit = 0
+  scanForm.maxResultsPerTerm = 0
+  scanForm.detailFetch = true
   scanForm.enabledRuleKeys = Array.isArray(payload.enabled_rule_keys) ? [...payload.enabled_rule_keys] : []
 }
 
@@ -177,6 +218,16 @@ async function loadScans() {
   }
 }
 
+async function loadContinuousStatus() {
+  try {
+    continuousStatus.value = await api.loadContinuousStatus({
+      watchlistId: scanForm.watchlistId || undefined,
+    })
+  } catch (error) {
+    ElMessage.error(error.message || '加载长期扫描状态失败')
+  }
+}
+
 async function runScan() {
   if (!scanForm.watchlistId) {
     ElMessage.error('请先选择监测对象')
@@ -194,7 +245,7 @@ async function runScan() {
       detail_fetch: scanForm.detailFetch,
       enabled_rule_keys: scanForm.enabledRuleKeys,
     })
-    lastRunMessage.value = `已扫描 ${payload.scanned_terms || 0} 个监测词，候选 ${payload.candidates || 0} 条，命中 ${payload.hits || 0} 条。`
+    lastRunMessage.value = `已扫描 ${payload.scanned_terms || 0} 个监测词，候选 ${payload.candidates || 0} 条，命中 ${payload.hits || 0} 条（敏感 ${payload.sensitive_hits || 0} / 线索 ${payload.clue_hits || 0}）。`
     lastRunErrors.value = payload.errors || []
     await loadScans()
     ElMessage.success('代码扫描已执行')
@@ -205,6 +256,45 @@ async function runScan() {
   }
 }
 
+async function startContinuousScan() {
+  if (!scanForm.watchlistId) {
+    ElMessage.error('请先选择监测对象')
+    return
+  }
+  continuousLoading.value = true
+  try {
+    const payload = await api.startContinuous({
+      interval_seconds: Number(continuousIntervalHours.value || 1) * 3600,
+      watchlist_id: scanForm.watchlistId,
+    })
+    continuousStatus.value = payload
+    ElMessage.success(payload.message || '已开启代码监测长期扫描')
+  } catch (error) {
+    ElMessage.error(error.message || '开启代码监测长期扫描失败')
+  } finally {
+    continuousLoading.value = false
+  }
+}
+
+async function stopContinuousScan() {
+  if (!scanForm.watchlistId) {
+    ElMessage.error('请先选择监测对象')
+    return
+  }
+  continuousLoading.value = true
+  try {
+    const payload = await api.stopContinuous({
+      watchlist_id: scanForm.watchlistId,
+    })
+    continuousStatus.value = payload
+    ElMessage.success(payload.message || '已停止代码监测长期扫描')
+  } catch (error) {
+    ElMessage.error(error.message || '停止代码监测长期扫描失败')
+  } finally {
+    continuousLoading.value = false
+  }
+}
+
 watch(
   () => scanForm.watchlistId,
   async (watchlistId) => {
@@ -212,12 +302,25 @@ watch(
     const target = watchlists.value.find((item) => item.id === watchlistId)
     if (target) applyWatchlist(target)
     await loadScans()
+    await loadContinuousStatus()
   },
 )
 
 onMounted(async () => {
   await loadWatchlists()
   await loadScans()
+  await loadContinuousStatus()
+  continuousTimer = window.setInterval(() => {
+    loadContinuousStatus()
+    loadScans()
+  }, 15000)
+})
+
+onUnmounted(() => {
+  if (continuousTimer) {
+    window.clearInterval(continuousTimer)
+    continuousTimer = null
+  }
 })
 </script>
 
@@ -226,6 +329,38 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: 1fr;
   gap: 22px;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(247, 250, 255, 0.96);
+  border: 1px solid rgba(116, 142, 184, 0.14);
+}
+
+.metric-card span {
+  color: var(--ti-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.metric-card strong {
+  color: var(--ti-text-primary);
+}
+
+.metric-card__value--small {
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
 .scan-form {
@@ -267,6 +402,7 @@ onMounted(async () => {
 }
 
 @media (max-width: 1200px) {
+  .status-grid,
   .scan-form {
     grid-template-columns: 1fr;
   }

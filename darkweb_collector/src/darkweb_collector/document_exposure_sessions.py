@@ -8,6 +8,8 @@ import signal
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
 from darkweb_collector.db import (
     delete_platform_session,
@@ -31,6 +33,94 @@ def _now_utc_iso() -> str:
 
 def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _platform_verification_url(platform_name: str, homepage_url: str, login_url: str, module: str) -> str:
+    if str(module or "").strip() == "code_monitoring":
+        return {
+            "github": "https://github.com/search?q=readme&type=code",
+            "gitlab": "https://gitlab.com/search?search=readme&nav_source=navbar&type=blobs",
+            "gitee": "https://search.gitee.com/?skin=rec&type=code&q=readme",
+        }.get(str(platform_name or "").strip(), homepage_url or login_url)
+    return homepage_url or login_url
+
+
+def _has_search_challenge(html: str, current_url: str) -> bool:
+    lowered = f"{html}\n{current_url}".lower()
+    challenge_markers = (
+        "安全验证码",
+        "独立验证",
+        "verify you are human",
+        "cf-challenge",
+        "please move your mouse or press a key",
+        "please wait while we verify",
+        "just a moment",
+    )
+    return any(marker in lowered for marker in challenge_markers)
+
+
+def _challenge_excerpt(text: str, limit: int = 500) -> str:
+    return str(text or "")[:limit]
+
+
+def _verify_gitee_code_search_capability() -> dict[str, Any]:
+    url = f"https://so.gitee.com/v1/search/widget/wong1slagnlmzwvsu5ya?q={quote_plus('readme')}&from=0&size=20"
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+            "Referer": "https://search.gitee.com/",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:  # noqa: S310
+            body = response.read().decode("utf-8", errors="replace")
+            resolved_url = str(response.geturl() or url)
+    except Exception as exc:
+        return {
+            "valid": False,
+            "last_error": f"gitee widget search unavailable: {exc}",
+            "metadata": {
+                "verification_target": url,
+                "verification_mode": "gitee_widget_api",
+                "verification_excerpt": "",
+            },
+        }
+    metadata = {
+        "verification_target": url,
+        "verification_mode": "gitee_widget_api",
+        "last_verified_url": resolved_url,
+        "verification_excerpt": _challenge_excerpt(body),
+    }
+    if _has_search_challenge(body, resolved_url):
+        return {
+            "valid": False,
+            "last_error": "gitee code search requires security verification",
+            "metadata": metadata,
+        }
+    try:
+        payload = json.loads(body)
+    except Exception as exc:
+        return {
+            "valid": False,
+            "last_error": f"gitee widget search returned invalid payload: {exc}",
+            "metadata": metadata,
+        }
+    if not isinstance(payload, dict) or "hits" not in payload:
+        return {
+            "valid": False,
+            "last_error": "gitee widget search returned invalid payload",
+            "metadata": metadata,
+        }
+    total = ((payload.get("hits") or {}).get("total") or {}) if isinstance(payload.get("hits"), dict) else {}
+    metadata["verification_excerpt"] = ""
+    metadata["verification_total"] = total
+    return {
+        "valid": True,
+        "last_error": "",
+        "metadata": metadata,
+    }
 
 
 def platform_session_root() -> Path:
@@ -82,6 +172,26 @@ def _platform_metadata_payload(platform: str, row: dict[str, Any] | None) -> dic
         if isinstance(saved, dict):
             meta = {**saved, **meta}
     return meta
+
+
+def _stored_storage_state_path(row: dict[str, Any] | None) -> Path | None:
+    raw_path = str((row or {}).get("storage_state_path") or "").strip()
+    if not raw_path:
+        return None
+    try:
+        return Path(raw_path).expanduser().resolve()
+    except Exception:
+        return None
+
+
+def resolve_platform_storage_state_path(platform: str, row: dict[str, Any] | None = None) -> Path:
+    current_path = platform_storage_state_path(platform)
+    if current_path.exists():
+        return current_path
+    stored_path = _stored_storage_state_path(row)
+    if stored_path is not None and stored_path.exists():
+        return stored_path
+    return current_path
 
 
 def _pid_from_metadata(metadata: dict[str, Any]) -> int | None:
@@ -192,7 +302,7 @@ def build_platform_session_payloads(
     for platform in platforms:
         row = rows.get(platform.key)
         row_payload = dict(row) if row is not None else {}
-        storage_path = platform_storage_state_path(platform.key)
+        storage_path = resolve_platform_storage_state_path(platform.key, row_payload if row is not None else None)
         metadata = _platform_metadata_payload(platform.key, row_payload if row is not None else None)
         status = str(row_payload.get("status") or "")
         if status == "login_in_progress" and not _is_process_alive(_pid_from_metadata(metadata)):
@@ -318,7 +428,18 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
 
 def verify_platform_session(platform_name: str) -> dict[str, Any]:
     platform = get_exposure_platform(platform_name)
-    storage_state_path = platform_storage_state_path(platform.key)
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, platform, account_label, login_url, homepage_url, requires_login, status,
+                   storage_state_path, last_verified_at, expires_hint, last_error, metadata_json, updated_at
+            FROM platform_sessions
+            WHERE platform = ?
+            """,
+            (platform.key,),
+        ).fetchone()
+    row_payload = dict(row) if row is not None else {}
+    storage_state_path = resolve_platform_storage_state_path(platform.key, row_payload)
     user_data_dir = platform_user_data_dir(platform.key)
     if not storage_state_path.exists() and not user_data_dir.exists():
         result = {
@@ -346,6 +467,43 @@ def verify_platform_session(platform_name: str) -> dict[str, Any]:
             )
             connection.commit()
         return result
+
+    if platform.key == "gitee" and platform.module == "code_monitoring":
+        probe = _verify_gitee_code_search_capability()
+        updated_at = _now_utc_iso()
+        metadata = _platform_metadata_payload(platform.key, row_payload if row is not None else None)
+        metadata.update(probe.get("metadata") or {})
+        metadata["user_data_dir"] = str(user_data_dir)
+        status = "valid" if probe.get("valid") else "invalid"
+        with get_db_connection() as connection:
+            existing_rows = [item for item in build_platform_session_payloads() if item["platform"] == platform.key]
+            account_label = existing_rows[0]["account_label"] if existing_rows else ""
+            upsert_platform_session(
+                connection,
+                {
+                    "platform": platform.key,
+                    "account_label": account_label,
+                    "login_url": platform.login_url,
+                    "homepage_url": platform.homepage_url,
+                    "requires_login": platform.requires_login,
+                    "status": status,
+                    "storage_state_path": str(storage_state_path),
+                    "last_verified_at": updated_at,
+                    "last_error": str(probe.get("last_error") or ""),
+                    "metadata_json": json.dumps(metadata, ensure_ascii=False),
+                    "updated_at": updated_at,
+                },
+            )
+            connection.commit()
+        return {
+            "platform": platform.key,
+            "status": status,
+            "valid": bool(probe.get("valid")),
+            "last_error": str(probe.get("last_error") or ""),
+            "storage_state_path": str(storage_state_path),
+            "last_verified_at": updated_at,
+            "metadata": metadata,
+        }
 
     try:
         from playwright.sync_api import sync_playwright
@@ -388,8 +546,9 @@ def verify_platform_session(platform_name: str) -> dict[str, Any]:
             connection.commit()
         return result
 
+    verification_url = _platform_verification_url(platform.key, platform.homepage_url, platform.login_url, platform.module)
     html = ""
-    current_url = platform.homepage_url
+    current_url = verification_url
     last_error = ""
     valid = False
     with sync_playwright() as playwright:  # pragma: no cover - browser runtime
@@ -406,15 +565,18 @@ def verify_platform_session(platform_name: str) -> dict[str, Any]:
         context = browser.new_context(**context_kwargs)
         page = context.new_page()
         try:
-            page.goto(platform.homepage_url or platform.login_url, wait_until="domcontentloaded", timeout=45000)
+            page.goto(verification_url, wait_until="domcontentloaded", timeout=45000)
             page.wait_for_timeout(2500)
             html = page.content()
             current_url = page.url
             lowered = html.lower()
             login_hits = sum(1 for token in platform.login_indicators if token.lower() in lowered or token.lower() in current_url.lower())
             success_hits = sum(1 for token in platform.success_indicators if token.lower() in lowered or token.lower() in current_url.lower())
-            valid = success_hits > 0
-            if not valid and platform.requires_login:
+            challenged = _has_search_challenge(html, current_url)
+            valid = success_hits > 0 and login_hits == 0 and not challenged
+            if challenged:
+                last_error = "search page requires security verification"
+            elif not valid and platform.requires_login:
                 last_error = "session appears to require login again"
         finally:
             try:
@@ -429,6 +591,7 @@ def verify_platform_session(platform_name: str) -> dict[str, Any]:
     metadata = _platform_metadata_payload(platform.key, None)
     metadata.update(
         {
+            "verification_target": verification_url,
             "last_verified_url": current_url,
             "verification_excerpt": html[:500],
             "user_data_dir": str(user_data_dir),
@@ -493,6 +656,19 @@ def save_platform_session(platform_name: str, account_label: str = "") -> dict[s
         **verification,
         "account_label": normalized_account_label,
     }
+
+
+def auto_detect_platform_sessions(module: str | None = None) -> list[dict[str, Any]]:
+    sessions = build_platform_session_payloads(module=module, manageable_only=True)
+    for item in sessions:
+        platform_name = str(item.get("platform") or "").strip()
+        if not platform_name or str(item.get("status") or "") == "login_in_progress":
+            continue
+        try:
+            verify_platform_session(platform_name)
+        except ValueError:
+            continue
+    return build_platform_session_payloads(module=module, manageable_only=True)
 
 
 def remove_platform_session(platform_name: str) -> dict[str, Any]:
