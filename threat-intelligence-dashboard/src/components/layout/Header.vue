@@ -1,67 +1,21 @@
 <template>
   <header class="header">
-    <div class="header__intro">
-      <div class="header__kicker">
-        <span>{{ pageMeta.kicker }}</span>
-        <span class="header__dot" />
-        <span>{{ monitoringStatus.dateLabel }}</span>
-      </div>
-      <h1 class="header__title">{{ $route.meta.title }}</h1>
-      <p class="header__subtitle">{{ pageMeta.subtitle }}</p>
-    </div>
+    <div class="header__actions">
+      <el-badge :value="6" class="header__badge">
+        <el-button circle class="header__action-btn" aria-label="通知">
+          <el-icon><Bell /></el-icon>
+        </el-button>
+      </el-badge>
 
-    <div class="header__right">
-      <div class="header__status-strip">
-        <div class="header__status-item">
-          <span class="header__status-label">{{ monitoringStatus.refreshedLabel }}</span>
-          <span class="header__status-value">{{ monitoringStatus.refreshedValue }}</span>
-        </div>
-        <div class="header__status-item">
-          <span class="header__status-label">{{ monitoringStatus.statusLabel }}</span>
-          <StatusBadge :label="monitoringStatus.statusValue" tone="success" />
-        </div>
-      </div>
-
-      <div class="header__actions">
-        <div class="search-box">
-          <el-icon class="search-box__icon"><Search /></el-icon>
-          <input type="text" placeholder="检索事件标题、攻击者、地区" class="search-box__input" />
-        </div>
-
-        <div class="header__buttons">
-          <el-badge :value="6" class="header__badge">
-            <el-button circle class="header__action-btn">
-              <el-icon><Bell /></el-icon>
-            </el-button>
-          </el-badge>
-
-          <el-button circle class="header__action-btn" @click="shell.toggleSidebar">
-            <el-icon>
-              <Fold v-if="!shell.state.sidebarCollapsed" />
-              <Expand v-else />
-            </el-icon>
-          </el-button>
-        </div>
-      </div>
+      <el-button class="header__profile-btn" aria-label="个人用户">
+        <span class="header__profile-avatar">
+          <el-icon><UserFilled /></el-icon>
+        </span>
+        <span>个人用户</span>
+      </el-button>
     </div>
   </header>
 </template>
-
-<script setup>
-import { computed } from 'vue'
-import { useRoute } from 'vue-router'
-import StatusBadge from '@/components/common/StatusBadge.vue'
-import { useIntelligenceData } from '@/composables/useIntelligenceData'
-import { useShellLayout } from '@/composables/useShellLayout'
-
-const $route = useRoute()
-const shell = useShellLayout()
-const { data } = useIntelligenceData()
-
-const monitoringStatus = computed(() => data.value.monitoringStatus || {})
-const routeHeaderMeta = computed(() => data.value.routeHeaderMeta || {})
-const pageMeta = computed(() => routeHeaderMeta.value[$route.path] || routeHeaderMeta.value['/'] || {})
-</script>
 
 <style lang="scss" scoped>
 .header {
@@ -69,175 +23,61 @@ const pageMeta = computed(() => routeHeaderMeta.value[$route.path] || routeHeade
   top: 0;
   z-index: 50;
   display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: flex-start;
-  min-height: var(--ti-header-height);
-  padding: 22px 28px 20px;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 82px;
+  padding: 18px 28px 14px;
   border-bottom: 1px solid rgba(87, 97, 123, 0.08);
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(16px);
 }
 
-.header__intro {
-  max-width: 760px;
-}
-
-.header__kicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--ti-accent-strong);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.header__dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: currentColor;
-}
-
-.header__title {
-  margin: 10px 0 6px;
-  font-family: var(--ti-font-display);
-  font-size: clamp(28px, 3.2vw, 42px);
-  line-height: 1;
-  letter-spacing: -0.03em;
-  color: var(--ti-text-primary);
-}
-
-.header__subtitle {
-  margin: 0;
-  color: var(--ti-text-secondary);
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.header__right {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  align-items: flex-end;
-  min-width: 420px;
-}
-
-.header__status-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  justify-content: flex-end;
-}
-
-.header__status-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-radius: 16px;
-  border: 1px solid var(--ti-border-soft);
-  background: rgba(255, 255, 255, 0.96);
-}
-
-.header__status-label {
-  color: var(--ti-text-muted);
-  font-size: 12px;
-}
-
-.header__status-value {
-  color: var(--ti-text-primary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .header__actions {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
 }
 
-.search-box {
-  position: relative;
-  width: 300px;
-}
-
-.search-box__icon {
-  position: absolute;
-  left: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--ti-text-muted);
-}
-
-.search-box__input {
-  width: 100%;
-  height: 44px;
-  padding: 0 14px 0 42px;
-  border: 1px solid transparent;
-  border-radius: 16px;
+.header__action-btn,
+.header__profile-btn {
+  height: 42px;
+  border-color: rgba(116, 142, 184, 0.18);
   background: rgba(255, 255, 255, 0.98);
+  box-shadow:
+    inset 0 0 0 1px rgba(37, 94, 161, 0.03),
+    0 8px 18px rgba(36, 78, 130, 0.04);
   color: var(--ti-text-primary);
-  transition:
-    border-color 0.2s ease,
-    box-shadow 0.2s ease,
-    background 0.2s ease;
-}
-
-.search-box__input::placeholder {
-  color: var(--ti-text-muted);
-}
-
-.search-box__input:focus {
-  outline: none;
-  background: #ffffff;
-  border-color: rgba(45, 93, 255, 0.24);
-  box-shadow: 0 0 0 4px rgba(45, 93, 255, 0.08);
-}
-
-.header__buttons {
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 
 .header__action-btn {
   width: 42px;
-  height: 42px;
-  border-color: var(--ti-border-default);
-  background: rgba(255, 255, 255, 0.98);
 }
 
-@media (max-width: 1200px) {
-  .header {
-    flex-direction: column;
-  }
+.header__profile-btn {
+  padding: 0 14px 0 10px;
+  border-radius: 999px;
+  font-weight: 600;
+}
 
-  .header__right {
-    min-width: auto;
-    width: 100%;
-    align-items: stretch;
-  }
-
-  .header__status-strip {
-    justify-content: flex-start;
-  }
-
-  .header__actions {
-    justify-content: space-between;
-  }
+.header__profile-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(45, 93, 255, 0.16), rgba(45, 93, 255, 0.08));
+  color: var(--ti-primary);
 }
 
 @media (max-width: 767px) {
   .header {
-    padding: 18px 18px 16px;
+    min-height: 72px;
+    padding: 14px 18px 12px;
   }
 
-  .search-box {
-    width: 180px;
-    opacity: 0.72;
+  .header__profile-btn {
+    padding-right: 12px;
   }
 }
 </style>

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from darkweb_collector.models import SiteConfig, VALID_FETCH_MODES, VALID_PROFILES
-from darkweb_collector.runtime import default_config_path, project_root
+from darkweb_collector.runtime import default_config_path, output_root, project_root
 
 
 REQUIRED_KEYS = {
@@ -52,6 +52,9 @@ def _resolve_output_dir(path_value: str) -> Path:
     output_dir = Path(path_value)
     if output_dir.is_absolute():
         return output_dir
+    parts = output_dir.parts
+    if parts and parts[0].lower() == "output":
+        return output_root().joinpath(*parts[1:]).resolve()
     return (project_root() / output_dir).resolve()
 
 

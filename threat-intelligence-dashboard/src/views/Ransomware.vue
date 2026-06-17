@@ -3,7 +3,7 @@
     <section class="ti-panel ti-reveal-up">
       <div class="summary-grid">
         <ModuleSummaryCard
-          v-for="card in ransomwareSummary"
+          v-for="card in visibleRansomwareSummary"
           :key="card.label"
           v-bind="card"
         />
@@ -79,6 +79,9 @@ const DETAIL_CACHE_VERSION = '2026-04-09-rich-detail-v4'
 const { data, refresh: refreshIntelligence } = useIntelligenceData()
 const ransomwareEvents = computed(() => data.value.ransomwareEvents || [])
 const ransomwareSummary = computed(() => data.value.ransomwareSummary || [])
+const visibleRansomwareSummary = computed(() =>
+  ransomwareSummary.value.filter((card) => card?.label !== '失败任务')
+)
 const route = useRoute()
 const router = useRouter()
 
@@ -100,7 +103,7 @@ function parseDisclosureTime(value) {
 
 const sortedEvents = computed(() => {
   return [...ransomwareEvents.value].sort((left, right) => {
-    return parseDisclosureTime(right.updatedTimeRaw || right.disclosureTimeRaw || right.disclosureTime) - parseDisclosureTime(left.updatedTimeRaw || left.disclosureTimeRaw || left.disclosureTime)
+    return parseDisclosureTime(right.disclosureTimeRaw || right.disclosureTime || right.updatedTimeRaw || right.updatedTime) - parseDisclosureTime(left.disclosureTimeRaw || left.disclosureTime || left.updatedTimeRaw || left.updatedTime)
   })
 })
 
@@ -190,7 +193,7 @@ onBeforeUnmount(() => {
 <style scoped lang="scss">
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
 }
 
