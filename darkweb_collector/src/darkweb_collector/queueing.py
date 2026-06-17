@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 
@@ -18,6 +19,29 @@ QUEUE_MAX_TASKS_PER_CHILD = {
 }
 
 MAX_RETRIES = 3
+
+
+def _positive_int_from_env(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(value, 1)
+
+
+def browser_concurrency() -> int:
+    return _positive_int_from_env("DARKWEB_BROWSER_CONCURRENCY", QUEUE_CONCURRENCY[BROWSER_RENDER_QUEUE])
+
+
+def queue_concurrency(queue_name: str) -> int:
+    if queue_name == BROWSER_RENDER_QUEUE:
+        return browser_concurrency()
+    if queue_name not in QUEUE_CONCURRENCY:
+        raise ValueError(f"unsupported queue '{queue_name}'")
+    return QUEUE_CONCURRENCY[queue_name]
 
 
 def queue_for_seed(fetch_mode: str) -> str:
@@ -50,7 +74,7 @@ def build_worker_command(queue_name: str) -> list[str]:
         "-Q",
         queue_name,
         "--concurrency",
-        str(QUEUE_CONCURRENCY[queue_name]),
+        str(queue_concurrency(queue_name)),
         "--prefetch-multiplier",
         "1",
     ]

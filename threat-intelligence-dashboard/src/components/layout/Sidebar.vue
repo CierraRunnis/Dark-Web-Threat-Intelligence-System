@@ -5,41 +5,67 @@
         <el-icon><Monitor /></el-icon>
       </div>
       <div v-show="!shell.state.sidebarCollapsed" class="sidebar__brand-text">
-        <strong>Threat Intel</strong>
-        <span>监控台 / Editorial View</span>
+        <strong>公网信息泄露监测平台</strong>
       </div>
     </div>
 
     <nav class="sidebar__nav">
-      <router-link
-        v-for="item in navItems"
-        :key="item.path"
-        :to="item.path"
-        class="sidebar__item"
-        :class="{ active: $route.path === item.path }"
-      >
-        <div class="sidebar__item-main">
-          <el-icon class="sidebar__item-icon">
-            <component :is="item.icon" />
-          </el-icon>
-          <div v-show="!shell.state.sidebarCollapsed" class="sidebar__item-text">
-            <span class="sidebar__item-title">{{ item.title }}</span>
-            <span class="sidebar__item-note">{{ item.note }}</span>
+      <template v-for="item in navTree" :key="item.key || item.path">
+        <router-link
+          v-if="item.type === 'item'"
+          :to="item.path"
+          class="sidebar__item"
+          :class="{ active: isRouteActive(item.path) }"
+        >
+          <div class="sidebar__item-main">
+            <el-icon class="sidebar__item-icon">
+              <component :is="item.icon" />
+            </el-icon>
+            <div v-show="!shell.state.sidebarCollapsed" class="sidebar__item-text">
+              <span class="sidebar__item-title">{{ item.title }}</span>
+            </div>
+          </div>
+        </router-link>
+
+        <div v-else class="sidebar__group" :class="{ active: isGroupActive(item) }">
+          <button class="sidebar__item sidebar__item--button" type="button" @click="toggleGroup(item.key)">
+            <div class="sidebar__item-main">
+              <el-icon class="sidebar__item-icon">
+                <component :is="item.icon" />
+              </el-icon>
+              <div v-show="!shell.state.sidebarCollapsed" class="sidebar__item-text">
+                <span class="sidebar__item-title">{{ item.title }}</span>
+              </div>
+            </div>
+            <div v-show="!shell.state.sidebarCollapsed" class="sidebar__group-meta">
+              <el-icon class="sidebar__group-arrow">
+                <component :is="isGroupOpen(item.key) ? 'ArrowDown' : 'ArrowRight'" />
+              </el-icon>
+            </div>
+          </button>
+
+          <div v-show="!shell.state.sidebarCollapsed && isGroupOpen(item.key)" class="sidebar__children">
+            <router-link
+              v-for="child in item.children"
+              :key="child.path"
+              :to="child.path"
+              class="sidebar__child"
+              :class="{ active: isRouteActive(child.path) }"
+            >
+              <el-icon class="sidebar__child-icon">
+                <component :is="child.icon" />
+              </el-icon>
+              <span>{{ child.title }}</span>
+            </router-link>
           </div>
         </div>
-        <StatusBadge
-          v-show="!shell.state.sidebarCollapsed"
-          :label="item.badge"
-          :tone="item.tone"
-          :dot="false"
-        />
-      </router-link>
+      </template>
     </nav>
 
     <div class="sidebar__footer">
       <div v-show="!shell.state.sidebarCollapsed" class="sidebar__watch">
-        <span class="sidebar__watch-label">监控范围</span>
-        <p>42 国 / 18 行业 / 126 点位</p>
+        <span class="sidebar__watch-label">监测范围</span>
+        <p>{{ monitoringRangeText }}</p>
       </div>
       <button class="sidebar__collapse" @click="shell.toggleSidebar">
         <el-icon>
@@ -52,35 +78,92 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import router from '@/router'
-import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useShellLayout } from '@/composables/useShellLayout'
+import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
-const $route = useRoute()
+const route = useRoute()
 const shell = useShellLayout()
+const { data } = useIntelligenceData()
 
-const navMeta = {
-  '/': { note: '总览摘要与联动事件', badge: '今日', tone: 'primary' },
-  '/ransomware': { note: '披露事件与团伙活跃度', badge: '高热', tone: 'danger' },
-  '/data-leak': { note: '泄露规模与敏感类型', badge: '更新', tone: 'warning' },
-  '/vulnerability-alerts': { note: '公开源高危漏洞与利用状态', badge: '预警', tone: 'danger' },
-  '/threat-situation': { note: '区域热区与告警流', badge: '态势', tone: 'success' },
-  '/collector-control': { note: '任务触发与站点健康', badge: '控制', tone: 'primary' }
+const navTree = [
+  { type: 'item', path: '/', title: '总览', icon: 'DataLine' },
+  { type: 'item', path: '/ransomware', title: '勒索情报', icon: 'Lock' },
+  { type: 'item', path: '/data-leak', title: '数据泄露情报', icon: 'Document' },
+  { type: 'item', path: '/vulnerability-alerts', title: '漏洞预警', icon: 'WarningFilled' },
+  { type: 'item', path: '/threat-situation', title: '威胁态势', icon: 'TrendCharts' },
+  { type: 'item', path: '/collector-control', title: '采集控制', icon: 'VideoPlay' },
+  {
+    type: 'group',
+    key: 'document-exposure',
+    title: '文件监测',
+    icon: 'Files',
+    children: [
+      { path: '/document-exposure/search-engine', title: '搜索引擎监测', icon: 'Search' },
+      { path: '/document-exposure/netdisk', title: '网盘监测', icon: 'Share' },
+      { path: '/document-exposure/document-library', title: '文库监测', icon: 'Files' },
+      { path: '/document-exposure/code-monitoring', title: '代码监测', icon: 'Connection' },
+    ],
+  },
+]
+
+const expandedGroups = ref(['document-exposure'])
+
+function isRouteActive(path) {
+  if (path === '/') return route.path === '/'
+  return route.path === path || route.path.startsWith(`${path}/`)
 }
 
-const navItems = computed(() =>
-  router
-    .getRoutes()
-    .filter((route) => route.meta?.title && !route.meta?.hidden)
-    .map((route) => ({
-      path: route.path,
-      title: route.meta.title,
-      icon: route.meta.icon,
-      ...navMeta[route.path]
-    }))
+function isGroupActive(group) {
+  if (group.key === 'document-exposure') {
+    return route.path.startsWith('/document-exposure/')
+  }
+  return group.children?.some((child) => isRouteActive(child.path))
+}
+
+function isGroupOpen(groupKey) {
+  return expandedGroups.value.includes(groupKey)
+}
+
+function toggleGroup(groupKey) {
+  if (isGroupOpen(groupKey)) {
+    expandedGroups.value = expandedGroups.value.filter((item) => item !== groupKey)
+    return
+  }
+  expandedGroups.value = [...expandedGroups.value, groupKey]
+}
+
+watch(
+  () => route.path,
+  () => {
+    for (const item of navTree) {
+      if (item.type === 'group' && isGroupActive(item) && !isGroupOpen(item.key)) {
+        expandedGroups.value = [...expandedGroups.value, item.key]
+      }
+    }
+  },
+  { immediate: true },
 )
+
+const monitoringRangeText = computed(() => {
+  const dataLeakEvents = Array.isArray(data.value.dataLeakEvents) ? data.value.dataLeakEvents : []
+  const ransomwareEvents = Array.isArray(data.value.ransomwareEvents) ? data.value.ransomwareEvents : []
+  const vulnerabilityEvents = Array.isArray(data.value.vulnerabilityEvents) ? data.value.vulnerabilityEvents : []
+  const documentExposureEvents = Array.isArray(data.value.documentExposureEvents) ? data.value.documentExposureEvents : []
+  const allEvents = [...dataLeakEvents, ...ransomwareEvents, ...vulnerabilityEvents, ...documentExposureEvents]
+
+  const countries = new Set()
+  const industries = new Set()
+  for (const item of allEvents) {
+    const country = String(item.country || '').trim()
+    const industry = String(item.industry || '').trim()
+    if (country && country !== '未知') countries.add(country)
+    if (industry && !['未知', '其他'].includes(industry)) industries.add(industry)
+  }
+
+  return `${countries.size} 国家 / ${industries.size} 行业 / ${allEvents.length} 事件`
+})
 </script>
 
 <style lang="scss" scoped>
@@ -97,6 +180,7 @@ const navItems = computed(() =>
   border-right: 1px solid rgba(87, 97, 123, 0.08);
   background: rgba(255, 255, 255, 0.98);
   backdrop-filter: blur(16px);
+  overflow-x: hidden;
   transition: width 0.3s ease;
 }
 
@@ -125,20 +209,9 @@ const navItems = computed(() =>
   font-size: 20px;
 }
 
-.sidebar__brand-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
 .sidebar__brand-text strong {
   color: var(--ti-text-primary);
   font-size: 16px;
-}
-
-.sidebar__brand-text span {
-  color: var(--ti-text-muted);
-  font-size: 12px;
 }
 
 .sidebar__nav {
@@ -147,6 +220,12 @@ const navItems = computed(() =>
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.sidebar__group {
+  display: grid;
+  gap: 8px;
 }
 
 .sidebar__item {
@@ -165,14 +244,22 @@ const navItems = computed(() =>
     color 0.2s ease;
 }
 
-.sidebar__item:hover {
+.sidebar__item--button {
+  width: 100%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sidebar__item:hover,
+.sidebar__group.active > .sidebar__item {
   transform: translateX(2px);
   border-color: var(--ti-border-soft);
   background: rgba(255, 255, 255, 0.56);
   color: var(--ti-text-primary);
 }
 
-.sidebar__item.active {
+.sidebar__item.active,
+.sidebar__group.active > .sidebar__item.sidebar__item--button {
   border-color: rgba(45, 93, 255, 0.16);
   background: linear-gradient(135deg, rgba(237, 242, 255, 0.96), rgba(248, 251, 255, 0.96));
   color: var(--ti-text-primary);
@@ -185,7 +272,8 @@ const navItems = computed(() =>
   min-width: 0;
 }
 
-.sidebar__item-icon {
+.sidebar__item-icon,
+.sidebar__child-icon {
   flex-shrink: 0;
   width: 38px;
   height: 38px;
@@ -198,10 +286,13 @@ const navItems = computed(() =>
   font-size: 18px;
 }
 
-.sidebar__item-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
+.sidebar__child-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 10px;
+  font-size: 14px;
+  background: rgba(45, 93, 255, 0.08);
+  color: var(--ti-primary);
 }
 
 .sidebar__item-title {
@@ -210,12 +301,42 @@ const navItems = computed(() =>
   font-weight: 700;
 }
 
-.sidebar__item-note {
+.sidebar__group-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar__group-arrow {
   color: var(--ti-text-muted);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 14px;
+}
+
+.sidebar__children {
+  display: grid;
+  gap: 6px;
+  padding-left: 14px;
+}
+
+.sidebar__child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  color: var(--ti-text-secondary);
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.sidebar__child:hover,
+.sidebar__child.active {
+  background: rgba(45, 93, 255, 0.08);
+  color: var(--ti-text-primary);
+  transform: translateX(2px);
 }
 
 .sidebar__footer {
@@ -267,7 +388,8 @@ const navItems = computed(() =>
 
   .sidebar__brand-text,
   .sidebar__item-text,
-  .sidebar__watch {
+  .sidebar__watch,
+  .sidebar__children {
     display: none !important;
   }
 
@@ -275,10 +397,6 @@ const navItems = computed(() =>
     justify-content: center;
     padding-left: 8px;
     padding-right: 8px;
-  }
-
-  .sidebar__collapse {
-    width: 100%;
   }
 }
 </style>

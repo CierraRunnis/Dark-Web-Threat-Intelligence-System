@@ -1,14 +1,11 @@
 <template>
   <div class="dashboard-page ti-page">
     <section class="ti-panel ti-reveal-up dashboard-hero">
-      <SectionHeader
-        eyebrow="Threat Intelligence Dashboard"
-        title="编辑化卡片视角下的威胁情报总览"
-      />
+      <SectionHeader title="威胁情报总览" />
 
       <div class="dashboard-hero__summary">
         <ModuleSummaryCard
-          v-for="card in dashboardSummaryCards"
+          v-for="card in visibleDashboardSummaryCards"
           :key="card.label"
           v-bind="card"
         />
@@ -19,7 +16,6 @@
       <ChartPanel
         eyebrow="态势摘要"
         title="跨模块趋势概览"
-        description="按日观察勒索披露、数据泄露与总体告警波动，用于总览层快速对齐节奏。"
         icon="TrendCharts"
         height="330px"
       >
@@ -51,11 +47,7 @@
     </section>
 
     <section class="module-preview">
-      <SectionHeader
-        eyebrow="模块重点"
-        title="核心模块预览"
-        description="首页只展示最值得展开查看的重点，深度内容留在各模块页完成。"
-      />
+      <SectionHeader eyebrow="模块重点" title="核心模块预览" />
 
       <div class="module-preview__grid">
         <router-link
@@ -95,7 +87,11 @@
         </div>
         <div class="ti-card-body">
           <div class="timeline-list">
-            <article v-for="item in crossModuleTimeline" :key="`${item.time}-${item.title}`" class="timeline-list__item">
+            <article
+              v-for="item in crossModuleTimeline"
+              :key="`${item.time}-${item.title}`"
+              class="timeline-list__item"
+            >
               <div class="timeline-list__time">{{ item.time }}</div>
               <div class="timeline-list__content">
                 <StatusBadge :label="item.module" :tone="item.tone" />
@@ -106,16 +102,6 @@
           </div>
         </div>
       </div>
-
-      <ChartPanel
-        eyebrow="重点国家"
-        title="国家与地区暴露分布"
-        description="以风险暴露强度衡量需要优先纳入汇报与追踪的地区。"
-        icon="MapLocation"
-        height="320px"
-      >
-        <v-chart class="dashboard-chart" :option="countryFocusOption" autoresize />
-      </ChartPanel>
     </section>
   </div>
 </template>
@@ -123,6 +109,7 @@
 <script setup>
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
+import { Bell, Connection, Right } from '@element-plus/icons-vue'
 import '@/lib/echarts'
 import ChartPanel from '@/components/common/ChartPanel.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
@@ -132,35 +119,38 @@ import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
 const { data } = useIntelligenceData()
 const crossModuleTimeline = computed(() => data.value.crossModuleTimeline || [])
-const dashboardCountryFocus = computed(() => data.value.dashboardCountryFocus || [])
 const dashboardSummaryCards = computed(() => data.value.dashboardSummaryCards || [])
 const dashboardTrendSeries = computed(() => data.value.dashboardTrendSeries || { labels: [], ransomware: [], dataLeak: [], vulnerability: [], threatAlerts: [] })
 const dashboardWatchlist = computed(() => data.value.dashboardWatchlist || [])
 const modulePreviewCards = computed(() => data.value.modulePreviewCards || [])
 
+const visibleDashboardSummaryCards = computed(() =>
+  dashboardSummaryCards.value.filter((card) => card?.label !== '爬虫任务')
+)
+
 const overviewTrendOption = computed(() => ({
-  color: ['#2d5dff', '#e88030', '#8a3ffc', '#cf4432'],
+  color: ['#2d5dff', '#e88030', '#8a3ffc', '#0f766e'],
   tooltip: {
     trigger: 'axis',
     backgroundColor: 'rgba(255, 253, 250, 0.96)',
     borderColor: 'rgba(63, 80, 104, 0.12)',
-    textStyle: { color: '#1e2735' }
+    textStyle: { color: '#1e2735' },
   },
   legend: {
     bottom: 0,
-    textStyle: { color: '#536074' }
+    textStyle: { color: '#536074' },
   },
   grid: { left: 10, right: 16, top: 16, bottom: 38, containLabel: true },
   xAxis: {
     type: 'category',
     data: dashboardTrendSeries.value.labels,
     axisLine: { lineStyle: { color: 'rgba(87, 97, 123, 0.16)' } },
-    axisLabel: { color: '#7f8898' }
+    axisLabel: { color: '#7f8898' },
   },
   yAxis: {
     type: 'value',
     splitLine: { lineStyle: { color: 'rgba(87, 97, 123, 0.08)', type: 'dashed' } },
-    axisLabel: { color: '#7f8898' }
+    axisLabel: { color: '#7f8898' },
   },
   series: [
     {
@@ -168,14 +158,14 @@ const overviewTrendOption = computed(() => ({
       type: 'line',
       smooth: true,
       symbolSize: 8,
-      data: dashboardTrendSeries.value.ransomware
+      data: dashboardTrendSeries.value.ransomware,
     },
     {
       name: '数据泄露',
       type: 'line',
       smooth: true,
       symbolSize: 8,
-      data: dashboardTrendSeries.value.dataLeak
+      data: dashboardTrendSeries.value.dataLeak,
     },
     {
       name: '漏洞预警',
@@ -184,60 +174,19 @@ const overviewTrendOption = computed(() => ({
       symbolSize: 8,
       data: dashboardTrendSeries.value.vulnerability,
       lineStyle: { color: '#8a3ffc' },
-      itemStyle: { color: '#8a3ffc' }
+      itemStyle: { color: '#8a3ffc' },
     },
     {
       name: '总体告警',
       type: 'line',
       smooth: true,
       symbolSize: 8,
-      data: dashboardTrendSeries.value.threatAlerts
-    }
-  ]
-}))
-
-const countryFocusOption = computed(() => ({
-  tooltip: {
-    trigger: 'axis',
-    axisPointer: { type: 'shadow' },
-    backgroundColor: 'rgba(255, 253, 250, 0.96)',
-    borderColor: 'rgba(63, 80, 104, 0.12)',
-    textStyle: { color: '#1e2735' }
-  },
-  grid: { left: 16, right: 16, top: 10, bottom: 10, containLabel: true },
-  xAxis: {
-    type: 'value',
-    splitLine: { lineStyle: { color: 'rgba(87, 97, 123, 0.08)', type: 'dashed' } },
-    axisLabel: { color: '#7f8898' }
-  },
-  yAxis: {
-    type: 'category',
-    data: dashboardCountryFocus.value.map((item) => item.name),
-    axisTick: { show: false },
-    axisLine: { show: false },
-    axisLabel: { color: '#536074' }
-  },
-  series: [
-    {
-      type: 'bar',
-      data: dashboardCountryFocus.value.map((item) => item.value),
-      barWidth: 14,
-      itemStyle: {
-        borderRadius: [0, 10, 10, 0],
-        color: {
-          type: 'linear',
-          x: 0,
-          y: 0,
-          x2: 1,
-          y2: 0,
-          colorStops: [
-            { offset: 0, color: '#ffcf9f' },
-            { offset: 1, color: '#e88030' }
-          ]
-        }
-      }
-    }
-  ]
+      data: dashboardTrendSeries.value.threatAlerts,
+      lineStyle: { color: '#0f766e' },
+      itemStyle: { color: '#0f766e' },
+      areaStyle: { color: 'rgba(15, 118, 110, 0.08)' },
+    },
+  ],
 }))
 </script>
 
@@ -360,7 +309,8 @@ const countryFocusOption = computed(() => ({
 }
 
 .dashboard-bottom {
-  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  grid-template-columns: 1fr;
+  align-items: start;
 }
 
 .timeline-list {

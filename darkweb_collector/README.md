@@ -54,13 +54,14 @@
 推荐先进入虚拟环境：
 
 ```bash
-source /mnt/d/bishe/darkweb_collector/venv/bin/activate
+cd /path/to/bishe/darkweb_collector
+source venv/bin/activate
 ```
 
 安装依赖：
 
 ```bash
-pip install -r /mnt/d/bishe/darkweb_collector/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Tor 环境
@@ -94,8 +95,47 @@ export PROXY_PORT=7890
 先进入项目目录：
 
 ```bash
-cd /mnt/d/bishe/darkweb_collector
+cd /path/to/bishe/darkweb_collector
 ```
+
+## 一键启动整套服务
+
+如果你希望一次性启动 Redis、后端 API、前端、采集 worker、scheduler 和同步任务，推荐在 WSL 中使用：
+
+```bash
+bash scripts/start_all_services_wsl.sh start
+```
+
+脚本会自动：
+
+- 校验 `tmux`、`python3`、`python3-venv`、`python3-pip`、`npm`、`redis-server`、`redis-cli`、`curl`
+- 在 Debian/Ubuntu/WSL 环境下，缺失时自动通过 `apt-get` 安装系统依赖
+- 自动创建后端虚拟环境并安装 `requirements.txt`
+- 自动安装 Playwright Chromium 运行时
+- 检查前端 `node_modules`，缺失时自动执行 `npm install`
+- 准备 WSL 本地运行时数据库；如果没有历史数据库，会自动初始化空库
+- 用 `tmux` 拉起整套服务并保留各窗口日志
+
+常用子命令：
+
+```bash
+# 启动
+bash scripts/start_all_services_wsl.sh start
+
+# 查看状态
+bash scripts/start_all_services_wsl.sh status
+
+# 进入 tmux 会话
+bash scripts/start_all_services_wsl.sh attach
+
+# 停止
+bash scripts/start_all_services_wsl.sh stop
+```
+
+默认启动后可访问：
+
+- 前端：`http://localhost:5173`
+- 后端健康检查：`http://127.0.0.1:8000/api/health`
 
 ### 查看当前站点
 
@@ -129,6 +169,90 @@ python scripts/crawl.py run-site --site darkforums --continuous --interval-secon
 
 ```bash
 python scripts/crawl.py show-runs --limit 20
+```
+
+## Bot 助手推送
+
+`darkweb_collector.bot_assistant` 模块可将当前威胁情报概览、漏洞预警、勒索情报、数据泄露和态势告警推送到企业微信智能机器人。推荐直接在前端“采集控制台”配置企业微信后台生成的 Bot ID 和 Secret，保存后即可通过页面测试推送或由后端接口复用该配置发送消息。
+
+### 前端配置
+
+启动后端 API 和前端后，进入：
+
+```text
+http://localhost:5173/collector-control
+```
+
+在“Bot 助手推送”卡片中填写：
+
+- `Bot ID`：企业微信“智能机器人”API 配置中显示的 Bot ID。
+- `Secret`：企业微信“智能机器人”API 配置中显示的 Secret。
+
+企业微信后台需选择“API 配置”，连接方式选择“使用长连接”。点击“保存配置”后，配置会保存到后端运行数据目录的 `bot_assistant_settings.json`，页面只显示脱敏后的 Bot ID，不回显完整 Secret。保存后把机器人拉进目标群聊，或直接私聊机器人，后端会通过长连接收到回调并自动登记该会话；监测事件和测试推送会发送到所有已登记会话。
+
+### API 配置
+
+查看配置状态：
+
+```bash
+curl http://127.0.0.1:8000/api/bot/status
+```
+
+保存企业微信机器人配置：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/bot/config \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"wechat_work_aibot","bot_id":"企业微信智能机器人 Bot ID","secret":"企业微信智能机器人 Secret"}'
+```
+
+触发情报摘要推送：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/bot/send \
+  -H "Content-Type: application/json" \
+  -d '{"type":"digest","limit":5}'
+```
+
+本地调试不实际发出请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/bot/send \
+  -H "Content-Type: application/json" \
+  -d '{"type":"markdown","content":"### 测试推送","dry_run":true}'
+```
+
+### CLI 与环境变量兜底
+
+CLI 会优先使用后端已保存配置和已自动登记的会话目标；也可以通过参数临时传入 Bot ID、Secret 和推送目标：
+
+```bash
+python scripts/crawl.py send-bot-message --type digest --limit 5
+python scripts/crawl.py send-bot-message --type digest --bot-id "Bot ID" --secret "Secret" --chat-id "userid 或 chatid"
+python scripts/crawl.py send-bot-message --type text --content "暗网情报系统测试消息"
+python scripts/crawl.py send-bot-message --type markdown --content "### 暗网情报系统\n> 测试推送"
+python scripts/crawl.py send-bot-message --type digest --bot-id "Bot ID" --secret "Secret" --chat-id "userid 或 chatid" --dry-run
+```
+
+部署时也可以继续使用环境变量作为兜底配置：
+
+```bash
+export WECOM_BOT_ID="企业微信智能机器人 Bot ID"
+export WECOM_SECRET="企业微信智能机器人 Secret"
+export WECOM_HOME_CHANNEL="userid 或 chatid"
+```
+
+群机器人 Webhook 仍作为兼容模式保留，显式设置 `BOT_PROVIDER=wechat_work_webhook` 后可使用：
+
+- `WECHAT_WORK_BOT_WEBHOOK`
+- `WECHAT_WORK_BOT_SECRET`
+- `WECHAT_BOT_WEBHOOK`
+
+### 启动 API
+
+```bash
+export PYTHONPATH="$PWD/src"
+python -m uvicorn darkweb_collector.api_app:app --host 127.0.0.1 --port 8000
 ```
 
 ## 兼容脚本

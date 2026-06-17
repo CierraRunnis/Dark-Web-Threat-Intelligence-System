@@ -13,6 +13,7 @@
     "vue": "^3.4.21",
     "vue-router": "^4.3.0",
     "pinia": "^2.1.7",
+    "docx": "^9.0.3",
     "echarts": "^5.5.0",
     "vue-echarts": "^6.6.9",
     "element-plus": "^2.6.3",

@@ -16,6 +16,7 @@ from darkweb_collector.db import (
     list_crawl_jobs,
     upsert_crawl_job,
 )
+from darkweb_collector.job_diagnostics import is_in_failure_cooldown
 from darkweb_collector.models import DetailTask, RunContext, SiteConfig
 from darkweb_collector.queueing import queue_for_detail, queue_for_seed
 from darkweb_collector.state_store import StateStore
@@ -72,8 +73,6 @@ def mark_job_finished(
 
 
 def refresh_normalized_after_source_change(site_name: str) -> None:
-    if site_name != "darkforums":
-        return
     try:
         from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
 
@@ -142,6 +141,7 @@ def execute_seed_job(
     seed_result = adapter.collect_seed(config, run_ctx)
     detail_tasks = adapter.plan_details(seed_result, config)
     adapter.persist(config=config, run_ctx=run_ctx, seed_result=seed_result)
+    refresh_normalized_after_source_change(site_name)
     dispatched_job_ids, failed_detail_jobs = _dispatch_detail_jobs(
         config, detail_tasks, state_store, detail_dispatcher
     )
@@ -229,14 +229,19 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
     return job_id
 
 
-def run_site_once(site_name: str, config_path: Path | None = None, state_store: StateStore | None = None) -> dict[str, object]:
+def run_site_once(
+    site_name: str,
+    config_path: Path | None = None,
+    state_store: StateStore | None = None,
+    job_id: str | None = None,
+) -> dict[str, object]:
     from darkweb_collector.state_store import InMemoryStateStore
 
     config = get_site_config(site_name, config_path)
     seed_queue = queue_for_seed(config.seed_fetch_mode)
-    job_id = new_job_id("seed", site_name)
+    selected_job_id = job_id or new_job_id("seed", site_name)
     mark_job_running(
-        job_id=job_id,
+        job_id=selected_job_id,
         site_name=site_name,
         job_type="seed",
         queue_name=seed_queue,
@@ -255,13 +260,13 @@ def run_site_once(site_name: str, config_path: Path | None = None, state_store: 
             force=True,
             state_store=selected_state_store,
             detail_dispatcher=inline_dispatcher,
-            job_id=job_id,
+            job_id=selected_job_id,
             config_path=config_path,
         )
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
-            job_id=job_id,
+            job_id=selected_job_id,
             site_name=site_name,
             job_type="seed",
             queue_name=seed_queue,
@@ -274,7 +279,7 @@ def run_site_once(site_name: str, config_path: Path | None = None, state_store: 
 
     duration_ms = int((time.perf_counter() - start_perf) * 1000)
     mark_job_finished(
-        job_id=job_id,
+        job_id=selected_job_id,
         site_name=site_name,
         job_type="seed",
         queue_name=seed_queue,
@@ -296,6 +301,21 @@ def enqueue_due_sites(
             if not config.enabled:
                 continue
             if get_active_crawl_job(connection, site_name=config.site_name, job_type="seed"):
+                continue
+            rows = [
+                dict(row)
+                for row in connection.execute(
+                    """
+                    SELECT status, started_at, finished_at
+                    FROM crawl_jobs
+                    WHERE site_name = ? AND job_type = 'seed'
+                    ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
+                    LIMIT 20
+                    """,
+                    (config.site_name,),
+                ).fetchall()
+            ]
+            if is_in_failure_cooldown(config, rows):
                 continue
             last_success = get_last_successful_crawl_job(connection, site_name=config.site_name, job_type="seed")
             last_finished = last_success["finished_at"] if last_success else None

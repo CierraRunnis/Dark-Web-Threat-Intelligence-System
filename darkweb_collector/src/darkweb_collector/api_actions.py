@@ -2,21 +2,36 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
+import time
 from typing import Any
 
+from darkweb_collector.browser_process_pool import browser_process_pool_status, submit_browser_site
+from darkweb_collector.code_monitoring import list_code_watchlists_payload, scan_code_watchlist_once
 from darkweb_collector.config import get_site_config, load_site_configs, set_site_enabled
-from darkweb_collector.db import get_active_crawl_job, get_db_connection, upsert_crawl_job
-from darkweb_collector.orchestrator import run_site_once
+from darkweb_collector.db import (
+    get_active_crawl_job,
+    get_db_connection,
+    get_ransomware_live_sync_state,
+    upsert_crawl_job,
+)
+from darkweb_collector.job_diagnostics import consecutive_failures, failure_cooldown_until
+from darkweb_collector.orchestrator import new_job_id, run_site_once
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
-from darkweb_collector.queueing import queue_for_seed
+from darkweb_collector.queueing import BROWSER_RENDER_QUEUE, browser_concurrency, queue_for_seed
+from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
 from darkweb_collector.utils import utc_now_iso
 
 
 STALE_RUNNING_MINUTES = 30
 STALE_ENQUEUED_MINUTES = 10
+STALE_ENQUEUED_BUSY_QUEUE_MINUTES = 60
 CONTINUOUS_INTERVAL_SECONDS = 60
 DEFAULT_VULNERABILITY_SYNC_INTERVAL_SECONDS = 3600
 DEFAULT_VULNERABILITY_SYNC_LIMIT = 300
+DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS = 3600
+DEFAULT_RANSOMWARE_SYNC_LIMIT = 0
+DEFAULT_CODE_MONITORING_INTERVAL_SECONDS = 3600
+WORKER_QUEUE_CACHE_TTL_SECONDS = 5
 
 
 _continuous_lock = Lock()
@@ -42,6 +57,45 @@ _vulnerability_sync_running = False
 _vulnerability_sync_stop_event: Event | None = None
 _vulnerability_sync_thread: Thread | None = None
 
+_ransomware_sync_lock = Lock()
+_ransomware_sync_enabled = False
+_ransomware_sync_started_at = ""
+_ransomware_sync_last_tick_at = ""
+_ransomware_sync_last_success_at = ""
+_ransomware_sync_last_error = ""
+_ransomware_sync_last_source = ""
+_ransomware_sync_last_ingested = 0
+_ransomware_sync_interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
+_ransomware_sync_limit = DEFAULT_RANSOMWARE_SYNC_LIMIT
+_ransomware_sync_running = False
+_ransomware_sync_stop_event: Event | None = None
+_ransomware_sync_thread: Thread | None = None
+
+_code_monitoring_lock = Lock()
+_code_monitoring_enabled = False
+_code_monitoring_started_at = ""
+_code_monitoring_last_tick_at = ""
+_code_monitoring_last_success_at = ""
+_code_monitoring_last_error = ""
+_code_monitoring_interval_seconds = DEFAULT_CODE_MONITORING_INTERVAL_SECONDS
+_code_monitoring_running = False
+_code_monitoring_last_watchlist_count = 0
+_code_monitoring_last_candidate_count = 0
+_code_monitoring_last_hit_count = 0
+_code_monitoring_last_clue_hit_count = 0
+_code_monitoring_last_sensitive_hit_count = 0
+_code_monitoring_target_watchlist_id = 0
+_code_monitoring_target_watchlist_name = ""
+_code_monitoring_stop_event: Event | None = None
+_code_monitoring_thread: Thread | None = None
+_code_monitoring_tasks: dict[int, dict[str, Any]] = {}
+
+_worker_queue_cache_lock = Lock()
+_worker_queue_cache_checked_at = 0.0
+_worker_queue_cache: set[str] = set()
+_worker_queue_worker_counts: dict[str, int] = {}
+_worker_queue_worker_names: dict[str, list[str]] = {}
+
 
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
@@ -55,7 +109,31 @@ def _parse_dt(value: str | None) -> datetime | None:
     return dt
 
 
-def _is_active_job_blocking(active_job: dict[str, Any] | None) -> bool:
+def _has_recent_running_job_in_queue(connection, queue_name: str, *, exclude_job_id: str = "") -> bool:
+    if not queue_name:
+        return False
+    rows = connection.execute(
+        """
+        SELECT job_id, started_at, finished_at
+        FROM crawl_jobs
+        WHERE queue_name = ? AND status = 'running'
+        """,
+        (queue_name,),
+    ).fetchall()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_RUNNING_MINUTES)
+    for row in rows:
+        job_id = str(row["job_id"] or "")
+        if exclude_job_id and job_id == exclude_job_id:
+            continue
+        if row["finished_at"]:
+            continue
+        started_at = _parse_dt(row["started_at"])
+        if started_at is not None and started_at >= cutoff:
+            return True
+    return False
+
+
+def _is_active_job_blocking(active_job: dict[str, Any] | None, *, queue_has_recent_running: bool = False) -> bool:
     if not active_job:
         return False
     status = active_job.get("status")
@@ -63,7 +141,10 @@ def _is_active_job_blocking(active_job: dict[str, Any] | None) -> bool:
         enqueued_at = _parse_dt(active_job.get("enqueued_at"))
         if enqueued_at is None:
             return False
-        return enqueued_at >= datetime.now(timezone.utc) - timedelta(minutes=STALE_ENQUEUED_MINUTES)
+        threshold_minutes = (
+            STALE_ENQUEUED_BUSY_QUEUE_MINUTES if queue_has_recent_running else STALE_ENQUEUED_MINUTES
+        )
+        return enqueued_at >= datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
     if status != "running":
         return False
     started_at = _parse_dt(active_job.get("started_at"))
@@ -114,6 +195,48 @@ def _enqueue_job_row(job_id: str, site_name: str, queue_name: str) -> None:
         connection.commit()
 
 
+def _refresh_worker_queue_cache() -> tuple[set[str], dict[str, int], dict[str, list[str]]]:
+    try:
+        from darkweb_collector.celery_app import app as celery_app
+    except Exception:
+        return set(), {}, {}
+
+    inspect = celery_app.control.inspect(timeout=0.8)
+    try:
+        active_queues = inspect.active_queues() or {}
+    except Exception:
+        active_queues = {}
+    queue_names: set[str] = set()
+    worker_counts: dict[str, int] = {}
+    worker_names: dict[str, list[str]] = {}
+    for worker_name, worker_queues in active_queues.items():
+        for queue in worker_queues or []:
+            name = str((queue or {}).get("name") or "").strip()
+            if name:
+                queue_names.add(name)
+                worker_counts[name] = worker_counts.get(name, 0) + 1
+                worker_names.setdefault(name, []).append(str(worker_name))
+    return queue_names, worker_counts, {name: sorted(names) for name, names in worker_names.items()}
+
+
+def _refresh_worker_queue_cache_if_needed(*, force: bool = False) -> None:
+    global _worker_queue_cache_checked_at, _worker_queue_cache, _worker_queue_worker_counts, _worker_queue_worker_names
+    now = time.monotonic()
+    if force or (now - _worker_queue_cache_checked_at) > WORKER_QUEUE_CACHE_TTL_SECONDS:
+        (
+            _worker_queue_cache,
+            _worker_queue_worker_counts,
+            _worker_queue_worker_names,
+        ) = _refresh_worker_queue_cache()
+        _worker_queue_cache_checked_at = now
+
+
+def _has_queue_worker(queue_name: str) -> bool:
+    with _worker_queue_cache_lock:
+        _refresh_worker_queue_cache_if_needed()
+        return queue_name in _worker_queue_cache
+
+
 def _run_site_in_thread(site_name: str) -> None:
     try:
         run_site_once(site_name)
@@ -122,21 +245,77 @@ def _run_site_in_thread(site_name: str) -> None:
         return
 
 
+def _dispatch_browser_process(site_name: str, queue_name: str, message: str) -> dict[str, Any]:
+    job_id = new_job_id("seed", site_name)
+    _enqueue_job_row(job_id=job_id, site_name=site_name, queue_name=queue_name)
+    submit_browser_site(site_name=site_name, job_id=job_id)
+    return {
+        "site_name": site_name,
+        "dispatch_mode": "process",
+        "message": message,
+        "job_id": job_id,
+    }
+
+
 def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
     config = get_site_config(site_name)
     with get_db_connection() as connection:
         active_job = get_active_crawl_job(connection, site_name=site_name, job_type="seed")
-    if _is_active_job_blocking(active_job):
+        queue_has_recent_running = _has_recent_running_job_in_queue(
+            connection,
+            str((active_job or {}).get("queue_name") or ""),
+            exclude_job_id=str((active_job or {}).get("job_id") or ""),
+        )
+        seed_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT status, started_at, finished_at, enqueued_at, error_message
+                FROM crawl_jobs
+                WHERE site_name = ? AND job_type = 'seed'
+                ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
+                LIMIT 20
+                """,
+                (site_name,),
+            ).fetchall()
+        ]
+    if _is_active_job_blocking(active_job, queue_has_recent_running=queue_has_recent_running):
         return {
             "site_name": site_name,
             "dispatch_mode": "skipped",
             "message": "该站点已有运行中的种子任务",
             "job_id": active_job.get("job_id") if active_job else "",
         }
+    cooldown_until = failure_cooldown_until(config, seed_rows)
+    if not force and cooldown_until is not None and datetime.now(timezone.utc) < cooldown_until:
+        return {
+            "site_name": site_name,
+            "dispatch_mode": "skipped",
+            "message": "该站点连续失败达到阈值，仍处于冷却期",
+            "job_id": "",
+            "reason": "failure_cooldown",
+            "consecutive_failures": consecutive_failures(seed_rows),
+            "failure_cooldown_until": cooldown_until.isoformat(),
+        }
 
     _mark_stale_active_job(site_name, active_job)
 
     queue_name = queue_for_seed(config.seed_fetch_mode)
+    if not _has_queue_worker(queue_name):
+        if config.uses_browser:
+            return _dispatch_browser_process(
+                site_name=site_name,
+                queue_name=queue_name,
+                message="未检测到可消费浏览器队列的 worker，已提交到本地浏览器进程池",
+            )
+        thread = Thread(target=_run_site_in_thread, args=(site_name,), daemon=True)
+        thread.start()
+        return {
+            "site_name": site_name,
+            "dispatch_mode": "thread",
+            "message": "未检测到可消费该队列的 worker，已在本地线程触发单次运行",
+            "job_id": "",
+        }
     try:
         from darkweb_collector.tasks import crawl_seed
 
@@ -153,6 +332,12 @@ def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
             "job_id": job_id,
         }
     except Exception:
+        if config.uses_browser:
+            return _dispatch_browser_process(
+                site_name=site_name,
+                queue_name=queue_name,
+                message="队列不可用，已提交到本地浏览器进程池",
+            )
         thread = Thread(target=_run_site_in_thread, args=(site_name,), daemon=True)
         thread.start()
         return {
@@ -250,6 +435,26 @@ def get_continuous_dispatch_status() -> dict[str, Any]:
         "started_at": _continuous_started_at,
         "last_tick_at": _continuous_last_tick_at,
         "mode": _continuous_mode,
+    }
+
+
+def get_browser_runtime_status() -> dict[str, Any]:
+    with _worker_queue_cache_lock:
+        _refresh_worker_queue_cache_if_needed(force=True)
+        worker_queues = sorted(_worker_queue_cache)
+        worker_counts = dict(_worker_queue_worker_counts)
+        worker_names = {name: list(names) for name, names in _worker_queue_worker_names.items()}
+    browser_worker_count = int(worker_counts.get(BROWSER_RENDER_QUEUE, 0))
+    configured_concurrency = browser_concurrency()
+    return {
+        "browser_queue": BROWSER_RENDER_QUEUE,
+        "configured_concurrency": configured_concurrency,
+        "browser_concurrency": configured_concurrency,
+        "browser_worker_count": browser_worker_count,
+        "browser_worker_names": worker_names.get(BROWSER_RENDER_QUEUE, []),
+        "local_process_pool": browser_process_pool_status(),
+        "worker_queues": worker_queues,
+        "worker_counts": worker_counts,
     }
 
 
@@ -385,6 +590,468 @@ def get_vulnerability_sync_status() -> dict[str, Any]:
         "interval_seconds": _vulnerability_sync_interval_seconds,
         "limit": _vulnerability_sync_limit,
     }
+
+
+def _run_ransomware_sync(limit: int) -> dict[str, Any]:
+    global _ransomware_sync_running
+    global _ransomware_sync_last_tick_at
+    global _ransomware_sync_last_success_at
+    global _ransomware_sync_last_error
+    global _ransomware_sync_last_source
+    global _ransomware_sync_last_ingested
+    with _ransomware_sync_lock:
+        _ransomware_sync_running = True
+        _ransomware_sync_last_tick_at = utc_now_iso()
+        _ransomware_sync_last_error = ""
+    try:
+        result = sync_ransomware_live_victims(limit=limit, refresh_normalized=True)
+        with _ransomware_sync_lock:
+            _ransomware_sync_last_success_at = utc_now_iso()
+            _ransomware_sync_last_source = str(result.get("source") or "")
+            _ransomware_sync_last_ingested = int(result.get("ingested") or 0)
+            _ransomware_sync_last_error = ""
+        return result
+    except Exception as exc:
+        with _ransomware_sync_lock:
+            _ransomware_sync_last_error = str(exc)
+        raise
+    finally:
+        with _ransomware_sync_lock:
+            _ransomware_sync_running = False
+
+
+def _run_ransomware_sync_once_in_thread(limit: int) -> None:
+    try:
+        _run_ransomware_sync(limit=limit)
+    except Exception:
+        return
+
+
+def dispatch_run_ransomware_sync_once(limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT) -> dict[str, Any]:
+    global _ransomware_sync_thread
+    with _ransomware_sync_lock:
+        if _ransomware_sync_running:
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 同步任务已在运行中",
+            }
+        thread = Thread(target=_run_ransomware_sync_once_in_thread, args=(limit,), daemon=True)
+        _ransomware_sync_thread = thread
+        thread.start()
+    return {
+        **get_ransomware_sync_status(),
+        "message": "已触发一次 ransomware.live 同步",
+    }
+
+
+def _ransomware_sync_loop(stop_event: Event) -> None:
+    global _ransomware_sync_enabled
+    while not stop_event.is_set():
+        try:
+            _run_ransomware_sync(limit=_ransomware_sync_limit)
+        except Exception:
+            pass
+        if stop_event.wait(_ransomware_sync_interval_seconds):
+            break
+    _ransomware_sync_enabled = False
+
+
+def start_ransomware_sync_dispatch(
+    interval_seconds: int = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS,
+    limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT,
+) -> dict[str, Any]:
+    global _ransomware_sync_enabled
+    global _ransomware_sync_started_at
+    global _ransomware_sync_stop_event
+    global _ransomware_sync_thread
+    global _ransomware_sync_interval_seconds
+    global _ransomware_sync_limit
+    if interval_seconds <= 0:
+        interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
+    with _ransomware_sync_lock:
+        if _ransomware_sync_enabled and _ransomware_sync_thread and _ransomware_sync_thread.is_alive():
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 自动同步已在运行",
+            }
+        stop_event = Event()
+        thread = Thread(target=_ransomware_sync_loop, args=(stop_event,), daemon=True)
+        _ransomware_sync_enabled = True
+        _ransomware_sync_started_at = utc_now_iso()
+        _ransomware_sync_interval_seconds = interval_seconds
+        _ransomware_sync_limit = limit
+        _ransomware_sync_stop_event = stop_event
+        _ransomware_sync_thread = thread
+        thread.start()
+    return {
+        **get_ransomware_sync_status(),
+        "message": "已开始 ransomware.live 自动同步",
+    }
+
+
+def stop_ransomware_sync_dispatch() -> dict[str, Any]:
+    global _ransomware_sync_enabled
+    with _ransomware_sync_lock:
+        if not _ransomware_sync_enabled or _ransomware_sync_stop_event is None:
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 自动同步当前未运行",
+            }
+        _ransomware_sync_stop_event.set()
+        _ransomware_sync_enabled = False
+    return {
+        **get_ransomware_sync_status(),
+        "message": "已停止 ransomware.live 自动同步",
+    }
+
+
+def get_ransomware_sync_status() -> dict[str, Any]:
+    thread_alive = bool(_ransomware_sync_thread and _ransomware_sync_thread.is_alive())
+    with get_db_connection() as connection:
+        sync_state = get_ransomware_live_sync_state(connection)
+    last_error = _ransomware_sync_last_error
+    if get_ransomware_live_api_key() and "RANSOMWARE_LIVE_API_KEY" in last_error and "not set" in last_error.lower():
+        last_error = ""
+    return {
+        "enabled": bool(_ransomware_sync_enabled and thread_alive),
+        "running": bool(_ransomware_sync_running),
+        "started_at": _ransomware_sync_started_at,
+        "last_tick_at": _ransomware_sync_last_tick_at,
+        "last_success_at": _ransomware_sync_last_success_at,
+        "last_error": last_error,
+        "last_source": _ransomware_sync_last_source,
+        "last_ingested": _ransomware_sync_last_ingested,
+        "interval_seconds": _ransomware_sync_interval_seconds,
+        "limit": _ransomware_sync_limit,
+        "record_count": int(sync_state.get("count") or 0),
+        "latest_disclosure_time": str(sync_state.get("latest_disclosure_time") or ""),
+    }
+
+
+def _run_code_monitoring_once() -> dict[str, Any]:
+    return _run_code_monitoring_once_for_watchlist(None)
+
+
+def _resolve_code_monitoring_watchlist_name(watchlist_id: int) -> str:
+    if watchlist_id <= 0:
+        return ""
+    for item in list_code_watchlists_payload():
+        if int(item.get("id") or 0) == int(watchlist_id):
+            return str(item.get("name") or "")
+    return ""
+
+
+def _code_monitoring_task_snapshot(
+    watchlist_id: int,
+    *,
+    watchlist_name: str = "",
+    enabled: bool = False,
+    running: bool = False,
+    started_at: str = "",
+    last_tick_at: str = "",
+    last_success_at: str = "",
+    last_error: str = "",
+    interval_seconds: int = DEFAULT_CODE_MONITORING_INTERVAL_SECONDS,
+    watchlist_count: int = 0,
+    candidate_count: int = 0,
+    hit_count: int = 0,
+    clue_hit_count: int = 0,
+    sensitive_hit_count: int = 0,
+    stop_event: Event | None = None,
+    thread: Thread | None = None,
+) -> dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "running": bool(running),
+        "started_at": started_at,
+        "last_tick_at": last_tick_at,
+        "last_success_at": last_success_at,
+        "last_error": last_error,
+        "interval_seconds": int(interval_seconds or DEFAULT_CODE_MONITORING_INTERVAL_SECONDS),
+        "watchlist_count": int(watchlist_count or 0),
+        "candidate_count": int(candidate_count or 0),
+        "hit_count": int(hit_count or 0),
+        "clue_hit_count": int(clue_hit_count or 0),
+        "sensitive_hit_count": int(sensitive_hit_count or 0),
+        "target_watchlist_id": int(watchlist_id or 0),
+        "target_watchlist_name": watchlist_name,
+        "stop_event": stop_event,
+        "thread": thread,
+    }
+
+
+def _active_code_monitoring_task_count() -> int:
+    return sum(
+        1
+        for task in _code_monitoring_tasks.values()
+        if bool(task.get("enabled")) and bool(task.get("thread")) and task["thread"].is_alive()
+    )
+
+
+def _code_monitoring_task_status_payload(watchlist_id: int, task: dict[str, Any] | None = None) -> dict[str, Any]:
+    task = task or _code_monitoring_tasks.get(int(watchlist_id or 0)) or _code_monitoring_task_snapshot(
+        int(watchlist_id or 0),
+        watchlist_name=_resolve_code_monitoring_watchlist_name(int(watchlist_id or 0)),
+    )
+    thread_alive = bool(task.get("thread") and task["thread"].is_alive())
+    return {
+        "enabled": bool(task.get("enabled") and thread_alive),
+        "running": bool(task.get("running")),
+        "started_at": str(task.get("started_at") or ""),
+        "last_tick_at": str(task.get("last_tick_at") or ""),
+        "last_success_at": str(task.get("last_success_at") or ""),
+        "last_error": str(task.get("last_error") or ""),
+        "interval_seconds": int(task.get("interval_seconds") or DEFAULT_CODE_MONITORING_INTERVAL_SECONDS),
+        "watchlist_count": int(task.get("watchlist_count") or 0),
+        "candidate_count": int(task.get("candidate_count") or 0),
+        "hit_count": int(task.get("hit_count") or 0),
+        "clue_hit_count": int(task.get("clue_hit_count") or 0),
+        "sensitive_hit_count": int(task.get("sensitive_hit_count") or 0),
+        "target_watchlist_id": int(task.get("target_watchlist_id") or 0),
+        "target_watchlist_name": str(task.get("target_watchlist_name") or ""),
+        "active_watchlist_count": _active_code_monitoring_task_count(),
+    }
+
+
+def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[str, Any]:
+    global _code_monitoring_running
+    global _code_monitoring_last_tick_at
+    global _code_monitoring_last_success_at
+    global _code_monitoring_last_error
+    global _code_monitoring_last_watchlist_count
+    global _code_monitoring_last_candidate_count
+    global _code_monitoring_last_hit_count
+    global _code_monitoring_last_clue_hit_count
+    global _code_monitoring_last_sensitive_hit_count
+    selected_watchlist_id = int(watchlist_id or 0)
+    with _code_monitoring_lock:
+        if selected_watchlist_id > 0:
+            existing_task = _code_monitoring_tasks.get(selected_watchlist_id)
+            _code_monitoring_tasks[selected_watchlist_id] = {
+                **(existing_task or _code_monitoring_task_snapshot(selected_watchlist_id, watchlist_name=_resolve_code_monitoring_watchlist_name(selected_watchlist_id))),
+                "running": True,
+                "last_tick_at": utc_now_iso(),
+                "last_error": "",
+            }
+        else:
+            _code_monitoring_running = True
+            _code_monitoring_last_tick_at = utc_now_iso()
+            _code_monitoring_last_error = ""
+    try:
+        watchlists = [item for item in list_code_watchlists_payload() if bool(item.get("enabled"))]
+        if selected_watchlist_id:
+            watchlists = [item for item in watchlists if int(item.get("id") or 0) == selected_watchlist_id]
+            if not watchlists:
+                raise ValueError(f"watchlist:{selected_watchlist_id}:not_found_or_disabled")
+        aggregate = {
+            "watchlist_count": len(watchlists),
+            "candidate_count": 0,
+            "hit_count": 0,
+            "clue_hit_count": 0,
+            "sensitive_hit_count": 0,
+            "errors": [],
+            "results": [],
+        }
+        for watchlist in watchlists:
+            try:
+                result = scan_code_watchlist_once(
+                    int(watchlist["id"]),
+                    platforms=list(watchlist.get("platforms") or []),
+                    file_extensions=list(watchlist.get("file_extensions") or []),
+                    search_page_limit=0,
+                    max_results_per_term=0,
+                    detail_fetch=bool(watchlist.get("detail_fetch", True)),
+                    enabled_rule_keys=list(watchlist.get("enabled_rule_keys") or []),
+                )
+                aggregate["candidate_count"] += int(result.get("candidates") or 0)
+                aggregate["hit_count"] += int(result.get("hits") or 0)
+                aggregate["clue_hit_count"] += int(result.get("clue_hits") or 0)
+                aggregate["sensitive_hit_count"] += int(result.get("sensitive_hits") or 0)
+                aggregate["errors"].extend(result.get("errors") or [])
+                aggregate["results"].append(result)
+            except Exception as exc:
+                aggregate["errors"].append(f"watchlist:{watchlist.get('id')}:{exc}")
+        with _code_monitoring_lock:
+            if selected_watchlist_id > 0:
+                existing_task = _code_monitoring_tasks.get(selected_watchlist_id) or _code_monitoring_task_snapshot(
+                    selected_watchlist_id,
+                    watchlist_name=_resolve_code_monitoring_watchlist_name(selected_watchlist_id),
+                )
+                _code_monitoring_tasks[selected_watchlist_id] = {
+                    **existing_task,
+                    "last_success_at": utc_now_iso(),
+                    "last_error": "",
+                    "watchlist_count": aggregate["watchlist_count"],
+                    "candidate_count": aggregate["candidate_count"],
+                    "hit_count": aggregate["hit_count"],
+                    "clue_hit_count": aggregate["clue_hit_count"],
+                    "sensitive_hit_count": aggregate["sensitive_hit_count"],
+                }
+            else:
+                _code_monitoring_last_success_at = utc_now_iso()
+                _code_monitoring_last_watchlist_count = aggregate["watchlist_count"]
+                _code_monitoring_last_candidate_count = aggregate["candidate_count"]
+                _code_monitoring_last_hit_count = aggregate["hit_count"]
+                _code_monitoring_last_clue_hit_count = aggregate["clue_hit_count"]
+                _code_monitoring_last_sensitive_hit_count = aggregate["sensitive_hit_count"]
+                _code_monitoring_last_error = ""
+        return aggregate
+    except Exception as exc:
+        with _code_monitoring_lock:
+            if selected_watchlist_id > 0:
+                existing_task = _code_monitoring_tasks.get(selected_watchlist_id) or _code_monitoring_task_snapshot(
+                    selected_watchlist_id,
+                    watchlist_name=_resolve_code_monitoring_watchlist_name(selected_watchlist_id),
+                )
+                _code_monitoring_tasks[selected_watchlist_id] = {
+                    **existing_task,
+                    "last_error": str(exc),
+                }
+            else:
+                _code_monitoring_last_error = str(exc)
+        raise
+    finally:
+        with _code_monitoring_lock:
+            if selected_watchlist_id > 0:
+                existing_task = _code_monitoring_tasks.get(selected_watchlist_id)
+                if existing_task is not None:
+                    _code_monitoring_tasks[selected_watchlist_id] = {**existing_task, "running": False}
+            else:
+                _code_monitoring_running = False
+
+
+def _run_code_monitoring_once_in_thread(watchlist_id: int | None = None) -> None:
+    try:
+        _run_code_monitoring_once_for_watchlist(watchlist_id)
+    except Exception:
+        return
+
+
+def dispatch_run_code_monitoring_once() -> dict[str, Any]:
+    global _code_monitoring_thread
+    with _code_monitoring_lock:
+        if _code_monitoring_running:
+            return {
+                **get_code_monitoring_continuous_status(),
+                "message": "代码监测任务已在运行中",
+            }
+        thread = Thread(target=_run_code_monitoring_once_in_thread, daemon=True)
+        _code_monitoring_thread = thread
+        thread.start()
+    return {
+        **get_code_monitoring_continuous_status(),
+        "message": "已触发一次代码监测持续扫描",
+    }
+
+
+def _code_monitoring_loop(watchlist_id: int, stop_event: Event) -> None:
+    while not stop_event.is_set():
+        try:
+            _run_code_monitoring_once_for_watchlist(watchlist_id)
+        except Exception:
+            pass
+        with _code_monitoring_lock:
+            task = _code_monitoring_tasks.get(watchlist_id) or {}
+            interval_seconds = int(task.get("interval_seconds") or DEFAULT_CODE_MONITORING_INTERVAL_SECONDS)
+        if stop_event.wait(interval_seconds):
+            break
+    with _code_monitoring_lock:
+        task = _code_monitoring_tasks.get(watchlist_id)
+        if task is not None:
+            _code_monitoring_tasks[watchlist_id] = {**task, "enabled": False, "running": False, "stop_event": None}
+
+
+def start_code_monitoring_dispatch(
+    interval_seconds: int = DEFAULT_CODE_MONITORING_INTERVAL_SECONDS,
+    *,
+    watchlist_id: int | None = None,
+) -> dict[str, Any]:
+    if interval_seconds <= 0:
+        interval_seconds = DEFAULT_CODE_MONITORING_INTERVAL_SECONDS
+    selected_watchlist_id = int(watchlist_id or 0)
+    if selected_watchlist_id <= 0:
+        raise ValueError("watchlist_id is required for code monitoring continuous scan")
+    target_watchlist_name = ""
+    enabled_watchlists = [item for item in list_code_watchlists_payload() if bool(item.get("enabled"))]
+    target_watchlist = next((item for item in enabled_watchlists if int(item.get("id") or 0) == selected_watchlist_id), None)
+    if target_watchlist is None:
+        raise ValueError(f"watchlist not found or disabled: {selected_watchlist_id}")
+    target_watchlist_name = str(target_watchlist.get("name") or "")
+    with _code_monitoring_lock:
+        existing_task = _code_monitoring_tasks.get(selected_watchlist_id)
+        if existing_task and bool(existing_task.get("enabled")) and bool(existing_task.get("thread")) and existing_task["thread"].is_alive():
+            _code_monitoring_tasks[selected_watchlist_id] = {
+                **existing_task,
+                "interval_seconds": interval_seconds,
+                "target_watchlist_name": target_watchlist_name,
+            }
+            return {
+                **_code_monitoring_task_status_payload(selected_watchlist_id),
+                "message": "该监测对象的长期任务已在运行",
+            }
+        stop_event = Event()
+        thread = Thread(target=_code_monitoring_loop, args=(selected_watchlist_id, stop_event), daemon=True)
+        _code_monitoring_tasks[selected_watchlist_id] = {
+            **(existing_task or _code_monitoring_task_snapshot(selected_watchlist_id, watchlist_name=target_watchlist_name)),
+            "enabled": True,
+            "running": False,
+            "started_at": utc_now_iso(),
+            "last_tick_at": "",
+            "last_error": "",
+            "interval_seconds": interval_seconds,
+            "target_watchlist_id": selected_watchlist_id,
+            "target_watchlist_name": target_watchlist_name,
+            "stop_event": stop_event,
+            "thread": thread,
+        }
+        thread.start()
+    return {
+        **_code_monitoring_task_status_payload(selected_watchlist_id),
+        "message": "已开启该监测对象的代码长期后台扫描",
+    }
+
+
+def stop_code_monitoring_dispatch(*, watchlist_id: int | None = None) -> dict[str, Any]:
+    selected_watchlist_id = int(watchlist_id or 0)
+    if selected_watchlist_id <= 0:
+        raise ValueError("watchlist_id is required for code monitoring continuous stop")
+    with _code_monitoring_lock:
+        existing_task = _code_monitoring_tasks.get(selected_watchlist_id)
+        if existing_task is None or not bool(existing_task.get("enabled")) or existing_task.get("stop_event") is None:
+            return {
+                **_code_monitoring_task_status_payload(selected_watchlist_id),
+                "message": "该监测对象的长期任务当前未运行",
+            }
+        stop_event = existing_task.get("stop_event")
+        if stop_event is not None:
+            stop_event.set()
+        _code_monitoring_tasks[selected_watchlist_id] = {
+            **existing_task,
+            "enabled": False,
+        }
+    return {
+        **_code_monitoring_task_status_payload(selected_watchlist_id),
+        "message": "已停止该监测对象的代码长期后台扫描",
+    }
+
+
+def get_code_monitoring_continuous_status(*, watchlist_id: int | None = None) -> dict[str, Any]:
+    selected_watchlist_id = int(watchlist_id or 0)
+    if selected_watchlist_id > 0:
+        with _code_monitoring_lock:
+            task = _code_monitoring_tasks.get(selected_watchlist_id)
+            return _code_monitoring_task_status_payload(selected_watchlist_id, task)
+    with _code_monitoring_lock:
+        active_tasks = [
+            task for task in _code_monitoring_tasks.values()
+            if bool(task.get("enabled")) and bool(task.get("thread")) and task["thread"].is_alive()
+        ]
+        if active_tasks:
+            task = sorted(active_tasks, key=lambda item: str(item.get("started_at") or ""), reverse=True)[0]
+            payload = _code_monitoring_task_status_payload(int(task.get("target_watchlist_id") or 0), task)
+            payload["target_watchlist_name"] = task.get("target_watchlist_name") or "多个监测对象"
+            return payload
+    return _code_monitoring_task_status_payload(0)
 
 
 def update_site_enabled(site_name: str, enabled: bool) -> dict[str, Any]:

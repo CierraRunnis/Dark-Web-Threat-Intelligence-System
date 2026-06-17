@@ -1,0 +1,2 @@
+
+0df0ef560bfa092bbd1019ddbe485f6a2287278e	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/lodash/-/lodash-4.17.23.tgz","integrity":null,"time":1780574244165,"size":"262","metadata":{"time":1780574244165,"url":"http://registry.npm.taobao.org/lodash/-/lodash-4.17.23.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/lodash/-/lodash-4.17.23.tgz"},"options":{"compress":true},"status":301}}

@@ -6,10 +6,19 @@ import subprocess
 import sys
 import time
 
+from darkweb_collector.bot_assistant import (
+    build_markdown_payload,
+    build_text_payload,
+    load_bot_config,
+    post_bot_payload,
+    send_intelligence_digest,
+)
 from darkweb_collector.config import get_site_config, load_site_configs
+from darkweb_collector.api_data import build_intelligence_payload
 from darkweb_collector.orchestrator import enqueue_due_sites, run_site_once, show_runs
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
 from darkweb_collector.queueing import build_worker_command, queue_for_seed
+from darkweb_collector.ransomware_live import sync_ransomware_live_victims
 from darkweb_collector.state_store import get_state_store
 
 
@@ -35,7 +44,22 @@ def build_parser() -> ArgumentParser:
 
     sync_vulns_parser = subparsers.add_parser("sync-public-vulns")
     sync_vulns_parser.add_argument("--sample-file", default=None)
-    sync_vulns_parser.add_argument("--limit", type=int, default=20)
+    sync_vulns_parser.add_argument("--limit", type=int, default=300)
+
+    sync_ransomware_parser = subparsers.add_parser("sync-ransomware-live")
+    sync_ransomware_parser.add_argument("--limit", type=int, default=0)
+
+    bot_parser = subparsers.add_parser("send-bot-message")
+    bot_parser.add_argument("--type", choices=["digest", "text", "markdown"], default="digest")
+    bot_parser.add_argument("--content", default="")
+    bot_parser.add_argument("--provider", default=None)
+    bot_parser.add_argument("--bot-id", default=None)
+    bot_parser.add_argument("--chat-id", default=None)
+    bot_parser.add_argument("--websocket-url", default=None)
+    bot_parser.add_argument("--webhook-url", default=None)
+    bot_parser.add_argument("--secret", default=None)
+    bot_parser.add_argument("--limit", type=int, default=5)
+    bot_parser.add_argument("--dry-run", action="store_true")
 
     return parser
 
@@ -117,6 +141,33 @@ def _sync_public_vulns(sample_file: str | None, limit: int) -> int:
     return 0
 
 
+def _sync_ransomware_live(limit: int) -> int:
+    print(json.dumps(sync_ransomware_live_victims(limit=limit), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _send_bot_message(args) -> int:
+    config = load_bot_config(
+        provider=args.provider,
+        bot_id=args.bot_id,
+        chat_id=args.chat_id,
+        websocket_url=args.websocket_url,
+        webhook_url=args.webhook_url,
+        secret=args.secret,
+        dry_run=args.dry_run or None,
+    )
+    if args.type == "digest":
+        payload = build_intelligence_payload()
+        result = send_intelligence_digest(payload, config=config, limit=args.limit)
+    else:
+        if not args.content:
+            raise ValueError("--content is required for text or markdown messages")
+        message_payload = build_text_payload(args.content) if args.type == "text" else build_markdown_payload(args.content)
+        result = post_bot_payload(message_payload, config)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -139,6 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         return _show_runs(args.limit)
     if args.command == "sync-public-vulns":
         return _sync_public_vulns(args.sample_file, args.limit)
+    if args.command == "sync-ransomware-live":
+        return _sync_ransomware_live(args.limit)
+    if args.command == "send-bot-message":
+        return _send_bot_message(args)
     parser.error(f"unsupported command: {args.command}")
     return 2
 

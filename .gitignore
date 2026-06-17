@@ -15,6 +15,7 @@ threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
 
 # Runtime data and crawler artifacts
+darkweb_collector/.runtime/
 darkweb_collector/data/
 darkweb_collector/output/
 darkweb_collector/C*/
@@ -22,6 +23,8 @@ darkweb_collector/C*/
 # OS / editor
 .DS_Store
 Thumbs.db
+.codex-backups/
+_tmp_kaiti_report.txt
 
 # Archives and downloads
 *.tar.gz
