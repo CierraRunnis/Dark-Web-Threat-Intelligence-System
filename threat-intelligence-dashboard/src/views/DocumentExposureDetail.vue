@@ -282,9 +282,7 @@ onMounted(loadDetail)
   gap: 20px;
   padding: 24px;
   border-radius: 28px;
-  background:
-    radial-gradient(circle at top right, rgba(45, 93, 255, 0.14), transparent 28%),
-    linear-gradient(180deg, #fbfdff 0%, #f3f8ff 100%);
+  background: #ffffff;
   color: var(--ti-text-primary);
   border: 1px solid rgba(116, 142, 184, 0.14);
   box-shadow: 0 24px 50px rgba(32, 57, 96, 0.08);

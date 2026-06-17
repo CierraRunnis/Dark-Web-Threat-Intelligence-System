@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from darkweb_collector.bot_assistant import (
     BotAssistantError,
@@ -26,15 +26,19 @@ from darkweb_collector.bot_assistant import (
 )
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
+    dispatch_run_code_monitoring_once,
     dispatch_run_ransomware_sync_once,
     dispatch_run_site,
     dispatch_run_vulnerability_sync_once,
+    get_code_monitoring_continuous_status,
     get_continuous_dispatch_status,
     get_ransomware_sync_status,
     get_vulnerability_sync_status,
+    start_code_monitoring_dispatch,
     start_ransomware_sync_dispatch,
     start_continuous_dispatch,
     start_vulnerability_sync_dispatch,
+    stop_code_monitoring_dispatch,
     stop_ransomware_sync_dispatch,
     stop_continuous_dispatch,
     stop_vulnerability_sync_dispatch,
@@ -55,6 +59,7 @@ from darkweb_collector.code_monitoring import (
     add_code_monitoring_review,
     build_code_hit_detail,
     build_code_monitoring_summary,
+    delete_code_watchlist_payload,
     list_code_hits_payload,
     list_code_scan_runs_payload,
     list_code_watchlists_payload,
@@ -62,6 +67,7 @@ from darkweb_collector.code_monitoring import (
     scan_code_watchlist_once,
 )
 from darkweb_collector.document_exposure_sessions import (
+    auto_detect_platform_sessions,
     build_platform_session_payloads,
     launch_platform_login,
     remove_platform_session,
@@ -301,6 +307,17 @@ class CodeWatchTermRequest(BaseModel):
     enabled: bool = True
 
 
+class CodeEnterpriseProfileRequest(BaseModel):
+    official_names: list[str] = Field(default_factory=list)
+    brand_aliases: list[str] = Field(default_factory=list)
+    english_aliases: list[str] = Field(default_factory=list)
+    root_domains: list[str] = Field(default_factory=list)
+    trusted_subdomain_patterns: list[str] = Field(default_factory=list)
+    internal_system_keywords: list[str] = Field(default_factory=list)
+    negative_aliases: list[str] = Field(default_factory=list)
+    short_alias_guard: list[str] = Field(default_factory=list)
+
+
 class CodeWatchlistRequest(BaseModel):
     id: int | None = None
     name: str
@@ -309,11 +326,12 @@ class CodeWatchlistRequest(BaseModel):
     notes: str = ""
     platforms: list[str] = []
     file_extensions: list[str] = []
-    search_page_limit: int = 3
-    max_results_per_term: int = 5
+    search_page_limit: int = 0
+    max_results_per_term: int = 0
     detail_fetch: bool = True
     enabled_rule_keys: list[str] = []
     terms: list[CodeWatchTermRequest] = []
+    enterprise_profile: CodeEnterpriseProfileRequest = Field(default_factory=CodeEnterpriseProfileRequest)
 
 
 class CodeScanRequest(BaseModel):
@@ -329,6 +347,15 @@ class CodeMonitoringReviewRequest(BaseModel):
     status: str
     reviewer: str = ""
     note: str = ""
+
+
+class CodeMonitoringContinuousStartRequest(BaseModel):
+    interval_seconds: int = 3600
+    watchlist_id: int = Field(..., gt=0)
+
+
+class CodeMonitoringContinuousStopRequest(BaseModel):
+    watchlist_id: int = Field(..., gt=0)
 
 
 @app.post("/api/jobs/run-site")
@@ -456,6 +483,11 @@ def platform_sessions(module: str | None = None) -> list[dict]:
     return build_platform_session_payloads(module=module, manageable_only=True)
 
 
+@app.post("/api/platform-sessions/auto-detect")
+def platform_sessions_auto_detect(module: str | None = None) -> list[dict]:
+    return auto_detect_platform_sessions(module=module)
+
+
 @app.post("/api/platform-sessions/{platform}/launch-login")
 def platform_session_launch(platform: str) -> dict:
     try:
@@ -578,6 +610,14 @@ def save_code_monitoring_watchlist(payload: CodeWatchlistRequest) -> dict:
     return save_code_watchlist_payload(payload.model_dump())
 
 
+@app.delete("/api/code-monitoring/watchlists/{watchlist_id}")
+def delete_code_monitoring_watchlist(watchlist_id: int) -> dict:
+    try:
+        return delete_code_watchlist_payload(watchlist_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/api/code-monitoring/watchlists/{watchlist_id}/scan")
 def code_monitoring_watchlist_scan(watchlist_id: int, payload: CodeScanRequest) -> dict:
     try:
@@ -599,12 +639,42 @@ def code_monitoring_scans(watchlist_id: int | None = None, limit: int = 50) -> l
     return list_code_scan_runs_payload(watchlist_id=watchlist_id, limit=limit)
 
 
+@app.get("/api/code-monitoring/continuous-status")
+def code_monitoring_continuous_status(watchlist_id: int | None = None) -> dict:
+    return get_code_monitoring_continuous_status(watchlist_id=watchlist_id)
+
+
+@app.post("/api/code-monitoring/continuous/run")
+def code_monitoring_continuous_run() -> dict:
+    return dispatch_run_code_monitoring_once()
+
+
+@app.post("/api/code-monitoring/continuous/start")
+def code_monitoring_continuous_start(payload: CodeMonitoringContinuousStartRequest) -> dict:
+    try:
+        return start_code_monitoring_dispatch(
+            interval_seconds=payload.interval_seconds,
+            watchlist_id=payload.watchlist_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/code-monitoring/continuous/stop")
+def code_monitoring_continuous_stop(payload: CodeMonitoringContinuousStopRequest) -> dict:
+    try:
+        return stop_code_monitoring_dispatch(watchlist_id=payload.watchlist_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/code-monitoring/hits")
 def code_monitoring_hits(
     watchlist_id: int | None = None,
     review_status: str | None = None,
     platform: str | None = None,
     sensitive_type: str | None = None,
+    include_suppressed: bool = False,
     limit: int = 200,
 ) -> list[dict]:
     return list_code_hits_payload(
@@ -612,6 +682,7 @@ def code_monitoring_hits(
         review_status=review_status,
         platform=platform,
         sensitive_type=sensitive_type,
+        include_suppressed=include_suppressed,
         limit=limit,
     )
 

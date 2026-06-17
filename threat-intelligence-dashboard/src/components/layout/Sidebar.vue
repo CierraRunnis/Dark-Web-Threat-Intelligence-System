@@ -25,12 +25,6 @@
               <span class="sidebar__item-title">{{ item.title }}</span>
             </div>
           </div>
-          <StatusBadge
-            v-show="!shell.state.sidebarCollapsed"
-            :label="item.badge"
-            :tone="item.tone"
-            :dot="false"
-          />
         </router-link>
 
         <div v-else class="sidebar__group" :class="{ active: isGroupActive(item) }">
@@ -44,7 +38,6 @@
               </div>
             </div>
             <div v-show="!shell.state.sidebarCollapsed" class="sidebar__group-meta">
-              <StatusBadge :label="item.badge" :tone="item.tone" :dot="false" />
               <el-icon class="sidebar__group-arrow">
                 <component :is="isGroupOpen(item.key) ? 'ArrowDown' : 'ArrowRight'" />
               </el-icon>
@@ -87,7 +80,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useShellLayout } from '@/composables/useShellLayout'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
@@ -96,19 +88,17 @@ const shell = useShellLayout()
 const { data } = useIntelligenceData()
 
 const navTree = [
-  { type: 'item', path: '/', title: '总览', icon: 'DataLine', badge: '今日', tone: 'primary' },
-  { type: 'item', path: '/ransomware', title: '勒索情报', icon: 'Lock', badge: '高热', tone: 'danger' },
-  { type: 'item', path: '/data-leak', title: '数据泄露情报', icon: 'Document', badge: '更新', tone: 'warning' },
-  { type: 'item', path: '/vulnerability-alerts', title: '漏洞预警', icon: 'WarningFilled', badge: '预警', tone: 'danger' },
-  { type: 'item', path: '/threat-situation', title: '威胁态势', icon: 'TrendCharts', badge: '态势', tone: 'success' },
-  { type: 'item', path: '/collector-control', title: '采集控制', icon: 'VideoPlay', badge: '控制', tone: 'primary' },
+  { type: 'item', path: '/', title: '总览', icon: 'DataLine' },
+  { type: 'item', path: '/ransomware', title: '勒索情报', icon: 'Lock' },
+  { type: 'item', path: '/data-leak', title: '数据泄露情报', icon: 'Document' },
+  { type: 'item', path: '/vulnerability-alerts', title: '漏洞预警', icon: 'WarningFilled' },
+  { type: 'item', path: '/threat-situation', title: '威胁态势', icon: 'TrendCharts' },
+  { type: 'item', path: '/collector-control', title: '采集控制', icon: 'VideoPlay' },
   {
     type: 'group',
     key: 'document-exposure',
     title: '文件监测',
     icon: 'Files',
-    badge: '4项',
-    tone: 'warning',
     children: [
       { path: '/document-exposure/search-engine', title: '搜索引擎监测', icon: 'Search' },
       { path: '/document-exposure/netdisk', title: '网盘监测', icon: 'Share' },
@@ -190,6 +180,7 @@ const monitoringRangeText = computed(() => {
   border-right: 1px solid rgba(87, 97, 123, 0.08);
   background: rgba(255, 255, 255, 0.98);
   backdrop-filter: blur(16px);
+  overflow-x: hidden;
   transition: width 0.3s ease;
 }
 
@@ -229,6 +220,7 @@ const monitoringRangeText = computed(() => {
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sidebar__group {

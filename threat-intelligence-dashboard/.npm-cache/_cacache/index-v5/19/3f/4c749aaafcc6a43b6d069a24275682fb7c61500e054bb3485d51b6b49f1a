@@ -1,0 +1,2 @@
+
+734f24beb74dedc1e508735c340aa9b01bbad3ea	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/magic-string/-/magic-string-0.30.21.tgz","integrity":null,"time":1780574244165,"size":"262","metadata":{"time":1780574244165,"url":"http://registry.npm.taobao.org/magic-string/-/magic-string-0.30.21.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/magic-string/-/magic-string-0.30.21.tgz"},"options":{"compress":true},"status":301}}

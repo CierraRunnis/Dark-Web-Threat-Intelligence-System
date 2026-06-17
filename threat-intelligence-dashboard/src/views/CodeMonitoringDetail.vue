@@ -3,7 +3,7 @@
     <section class="detail-shell">
       <header class="detail-shell__header">
         <div>
-          <el-button text class="back-button" @click="router.push('/document-exposure/code-monitoring')">返回代码监测</el-button>
+          <el-button text class="back-button" @click="goBack">返回代码监测</el-button>
           <div class="detail-shell__eyebrow">Code Monitoring</div>
           <h2 class="detail-shell__title">{{ detail.repositoryFullName || detail.repositoryName || '-' }}</h2>
           <div class="detail-shell__meta">
@@ -15,6 +15,7 @@
         <div class="detail-shell__tags">
           <span :class="['layer-tag', `layer-tag--${detail.resultLayer || 'sensitive'}`]">{{ detail.resultLayerLabel || (detail.resultLayer === 'clue' ? '线索命中' : '敏感命中') }}</span>
           <span :class="['severity-tag', `severity-tag--${detail.severity || 'low'}`]">{{ formatSeverity(detail.severity) }}</span>
+          <span v-if="detail.displayBucket === 'suppressed'" class="neutral-tag neutral-tag--suppressed">已压制弱线索</span>
           <span class="neutral-tag">{{ detail.sensitiveLabel || detail.sensitiveType || '-' }}</span>
         </div>
       </header>
@@ -213,6 +214,20 @@ const detail = reactive({
 const reviewer = ref('ui')
 const note = ref('')
 
+const enterpriseAnchors = computed(() => (Array.isArray(detail.enterpriseAnchors) ? detail.enterpriseAnchors : []))
+const riskPromotionReasons = computed(() => (Array.isArray(detail.riskPromotionReasons) ? detail.riskPromotionReasons : []))
+const suppressionReasons = computed(() => (Array.isArray(detail.suppressionReasons) ? detail.suppressionReasons : []))
+const enterpriseAnchorText = computed(() => enterpriseAnchors.value.map((item) => `${item.label || item.type}: ${item.value || '-'}`).join(' / '))
+const riskPromotionText = computed(() => riskPromotionReasons.value.join(' / '))
+const suppressionReasonText = computed(() => suppressionReasons.value.join(' / '))
+const enterpriseMatchLevelLabel = computed(() => {
+  if (detail.enterpriseMatchLevel === 'strong') return '强锚点'
+  if (detail.enterpriseMatchLevel === 'alias') return '别名锚点'
+  if (detail.enterpriseMatchLevel === 'weak') return '弱锚点'
+  return '未命中'
+})
+const displayBucketLabel = computed(() => (detail.displayBucket === 'suppressed' ? '附加列表 / 已压制弱线索' : '主列表 / 高价值结果'))
+
 const infoItems = computed(() => [
   { label: '监测对象', value: detail.watchlistName || '-' },
   { label: '所属机构', value: detail.organizationName || '-' },
@@ -222,6 +237,11 @@ const infoItems = computed(() => [
   { label: '分支', value: detail.branch || '-' },
   { label: '检索命中词', value: highlightText(detail.matchedTerm || '-', detail.matchedTerm), highlight: true },
   { label: '敏感类型', value: detail.sensitiveLabel || detail.sensitiveType || '-' },
+  { label: '展示分组', value: displayBucketLabel.value },
+  { label: '企业命中等级', value: enterpriseMatchLevelLabel.value },
+  { label: '企业锚点依据', value: enterpriseAnchorText.value || '-' },
+  { label: '提权原因', value: riskPromotionText.value || '-' },
+  { label: '压制原因', value: suppressionReasonText.value || '-' },
 ])
 
 const matchedTermContexts = computed(() => (Array.isArray(detail.matchedTermContexts) ? detail.matchedTermContexts : []))
@@ -279,6 +299,15 @@ function formatDateTime(value) {
   return formatShanghaiDateTime(value)
 }
 
+function goBack() {
+  const from = Array.isArray(route.query.from) ? route.query.from[0] : route.query.from
+  if (from) {
+    router.push(String(from))
+    return
+  }
+  router.push('/document-exposure/code-monitoring')
+}
+
 async function loadDetail() {
   try {
     const payload = await api.loadHitDetail(route.params.hitId)
@@ -312,9 +341,7 @@ onMounted(loadDetail)
   gap: 20px;
   padding: 24px;
   border-radius: 28px;
-  background:
-    radial-gradient(circle at top right, rgba(45, 93, 255, 0.14), transparent 28%),
-    linear-gradient(180deg, #fbfdff 0%, #f3f8ff 100%);
+  background: #ffffff;
   color: var(--ti-text-primary);
   border: 1px solid rgba(116, 142, 184, 0.14);
   box-shadow: 0 24px 50px rgba(32, 57, 96, 0.08);
@@ -416,6 +443,12 @@ onMounted(loadDetail)
 .layer-tag--clue {
   background: rgba(38, 113, 220, 0.14);
   color: #1c6dd0;
+}
+
+.neutral-tag--suppressed {
+  background: rgba(255, 173, 76, 0.18);
+  border-color: rgba(255, 173, 76, 0.32);
+  color: #b76a18;
 }
 
 .severity-tag {

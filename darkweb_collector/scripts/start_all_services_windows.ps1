@@ -57,7 +57,15 @@ $CollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) { $env:DARKWEB_COLL
 $CollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
     $configuredOutputRoot = [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
     $resolvedLegacyOutputRoot = [System.IO.Path]::GetFullPath($LegacyCollectorOutputRoot)
+    $resolvedProjectCollectorOutputRoot = [System.IO.Path]::GetFullPath($ProjectCollectorOutputRoot)
     if ($configuredOutputRoot -ieq $resolvedLegacyOutputRoot) {
+        $ProjectCollectorOutputRoot
+    }
+    elseif (
+        $configuredOutputRoot -ine $resolvedProjectCollectorOutputRoot -and
+        [System.IO.Path]::GetFileName($configuredOutputRoot).ToLowerInvariant() -eq "output" -and
+        [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($configuredOutputRoot)).ToLowerInvariant() -eq "darkweb_collector"
+    ) {
         $ProjectCollectorOutputRoot
     }
     else {

@@ -381,6 +381,7 @@ CREATE TABLE IF NOT EXISTS code_hits (
     sensitive_type TEXT NOT NULL,
     matched_rule TEXT NOT NULL DEFAULT '',
     matched_term TEXT NOT NULL DEFAULT '',
+    result_layer TEXT NOT NULL DEFAULT 'sensitive',
     risk_score INTEGER NOT NULL DEFAULT 0,
     severity TEXT NOT NULL DEFAULT 'low',
     review_status TEXT NOT NULL DEFAULT 'new',
@@ -441,6 +442,8 @@ CREATE TABLE IF NOT EXISTS code_scan_runs (
     requested_terms_json TEXT NOT NULL DEFAULT '[]',
     candidate_count INTEGER NOT NULL DEFAULT 0,
     hit_count INTEGER NOT NULL DEFAULT 0,
+    clue_hit_count INTEGER NOT NULL DEFAULT 0,
+    sensitive_hit_count INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     errors_json TEXT NOT NULL DEFAULT '[]',
@@ -451,6 +454,26 @@ CREATE TABLE IF NOT EXISTS code_scan_runs (
 
 CREATE INDEX IF NOT EXISTS idx_code_scan_runs_watchlist
 ON code_scan_runs(watchlist_id, finished_at);
+
+CREATE TABLE IF NOT EXISTS code_search_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    term TEXT NOT NULL,
+    query_key TEXT NOT NULL DEFAULT 'base',
+    last_page_scanned INTEGER NOT NULL DEFAULT 0,
+    last_candidate_signature TEXT NOT NULL DEFAULT '',
+    last_candidate_keys_json TEXT NOT NULL DEFAULT '[]',
+    last_repository_urls_json TEXT NOT NULL DEFAULT '[]',
+    last_run_started_at TEXT NOT NULL DEFAULT '',
+    last_run_finished_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(watchlist_id, platform, term, query_key),
+    FOREIGN KEY (watchlist_id) REFERENCES code_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_search_states_lookup
+ON code_search_states(watchlist_id, platform, term, query_key);
 
 CREATE TABLE IF NOT EXISTS normalized_intelligence_events (
     event_id TEXT PRIMARY KEY,
@@ -542,6 +565,13 @@ LEGACY_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
     },
     "monitoring_keyword_notifications": {
         "event_key": "TEXT NOT NULL DEFAULT ''",
+    },
+    "code_hits": {
+        "result_layer": "TEXT NOT NULL DEFAULT 'sensitive'",
+    },
+    "code_scan_runs": {
+        "clue_hit_count": "INTEGER NOT NULL DEFAULT 0",
+        "sensitive_hit_count": "INTEGER NOT NULL DEFAULT 0",
     },
 }
 
@@ -2106,6 +2136,33 @@ def upsert_code_watchlist(connection: sqlite3.Connection, payload: dict) -> int:
     return int(cursor.lastrowid)
 
 
+def delete_code_watchlist(connection: sqlite3.Connection, watchlist_id: int) -> None:
+    target_id = int(watchlist_id)
+    connection.execute(
+        """
+        DELETE FROM code_hit_reviews
+        WHERE hit_id IN (
+            SELECT id FROM code_hits WHERE watchlist_id = ?
+        )
+        """,
+        (target_id,),
+    )
+    connection.execute(
+        """
+        DELETE FROM code_hit_snapshots
+        WHERE hit_id IN (
+            SELECT id FROM code_hits WHERE watchlist_id = ?
+        )
+        """,
+        (target_id,),
+    )
+    connection.execute("DELETE FROM code_hits WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM code_scan_runs WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM code_search_states WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM code_watch_terms WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM code_watchlists WHERE id = ?", (target_id,))
+
+
 def list_code_watch_terms(connection: sqlite3.Connection, watchlist_id: int) -> list[dict]:
     cursor = connection.execute(
         """
@@ -2154,7 +2211,7 @@ def get_code_hit(connection: sqlite3.Connection, hit_id: int) -> dict | None:
     cursor = connection.execute(
         """
         SELECT id, watchlist_id, platform, repository_name, repository_owner, repository_url, file_path,
-               branch, file_url, visibility, language, sensitive_type, matched_rule, matched_term,
+               branch, file_url, visibility, language, sensitive_type, matched_rule, matched_term, result_layer,
                risk_score, severity, review_status, evidence_count, first_seen_at, last_seen_at,
                last_snapshot_id, raw_json
         FROM code_hits
@@ -2195,8 +2252,8 @@ def list_code_hits(
         f"""
         SELECT h.id, h.watchlist_id, h.platform, h.repository_name, h.repository_owner, h.repository_url,
                h.file_path, h.branch, h.file_url, h.visibility, h.language, h.sensitive_type, h.matched_rule,
-               h.matched_term, h.risk_score, h.severity, h.review_status, h.evidence_count, h.first_seen_at,
-               h.last_seen_at, h.last_snapshot_id, h.raw_json, w.name AS watchlist_name, w.organization_name
+               h.matched_term, h.result_layer, h.risk_score, h.severity, h.review_status, h.evidence_count, h.first_seen_at,
+               h.last_seen_at, h.last_snapshot_id, h.raw_json, w.name AS watchlist_name, w.organization_name, w.metadata_json AS watchlist_metadata_json
         FROM code_hits h
         JOIN code_watchlists w
           ON w.id = h.watchlist_id
@@ -2237,6 +2294,7 @@ def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
         str(payload.get("visibility") or "").strip() or "public",
         str(payload.get("language") or "").strip(),
         str(payload.get("matched_rule") or "").strip(),
+        str(payload.get("result_layer") or "").strip() or "sensitive",
         int(payload.get("risk_score") or 0),
         str(payload.get("severity") or "").strip() or "low",
         str(payload.get("review_status") or "").strip() or "new",
@@ -2250,7 +2308,7 @@ def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
             """
             UPDATE code_hits
             SET repository_name = ?, repository_owner = ?, repository_url = ?, file_path = ?, branch = ?,
-                visibility = ?, language = ?, matched_rule = ?, risk_score = ?, severity = ?, review_status = ?,
+                visibility = ?, language = ?, matched_rule = ?, result_layer = ?, risk_score = ?, severity = ?, review_status = ?,
                 evidence_count = ?, last_seen_at = ?, last_snapshot_id = ?, raw_json = ?
             WHERE id = ?
             """,
@@ -2261,9 +2319,9 @@ def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
         """
         INSERT INTO code_hits (
             watchlist_id, platform, repository_name, repository_owner, repository_url, file_path, branch,
-            file_url, visibility, language, sensitive_type, matched_rule, matched_term, risk_score, severity,
+            file_url, visibility, language, sensitive_type, matched_rule, matched_term, result_layer, risk_score, severity,
             review_status, evidence_count, first_seen_at, last_seen_at, last_snapshot_id, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             signature[0],
@@ -2283,10 +2341,11 @@ def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
             values[9],
             values[10],
             values[11],
-            str(payload.get("first_seen_at") or values[12]),
             values[12],
+            str(payload.get("first_seen_at") or values[13]),
             values[13],
             values[14],
+            values[15],
         ),
     )
     return int(cursor.lastrowid)
@@ -2380,8 +2439,8 @@ def insert_code_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
         """
         INSERT INTO code_scan_runs (
             watchlist_id, platforms_json, requested_terms_json, candidate_count, hit_count,
-            error_count, status, errors_json, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            clue_hit_count, sensitive_hit_count, error_count, status, errors_json, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(payload.get("watchlist_id") or 0),
@@ -2389,6 +2448,8 @@ def insert_code_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
             str(payload.get("requested_terms_json") or "[]"),
             int(payload.get("candidate_count") or 0),
             int(payload.get("hit_count") or 0),
+            int(payload.get("clue_hit_count") or 0),
+            int(payload.get("sensitive_hit_count") or 0),
             int(payload.get("error_count") or 0),
             str(payload.get("status") or "").strip() or "succeeded",
             str(payload.get("errors_json") or "[]"),
@@ -2409,7 +2470,7 @@ def list_code_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None
     cursor = connection.execute(
         f"""
         SELECT r.id, r.watchlist_id, r.platforms_json, r.requested_terms_json, r.candidate_count,
-               r.hit_count, r.error_count, r.status, r.errors_json, r.started_at, r.finished_at,
+               r.hit_count, r.clue_hit_count, r.sensitive_hit_count, r.error_count, r.status, r.errors_json, r.started_at, r.finished_at,
                w.name AS watchlist_name, w.organization_name
         FROM code_scan_runs r
         JOIN code_watchlists w
@@ -2421,3 +2482,108 @@ def list_code_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None
         tuple(params),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def list_code_search_states(
+    connection: sqlite3.Connection,
+    *,
+    watchlist_id: int,
+    platform: str,
+    term: str,
+) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT id, watchlist_id, platform, term, query_key, last_page_scanned,
+               last_candidate_signature, last_candidate_keys_json, last_repository_urls_json,
+               last_run_started_at, last_run_finished_at, updated_at
+        FROM code_search_states
+        WHERE watchlist_id = ? AND platform = ? AND term = ?
+        ORDER BY query_key ASC, id ASC
+        """,
+        (int(watchlist_id), str(platform).strip(), str(term).strip()),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_code_search_state(
+    connection: sqlite3.Connection,
+    *,
+    watchlist_id: int,
+    platform: str,
+    term: str,
+    query_key: str = "base",
+) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, watchlist_id, platform, term, query_key, last_page_scanned,
+               last_candidate_signature, last_candidate_keys_json, last_repository_urls_json,
+               last_run_started_at, last_run_finished_at, updated_at
+        FROM code_search_states
+        WHERE watchlist_id = ? AND platform = ? AND term = ? AND query_key = ?
+        """,
+        (int(watchlist_id), str(platform).strip(), str(term).strip(), str(query_key).strip() or "base"),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_code_search_state(connection: sqlite3.Connection, payload: dict) -> int:
+    signature = (
+        int(payload.get("watchlist_id") or 0),
+        str(payload.get("platform") or "").strip(),
+        str(payload.get("term") or "").strip(),
+        str(payload.get("query_key") or "").strip() or "base",
+    )
+    if not all(signature):
+        raise ValueError("watchlist_id, platform, term, and query_key are required")
+    cursor = connection.execute(
+        """
+        SELECT id
+        FROM code_search_states
+        WHERE watchlist_id = ? AND platform = ? AND term = ? AND query_key = ?
+        """,
+        signature,
+    )
+    row = cursor.fetchone()
+    values = (
+        int(payload.get("last_page_scanned") or 0),
+        str(payload.get("last_candidate_signature") or ""),
+        str(payload.get("last_candidate_keys_json") or "[]"),
+        str(payload.get("last_repository_urls_json") or "[]"),
+        str(payload.get("last_run_started_at") or ""),
+        str(payload.get("last_run_finished_at") or ""),
+        str(payload.get("updated_at") or ""),
+    )
+    if row is not None:
+        connection.execute(
+            """
+            UPDATE code_search_states
+            SET last_page_scanned = ?, last_candidate_signature = ?, last_candidate_keys_json = ?,
+                last_repository_urls_json = ?, last_run_started_at = ?, last_run_finished_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (*values, int(row["id"])),
+        )
+        return int(row["id"])
+    cursor = connection.execute(
+        """
+        INSERT INTO code_search_states (
+            watchlist_id, platform, term, query_key, last_page_scanned, last_candidate_signature,
+            last_candidate_keys_json, last_repository_urls_json, last_run_started_at, last_run_finished_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signature[0],
+            signature[1],
+            signature[2],
+            signature[3],
+            values[0],
+            values[1],
+            values[2],
+            values[3],
+            values[4],
+            values[5],
+            values[6],
+        ),
+    )
+    return int(cursor.lastrowid)
