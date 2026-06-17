@@ -18,17 +18,30 @@ BROWSER_CONCURRENCY="${DARKWEB_BROWSER_CONCURRENCY:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DASHBOARD_ROOT="$(cd "$COLLECTOR_ROOT/../threat-intelligence-dashboard" && pwd)"
+PROJECT_ROOT="$(cd "$COLLECTOR_ROOT/.." && pwd)"
+DASHBOARD_ROOT="$(cd "$PROJECT_ROOT/threat-intelligence-dashboard" && pwd)"
 COLLECTOR_VENV="$COLLECTOR_ROOT/venv"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 DEFAULT_PROJECT_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
 COLLECTOR_SOURCE_DB="${DARKWEB_COLLECTOR_SOURCE_DB_PATH:-}"
 COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$HOME/.local/share/bishe/collector.db}"
 COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_DB}.meta.json}"
+COLLECTOR_SITES_FILE="${DARKWEB_COLLECTOR_SITES_FILE:-$COLLECTOR_ROOT/sites.yaml}"
+COLLECTOR_OUTPUT_ROOT="${DARKWEB_COLLECTOR_OUTPUT_ROOT:-$COLLECTOR_ROOT/output}"
 REQUIREMENTS_STAMP="$COLLECTOR_VENV/.requirements.sha256"
 PLAYWRIGHT_STAMP="$COLLECTOR_VENV/.playwright.chromium.ready"
 PACKAGE_LOCK_STAMP="$DASHBOARD_ROOT/node_modules/.package-lock.sha256"
 NPM_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/darkweb-threat-intel/npm"
+USER_BIN_DIR="$HOME/.local/bin"
+USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/darkweb-threat-intel"
+USER_ENV_FILE="$USER_CONFIG_DIR/env.sh"
+USER_COMMAND_PATH="$USER_BIN_DIR/darkweb"
+PROFILE_MARKER_BEGIN="# >>> darkweb bootstrap >>>"
+PROFILE_MARKER_END="# <<< darkweb bootstrap <<<"
+RUNTIME_DIR="$COLLECTOR_ROOT/.runtime/wsl"
+LOG_DIR="$RUNTIME_DIR/logs"
+RUNTIME_PORTS_FILE="$RUNTIME_DIR/ports.env"
+SERVICE_STATE_FILE="$RUNTIME_DIR/services.state"
 
 die() {
   echo "[ERROR] $*" >&2
@@ -84,6 +97,83 @@ validate_positive_integer() {
   fi
 }
 
+looks_like_windows_path() {
+  [[ "$1" =~ ^[A-Za-z]:[\\/].* ]]
+}
+
+sanitize_path_overrides() {
+  if looks_like_windows_path "$COLLECTOR_RUNTIME_DB"; then
+    warn "ignoring Windows DARKWEB_COLLECTOR_DB_PATH override in Linux shell"
+    COLLECTOR_RUNTIME_DB="$HOME/.local/share/bishe/collector.db"
+  fi
+
+  if looks_like_windows_path "$COLLECTOR_RUNTIME_DB_META"; then
+    warn "ignoring Windows DARKWEB_RUNTIME_DB_META_PATH override in Linux shell"
+    COLLECTOR_RUNTIME_DB_META="${COLLECTOR_RUNTIME_DB}.meta.json"
+  fi
+
+  if [[ -n "$COLLECTOR_SOURCE_DB" ]] && looks_like_windows_path "$COLLECTOR_SOURCE_DB" && [[ ! -e "$COLLECTOR_SOURCE_DB" ]]; then
+    warn "ignoring Windows DARKWEB_COLLECTOR_SOURCE_DB_PATH override in Linux shell"
+    COLLECTOR_SOURCE_DB=""
+  fi
+
+  if looks_like_windows_path "$COLLECTOR_SITES_FILE" || [[ ! -f "$COLLECTOR_SITES_FILE" ]]; then
+    warn "ignoring invalid DARKWEB_COLLECTOR_SITES_FILE override in Linux shell"
+    COLLECTOR_SITES_FILE="$COLLECTOR_ROOT/sites.yaml"
+  fi
+
+  if looks_like_windows_path "$COLLECTOR_OUTPUT_ROOT"; then
+    warn "ignoring Windows DARKWEB_COLLECTOR_OUTPUT_ROOT override in Linux shell"
+    COLLECTOR_OUTPUT_ROOT="$COLLECTOR_ROOT/output"
+  fi
+}
+
+get_redis_host() {
+  local endpoint="${REDIS_URL#redis://}"
+  endpoint="${endpoint#*@}"
+  endpoint="${endpoint%%/*}"
+  if [[ "$endpoint" == \[*\]*:* ]]; then
+    endpoint="${endpoint%\]:*}"
+    endpoint="${endpoint#[}"
+  elif [[ "$endpoint" == *:* ]]; then
+    endpoint="${endpoint%:*}"
+  fi
+  if [[ -z "$endpoint" ]]; then
+    endpoint="127.0.0.1"
+  fi
+  printf '%s\n' "$endpoint"
+}
+
+get_redis_port() {
+  local endpoint="${REDIS_URL#redis://}"
+  endpoint="${endpoint#*@}"
+  endpoint="${endpoint%%/*}"
+  if [[ "$endpoint" == \[*\]*:* ]]; then
+    printf '%s\n' "${endpoint##*:}"
+    return 0
+  fi
+  if [[ "$endpoint" == *:* ]]; then
+    printf '%s\n' "${endpoint##*:}"
+    return 0
+  fi
+  printf '%s\n' "6379"
+}
+
+redis_endpoint_is_local() {
+  case "$(get_redis_host)" in
+    127.0.0.1|localhost|::1)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+redis_ping() {
+  redis-cli -u "$REDIS_URL" ping 2>/dev/null | grep -q "PONG"
+}
+
 file_sha256() {
   local file_path="$1"
   python3 - "$file_path" <<'PY'
@@ -110,9 +200,11 @@ install_system_dependencies() {
   fi
   python3 -m pip --version >/dev/null 2>&1 || missing_packages+=("python3-pip")
   command -v npm >/dev/null 2>&1 || missing_packages+=("npm")
-  command -v redis-server >/dev/null 2>&1 || missing_packages+=("redis-server")
   command -v redis-cli >/dev/null 2>&1 || missing_packages+=("redis-tools")
   command -v curl >/dev/null 2>&1 || missing_packages+=("curl")
+  if redis_endpoint_is_local; then
+    command -v redis-server >/dev/null 2>&1 || missing_packages+=("redis-server")
+  fi
 
   if (( ${#missing_packages[@]} == 0 )); then
     return 0
@@ -377,7 +469,7 @@ sync_runtime_db_to_source() {
 }
 
 site_configs_ready() {
-  python3 - "$COLLECTOR_ROOT" "$COLLECTOR_ROOT/sites.yaml" <<'PY'
+  python3 - "$COLLECTOR_ROOT" "$COLLECTOR_SITES_FILE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -408,11 +500,17 @@ PY
 
 build_env_exports() {
   local exports=()
+  exports+=("export DARKWEB_HOME=$(printf '%q' "$PROJECT_ROOT")")
+  exports+=("export DARKWEB_PROJECT_ROOT=$(printf '%q' "$PROJECT_ROOT")")
+  exports+=("export DARKWEB_COLLECTOR_ROOT=$(printf '%q' "$COLLECTOR_ROOT")")
+  exports+=("export DARKWEB_DASHBOARD_ROOT=$(printf '%q' "$DASHBOARD_ROOT")")
   exports+=("export REDIS_URL=$(printf '%q' "$REDIS_URL")")
   exports+=("export PYTHONPATH=$(printf '%q' "$COLLECTOR_ROOT/src"):\${PYTHONPATH:-}")
   exports+=("export DARKWEB_COLLECTOR_DB_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB")")
   exports+=("export DARKWEB_COLLECTOR_SOURCE_DB_PATH=$(printf '%q' "$COLLECTOR_SOURCE_DB")")
   exports+=("export DARKWEB_RUNTIME_DB_META_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB_META")")
+  exports+=("export DARKWEB_COLLECTOR_SITES_FILE=$(printf '%q' "$COLLECTOR_SITES_FILE")")
+  exports+=("export DARKWEB_COLLECTOR_OUTPUT_ROOT=$(printf '%q' "$COLLECTOR_OUTPUT_ROOT")")
   exports+=("export DARKWEB_API_PORT=$(printf '%q' "$API_PORT")")
   exports+=("export DARKWEB_API_TARGET=$(printf '%q' "$API_BASE_URL")")
   exports+=("export DARKWEB_FRONTEND_PORT=$(printf '%q' "$FRONTEND_PORT")")
@@ -428,6 +526,171 @@ build_env_exports() {
   printf '%s; ' "${exports[@]}"
 }
 
+save_runtime_ports() {
+  ensure_directory "$RUNTIME_DIR"
+  cat > "$RUNTIME_PORTS_FILE" <<EOF
+API_PORT=$API_PORT
+API_BASE_URL=$(printf '%q' "$API_BASE_URL")
+API_HEALTH_URL=$(printf '%q' "$API_HEALTH_URL")
+API_JOBS_URL=$(printf '%q' "$API_JOBS_URL")
+FRONTEND_PORT=$FRONTEND_PORT
+FRONTEND_URL=$(printf '%q' "$FRONTEND_URL")
+EOF
+}
+
+load_runtime_ports() {
+  if [[ ! -f "$RUNTIME_PORTS_FILE" ]]; then
+    return 0
+  fi
+
+  # shellcheck disable=SC1090
+  . "$RUNTIME_PORTS_FILE"
+  set_api_port "$API_PORT"
+  set_frontend_port "$FRONTEND_PORT"
+}
+
+save_service_records() {
+  ensure_directory "$RUNTIME_DIR"
+  : > "$SERVICE_STATE_FILE"
+  while (( "$#" )); do
+    printf '%s|%s\n' "$1" "$2" >> "$SERVICE_STATE_FILE"
+    shift 2
+  done
+}
+
+service_window_exists() {
+  local window_name="$1"
+  tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 1
+  tmux list-windows -t "$SESSION_NAME" -F '#{window_name}' 2>/dev/null | grep -qx "$window_name"
+}
+
+show_service_records() {
+  if [[ ! -f "$SERVICE_STATE_FILE" ]]; then
+    return 0
+  fi
+
+  while IFS='|' read -r service_name log_path; do
+    [[ -n "$service_name" ]] || continue
+    local state="down"
+    if service_window_exists "$service_name"; then
+      state="up"
+    fi
+    info "${service_name}: ${state} (log ${log_path})"
+  done < "$SERVICE_STATE_FILE"
+}
+
+write_user_env_file() {
+  ensure_directory "$USER_CONFIG_DIR"
+  {
+    echo "# Generated by darkweb register"
+    printf 'export DARKWEB_HOME=%q\n' "$PROJECT_ROOT"
+    printf 'export DARKWEB_PROJECT_ROOT=%q\n' "$PROJECT_ROOT"
+    printf 'export DARKWEB_COLLECTOR_ROOT=%q\n' "$COLLECTOR_ROOT"
+    printf 'export DARKWEB_DASHBOARD_ROOT=%q\n' "$DASHBOARD_ROOT"
+    printf 'export REDIS_URL=%q\n' "$REDIS_URL"
+    printf 'export DARKWEB_COLLECTOR_DB_PATH=%q\n' "$COLLECTOR_RUNTIME_DB"
+    printf 'export DARKWEB_COLLECTOR_SOURCE_DB_PATH=%q\n' "$COLLECTOR_SOURCE_DB"
+    printf 'export DARKWEB_RUNTIME_DB_META_PATH=%q\n' "$COLLECTOR_RUNTIME_DB_META"
+    printf 'export DARKWEB_COLLECTOR_SITES_FILE=%q\n' "$COLLECTOR_SITES_FILE"
+    printf 'export DARKWEB_COLLECTOR_OUTPUT_ROOT=%q\n' "$COLLECTOR_OUTPUT_ROOT"
+    printf 'export DARKWEB_API_PORT=%q\n' "$API_PORT"
+    printf 'export DARKWEB_API_TARGET=%q\n' "$API_BASE_URL"
+    printf 'export DARKWEB_FRONTEND_PORT=%q\n' "$FRONTEND_PORT"
+    printf 'export DARKWEB_FRONTEND_URL=%q\n' "$FRONTEND_URL"
+    printf 'export VITE_API_TARGET=%q\n' "$API_BASE_URL"
+    printf 'export VITE_FRONTEND_PORT=%q\n' "$FRONTEND_PORT"
+    printf 'export DARKWEB_BROWSER_CONCURRENCY=%q\n' "$BROWSER_CONCURRENCY"
+    for var_name in TOR_SOCKS_HOST TOR_SOCKS_PORT PROXY_HOST PROXY_PORT; do
+      if [[ -n "${!var_name:-}" ]]; then
+        printf 'export %s=%q\n' "$var_name" "${!var_name}"
+      fi
+    done
+  } > "$USER_ENV_FILE"
+}
+
+write_darkweb_command() {
+  ensure_directory "$USER_BIN_DIR"
+  cat > "$USER_COMMAND_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${USER_ENV_FILE}"
+if [ -f "\$ENV_FILE" ]; then
+  . "\$ENV_FILE"
+fi
+
+COLLECTOR_ROOT="\${DARKWEB_COLLECTOR_ROOT:-${COLLECTOR_ROOT}}"
+SCRIPT_PATH="\$COLLECTOR_ROOT/scripts/start_all_services_wsl.sh"
+
+if [ ! -f "\$SCRIPT_PATH" ]; then
+  echo "[ERROR] DARKWEB_COLLECTOR_ROOT is not valid. Run bash ${COLLECTOR_ROOT}/scripts/start_all_services_wsl.sh register from the project root." >&2
+  exit 1
+fi
+
+if [ "\$#" -eq 0 ]; then
+  exec bash "\$SCRIPT_PATH" start
+fi
+
+exec bash "\$SCRIPT_PATH" "\$@"
+EOF
+  chmod +x "$USER_COMMAND_PATH"
+}
+
+update_shell_startup_file() {
+  local rc_file="$1"
+  local rc_dir
+  local temp_file
+
+  rc_dir="$(dirname "$rc_file")"
+  ensure_directory "$rc_dir"
+  temp_file="${rc_file}.tmp.$$"
+
+  if [[ -f "$rc_file" ]]; then
+    awk -v begin="$PROFILE_MARKER_BEGIN" -v end="$PROFILE_MARKER_END" '
+      $0 == begin { skip = 1; next }
+      $0 == end { skip = 0; next }
+      !skip { print }
+    ' "$rc_file" > "$temp_file"
+    mv "$temp_file" "$rc_file"
+  else
+    : > "$rc_file"
+  fi
+
+  if [[ -s "$rc_file" ]]; then
+    printf '\n' >> "$rc_file"
+  fi
+
+  cat >> "$rc_file" <<EOF
+$PROFILE_MARKER_BEGIN
+export PATH="$USER_BIN_DIR:\$PATH"
+if [ -f "$USER_ENV_FILE" ]; then
+  . "$USER_ENV_FILE"
+fi
+$PROFILE_MARKER_END
+EOF
+}
+
+register_darkweb_command() {
+  load_runtime_ports
+  validate_positive_integer "$API_PORT" "DARKWEB_API_PORT"
+  validate_positive_integer "$FRONTEND_PORT" "DARKWEB_FRONTEND_PORT"
+  validate_positive_integer "$BROWSER_CONCURRENCY" "DARKWEB_BROWSER_CONCURRENCY"
+  if [[ -z "$COLLECTOR_SOURCE_DB" ]]; then
+    if [[ -f "$DEFAULT_PROJECT_SOURCE_DB" ]]; then
+      COLLECTOR_SOURCE_DB="$DEFAULT_PROJECT_SOURCE_DB"
+    else
+      COLLECTOR_SOURCE_DB="$COLLECTOR_RUNTIME_DB"
+    fi
+  fi
+  write_user_env_file
+  write_darkweb_command
+  update_shell_startup_file "$HOME/.profile"
+  update_shell_startup_file "$HOME/.bashrc"
+  info "registered darkweb command: $USER_COMMAND_PATH"
+  info "registered user environment file: $USER_ENV_FILE"
+  info "open a new shell, or run: . \"$USER_ENV_FILE\" && export PATH=\"$USER_BIN_DIR:\$PATH\""
+}
+
 ensure_environment() {
   validate_positive_integer "$API_PORT" "DARKWEB_API_PORT"
   validate_positive_integer "$FRONTEND_PORT" "DARKWEB_FRONTEND_PORT"
@@ -440,9 +703,11 @@ ensure_environment() {
   require_command tmux
   require_command python3
   require_command npm
-  require_command redis-server
   require_command redis-cli
   require_command curl
+  if redis_endpoint_is_local; then
+    require_command redis-server
+  fi
 
   ensure_collector_venv
   [[ -f "$COLLECTOR_ROOT/scripts/serve_api.py" ]] || die "API launcher not found"
@@ -466,7 +731,7 @@ ensure_environment() {
     fi
   fi
 
-  site_configs_ready || die "failed to load crawler site configuration from $COLLECTOR_ROOT/sites.yaml"
+  site_configs_ready || die "failed to load crawler site configuration from $COLLECTOR_SITES_FILE"
   sync_runtime_db_to_source
 }
 
@@ -487,11 +752,13 @@ cleanup_stray_processes() {
 
 tmux_new_window() {
   local window_name="$1"
-  shift
+  local log_path="$2"
+  shift 2
   local command_body="$*"
   local wrapped_command
   wrapped_command="
 set +e
+exec > >(tee -a $(printf '%q' "$log_path")) 2>&1
 $command_body
 status=\$?
 if [[ \$status -ne 0 ]]; then
@@ -614,32 +881,95 @@ ensure_frontend_port() {
   set_frontend_port "$(find_available_port 18010 18011 18012 18013 18014 18015)"
 }
 
+start_docker_redis_if_available() {
+  local redis_port
+  local docker_bin
+  local container_name="darkweb-redis"
+
+  redis_endpoint_is_local || return 1
+  docker_bin="$(command -v docker 2>/dev/null || true)"
+  [[ -n "$docker_bin" ]] || return 1
+
+  redis_port="$(get_redis_port)"
+  if "$docker_bin" ps --filter "name=^/${container_name}$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container_name"; then
+    return 0
+  fi
+
+  if "$docker_bin" ps -a --filter "name=^/${container_name}$" --format '{{.Names}}' 2>/dev/null | grep -qx "$container_name"; then
+    info "starting Redis Docker container: ${container_name}"
+    "$docker_bin" start "$container_name" >/dev/null
+  else
+    info "creating Redis Docker container: ${container_name}"
+    "$docker_bin" run -d --name "$container_name" -p "${redis_port}:6379" redis:7-alpine >/dev/null
+  fi
+}
+
+ensure_redis_runtime() {
+  if redis_ping; then
+    return 0
+  fi
+
+  if ! redis_endpoint_is_local; then
+    die "REDIS_URL points to $REDIS_URL, but it is not reachable."
+  fi
+
+  local redis_port
+  redis_port="$(get_redis_port)"
+
+  if sudo -n service redis-server start >/dev/null 2>&1 && redis_ping; then
+    return 0
+  fi
+
+  if redis-server --daemonize yes --port "$redis_port" >/dev/null 2>&1; then
+    sleep 1
+    if redis_ping; then
+      return 0
+    fi
+  fi
+
+  if start_docker_redis_if_available; then
+    sleep 2
+    if redis_ping; then
+      return 0
+    fi
+  fi
+
+  die "redis is not reachable at $REDIS_URL"
+}
+
 start_services() {
   ensure_environment
+  ensure_redis_runtime
   stop_session_if_exists
   cleanup_stray_processes
   ensure_api_port
   ensure_frontend_port
+  ensure_directory "$RUNTIME_DIR"
+  ensure_directory "$LOG_DIR"
+  save_runtime_ports
+  register_darkweb_command
 
   local env_exports
   env_exports="$(build_env_exports)"
+  local redis_log="$LOG_DIR/redis.log"
+  local api_log="$LOG_DIR/api.log"
+  local frontend_log="$LOG_DIR/frontend.log"
+  local seed_worker_log="$LOG_DIR/worker-seed.log"
+  local detail_worker_log="$LOG_DIR/worker-detail.log"
+  local scheduler_log="$LOG_DIR/scheduler.log"
+  local vulnerability_sync_log="$LOG_DIR/vuln-sync.log"
 
   local redis_command
   redis_command="
 set -euo pipefail
-if redis-cli ping >/dev/null 2>&1; then
+exec > >(tee -a $(printf '%q' "$redis_log")) 2>&1
+if redis-cli -u \"$REDIS_URL\" ping >/dev/null 2>&1; then
   echo 'redis already running'
 else
-  if sudo -n service redis-server start >/dev/null 2>&1; then
-    echo 'redis started via service'
-  elif redis-server --daemonize yes >/dev/null 2>&1; then
-    echo 'redis started in user mode'
-  else
-    echo 'failed to start redis'
-    exit 1
-  fi
+  echo 'redis not reachable'
+  exit 1
 fi
-redis-cli ping
+redis-cli -u \"$REDIS_URL\" ping
 tail -f /dev/null
 "
 
@@ -716,7 +1046,7 @@ done
   tmux new-session -d -s "$SESSION_NAME" -n "redis" "bash -lc $(printf '%q' "$redis_command")"
   tmux setw -t "$SESSION_NAME" remain-on-exit on
 
-  tmux_new_window "api" "$api_command"
+  tmux_new_window "api" "$api_log" "$api_command"
 
   sleep 2
 
@@ -735,21 +1065,35 @@ PY" "$SERVICE_WAIT_SECONDS"; then
     capture_window_logs "api" 120
   fi
 
-  tmux_new_window "frontend" "$frontend_command"
-  tmux_new_window "worker-seed" "$seed_worker_command"
-  tmux_new_window "worker-detail" "$detail_worker_command"
+  tmux_new_window "frontend" "$frontend_log" "$frontend_command"
+  tmux_new_window "worker-seed" "$seed_worker_log" "$seed_worker_command"
+  tmux_new_window "worker-detail" "$detail_worker_log" "$detail_worker_command"
 
   local browser_index browser_window
+  local service_records=(
+    "redis" "$redis_log"
+    "api" "$api_log"
+    "frontend" "$frontend_log"
+    "worker-seed" "$seed_worker_log"
+    "worker-detail" "$detail_worker_log"
+  )
   for (( browser_index = 1; browser_index <= BROWSER_CONCURRENCY; browser_index++ )); do
     browser_window="worker-browser"
     if (( BROWSER_CONCURRENCY > 1 )); then
       browser_window="worker-browser-${browser_index}"
     fi
-    tmux_new_window "$browser_window" "$browser_worker_command"
+    local browser_log="$LOG_DIR/${browser_window}.log"
+    tmux_new_window "$browser_window" "$browser_log" "$browser_worker_command"
+    service_records+=("$browser_window" "$browser_log")
   done
 
-  tmux_new_window "scheduler" "$scheduler_command"
-  tmux_new_window "vuln-sync" "$vulnerability_sync_command"
+  tmux_new_window "scheduler" "$scheduler_log" "$scheduler_command"
+  tmux_new_window "vuln-sync" "$vulnerability_sync_log" "$vulnerability_sync_command"
+  service_records+=(
+    "scheduler" "$scheduler_log"
+    "vuln-sync" "$vulnerability_sync_log"
+  )
+  save_service_records "${service_records[@]}"
 
   if ! wait_for_condition "curl -fsS '$FRONTEND_URL' >/dev/null 2>&1 && python3 - <<'PY'
 import json
@@ -770,18 +1114,21 @@ PY" "$SERVICE_WAIT_SECONDS"; then
   info "frontend: $FRONTEND_URL"
   info "api health: $API_HEALTH_URL"
   info "vulnerability sync interval: ${VULN_SYNC_INTERVAL_SECONDS}s (limit=${VULN_SYNC_LIMIT})"
+  info "logs: $LOG_DIR"
   info "attach with: tmux attach -t $SESSION_NAME"
   echo
   show_status
 }
 
 stop_services() {
+  load_runtime_ports
   if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     tmux kill-session -t "$SESSION_NAME"
   fi
   cleanup_stray_processes
   resolve_source_db
   sync_runtime_db_to_source
+  rm -f -- "$SERVICE_STATE_FILE"
   info "tmux session stopped: $SESSION_NAME"
 }
 
@@ -791,6 +1138,7 @@ attach_session() {
 }
 
 show_status() {
+  load_runtime_ports
   if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
     info "tmux session: $SESSION_NAME"
     tmux list-windows -t "$SESSION_NAME"
@@ -798,7 +1146,9 @@ show_status() {
     info "tmux session not running: $SESSION_NAME"
   fi
 
-  if redis-cli ping >/dev/null 2>&1; then
+  show_service_records
+
+  if redis_ping; then
     info "redis: up"
   else
     info "redis: down"
@@ -823,6 +1173,7 @@ show_status() {
 
 main() {
   local action="${1:-start}"
+  sanitize_path_overrides
   case "$action" in
     start)
       start_services
@@ -838,10 +1189,14 @@ main() {
       ;;
     install)
       ensure_environment
-      info "environment is ready. Run 'bash darkweb_collector/scripts/start_all_services_wsl.sh start' to start the system."
+      register_darkweb_command
+      info "environment is ready. Run 'darkweb' to start the system."
+      ;;
+    register)
+      register_darkweb_command
       ;;
     *)
-      die "unsupported action: $action (use start|stop|attach|status|install)"
+      die "unsupported action: $action (use start|stop|attach|status|install|register)"
       ;;
   esac
 }
