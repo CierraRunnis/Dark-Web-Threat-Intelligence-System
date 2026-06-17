@@ -188,8 +188,11 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as playwright:
-    executable = Path(playwright.chromium.executable_path)
-    raise SystemExit(0 if executable.exists() else 1)
+    executables = (
+        Path(playwright.chromium.executable_path),
+        Path(playwright.firefox.executable_path),
+    )
+    raise SystemExit(0 if all(path.exists() for path in executables) else 1)
 PY
   ) >/dev/null 2>&1
 }
@@ -199,11 +202,11 @@ ensure_playwright_runtime() {
     return 0
   fi
 
-  info "installing Playwright Chromium runtime"
+  info "installing Playwright browser runtimes"
   (
     cd "$COLLECTOR_ROOT"
     source "$COLLECTOR_VENV/bin/activate"
-    python -m playwright install chromium
+    python -m playwright install chromium firefox
   )
   ensure_directory "$(dirname "$PLAYWRIGHT_STAMP")"
   : > "$PLAYWRIGHT_STAMP"
