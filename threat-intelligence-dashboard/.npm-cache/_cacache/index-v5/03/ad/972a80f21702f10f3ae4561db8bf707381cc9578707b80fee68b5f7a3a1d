@@ -1,2 +1,0 @@
-
-077d8d5f8ed62606ca3a3ddc05fdf07ebe6da47c	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/docx/-/docx-9.6.1.tgz","integrity":null,"time":1780574244195,"size":"262","metadata":{"time":1780574244195,"url":"http://registry.npm.taobao.org/docx/-/docx-9.6.1.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/docx/-/docx-9.6.1.tgz"},"options":{"compress":true},"status":301}}
