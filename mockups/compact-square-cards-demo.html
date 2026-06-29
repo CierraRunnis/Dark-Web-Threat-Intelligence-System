@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>统一方体卡片 Demo</title>
+  <style>
+    :root {
+      --primary: #2d5dff;
+      --primary-soft: rgba(45, 126, 255, 0.12);
+      --border: rgba(45, 93, 255, 0.12);
+      --border-strong: rgba(45, 93, 255, 0.18);
+      --text: #1e2735;
+      --secondary: #536074;
+      --muted: #7f8898;
+      --page: #f6f8fc;
+      --surface: rgba(255, 255, 255, 0.96);
+      --panel: rgba(246, 250, 255, 0.98);
+      --shadow: 0 10px 24px rgba(32, 57, 96, 0.05);
+      --radius: 5px;
+      --gap: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      font-size: 13px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      padding: 20px 14px;
+      border-right: 1px solid rgba(63, 80, 104, 0.09);
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 38px;
+      margin-bottom: 22px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .brand-icon,
+    .nav-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius);
+      background: var(--primary-soft);
+      color: var(--primary);
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      font-size: 18px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 36px;
+      padding: 0 10px;
+      border-radius: var(--radius);
+      color: var(--secondary);
+      font-weight: 600;
+    }
+
+    .nav-icon {
+      width: 24px;
+      height: 24px;
+      background: rgba(45, 93, 255, 0.08);
+      font-size: 13px;
+    }
+
+    .nav-item.active {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+    }
+
+    .page {
+      padding: 18px;
+    }
+
+    .page-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      height: 38px;
+      margin-bottom: 10px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 16px;
+      line-height: 1.2;
+    }
+
+    .head-actions,
+    .tabs,
+    .table-actions,
+    .status,
+    .inline {
+      display: flex;
+      align-items: center;
+    }
+
+    .head-actions {
+      gap: 8px;
+    }
+
+    .search,
+    .button,
+    .tabs {
+      height: 30px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .search {
+      display: flex;
+      align-items: center;
+      width: 270px;
+      padding: 0 10px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .button {
+      padding: 0 12px;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .tabs {
+      padding: 1px;
+    }
+
+    .tab {
+      min-width: 64px;
+      height: 26px;
+      padding: 0 10px;
+      border-left: 1px solid rgba(45, 93, 255, 0.12);
+      color: var(--secondary);
+      font-size: 12px;
+      line-height: 26px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .tab:first-child {
+      border-left: 0;
+    }
+
+    .tab.active {
+      background: var(--primary-soft);
+      color: #155bd6;
+      box-shadow: inset 0 0 0 1px rgba(45, 126, 255, 0.45);
+    }
+
+    .divider {
+      width: 1px;
+      height: 22px;
+      background: rgba(116, 142, 184, 0.18);
+    }
+
+    .grid {
+      display: grid;
+      gap: var(--gap);
+    }
+
+    .metric-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .chart-grid {
+      grid-template-columns: minmax(0, 1fr) minmax(420px, 1.1fr);
+    }
+
+    .work-grid {
+      grid-template-columns: 1.15fr 0.85fr;
+    }
+
+    .module-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .metric-card {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      min-height: 86px;
+      padding: 14px 16px;
+    }
+
+    .metric-card span,
+    .subtle {
+      color: var(--secondary);
+      font-size: 12px;
+    }
+
+    .metric-card strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 25px;
+      line-height: 1;
+    }
+
+    .metric-card small {
+      display: block;
+      margin-top: 7px;
+      color: var(--secondary);
+    }
+
+    .metric-card b {
+      color: #df4a55;
+    }
+
+    .metric-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 50px;
+      height: 50px;
+      border-radius: 10px;
+      font-size: 26px;
+      background: rgba(22, 135, 255, 0.1);
+      color: #1687ff;
+    }
+
+    .metric-icon.red {
+      background: rgba(235, 77, 86, 0.12);
+      color: #eb4d56;
+    }
+
+    .metric-icon.orange {
+      background: rgba(238, 157, 41, 0.13);
+      color: #ee9d29;
+    }
+
+    .metric-icon.gray {
+      background: rgba(125, 143, 168, 0.12);
+      color: #7d8fa8;
+    }
+
+    .panel {
+      min-width: 0;
+      padding: 12px;
+    }
+
+    .panel-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .panel-title h2,
+    .panel-title h3 {
+      font-size: 14px;
+    }
+
+    .chart {
+      width: 100%;
+      height: 155px;
+    }
+
+    .chart text {
+      fill: #6a7890;
+      font-size: 11px;
+    }
+
+    .legend {
+      display: grid;
+      gap: 12px;
+      align-content: center;
+    }
+
+    .legend-row {
+      display: grid;
+      grid-template-columns: 10px 1fr auto;
+      align-items: center;
+      gap: 9px;
+      color: var(--secondary);
+      font-size: 12px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      background: var(--primary);
+    }
+
+    .dot.orange {
+      background: #f0aa32;
+    }
+
+    .dot.green {
+      background: #36b37e;
+    }
+
+    .donut-wrap {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 1fr);
+      align-items: center;
+      min-height: 155px;
+    }
+
+    .donut {
+      position: relative;
+      width: 134px;
+      height: 134px;
+      margin: 0 auto;
+      border-radius: 50%;
+      background: conic-gradient(#2f8dff 0 64%, #f0aa32 64% 88%, #36b37e 88% 100%);
+    }
+
+    .donut::after {
+      position: absolute;
+      inset: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #fff;
+      color: var(--text);
+      font-weight: 800;
+      white-space: pre;
+      content: "1,286\A总数";
+      text-align: center;
+      line-height: 1.4;
+    }
+
+    .table-card {
+      padding: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      overflow: hidden;
+      border: 1px solid rgba(45, 93, 255, 0.14);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    th,
+    td {
+      height: 34px;
+      padding: 0 6px;
+      border-bottom: 1px solid rgba(45, 93, 255, 0.1);
+      overflow: hidden;
+      color: var(--text);
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    th {
+      background: var(--panel);
+      color: var(--secondary);
+      font-weight: 700;
+      text-align: left;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .file {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .file-type {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      background: #ef4d52;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 44px;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 6px;
+      background: #e8f3ff;
+      color: #1266cc;
+      font-weight: 700;
+    }
+
+    .pill.red {
+      background: rgba(229, 85, 87, 0.12);
+      color: #c83338;
+    }
+
+    .pill.orange {
+      background: rgba(255, 173, 76, 0.16);
+      color: #b66a00;
+    }
+
+    .pill.green {
+      background: rgba(54, 179, 126, 0.14);
+      color: #178b5f;
+    }
+
+    .status {
+      gap: 5px;
+      width: fit-content;
+      min-width: 54px;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 6px;
+      background: rgba(54, 179, 126, 0.14);
+      color: #178b5f;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .status::before {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #36b37e;
+      content: "";
+    }
+
+    .module-card {
+      display: grid;
+      gap: 10px;
+      min-height: 116px;
+      padding: 12px;
+    }
+
+    .module-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .module-head h3 {
+      font-size: 14px;
+    }
+
+    .progress {
+      height: 8px;
+      overflow: hidden;
+      border-radius: 4px;
+      background: rgba(45, 93, 255, 0.08);
+    }
+
+    .progress i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #2f8dff, #36b37e);
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      row-gap: 10px;
+      column-gap: 10px;
+      padding: 10px;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .config-row {
+      display: grid;
+      grid-template-columns: 1fr 82px 72px;
+      align-items: center;
+      gap: 10px;
+      height: 36px;
+      border-bottom: 1px solid rgba(45, 93, 255, 0.08);
+    }
+
+    .config-row:last-child {
+      border-bottom: 0;
+    }
+
+    .toggle {
+      width: 38px;
+      height: 20px;
+      padding: 2px;
+      border-radius: 10px;
+      background: var(--primary);
+      justify-self: end;
+    }
+
+    .toggle::after {
+      display: block;
+      width: 16px;
+      height: 16px;
+      margin-left: 18px;
+      border-radius: 50%;
+      background: #fff;
+      content: "";
+    }
+
+    .section-gap {
+      margin-top: var(--gap);
+    }
+
+    @media (max-width: 1180px) {
+      .layout {
+        grid-template-columns: 72px minmax(0, 1fr);
+      }
+
+      .brand span,
+      .nav-item span:not(.nav-icon) {
+        display: none;
+      }
+
+      .chart-grid,
+      .work-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .metric-grid,
+      .module-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-icon">▣</span><span>公网信息泄露监测平台</span></div>
+      <nav class="nav">
+        <div class="nav-item"><span class="nav-icon">⌂</span><span>总览</span></div>
+        <div class="nav-item"><span class="nav-icon">◆</span><span>勒索情报</span></div>
+        <div class="nav-item"><span class="nav-icon">▤</span><span>数据泄露情报</span></div>
+        <div class="nav-item"><span class="nav-icon">!</span><span>漏洞预警</span></div>
+        <div class="nav-item active"><span class="nav-icon">□</span><span>文件监测</span></div>
+        <div class="nav-item"><span class="nav-icon">⌘</span><span>代码监测</span></div>
+      </nav>
+    </aside>
+
+    <main class="page">
+      <header class="page-head">
+        <h1>全局监测工作台</h1>
+        <div class="head-actions">
+          <div class="search">请输入关键词、文件名或链接　⌕</div>
+          <button class="button">高级筛选</button>
+        </div>
+      </header>
+
+      <div class="toolbar">
+        <div class="tabs">
+          <div class="tab active">近7天</div>
+          <div class="tab">近30天</div>
+          <div class="tab">自定义</div>
+        </div>
+        <span class="divider"></span>
+        <div class="tabs">
+          <div class="tab active">全部</div>
+          <div class="tab">网盘</div>
+          <div class="tab">搜索引擎</div>
+          <div class="tab">文库</div>
+          <div class="tab">代码</div>
+        </div>
+      </div>
+
+      <section class="grid metric-grid">
+        <article class="card metric-card">
+          <div><span>新增命中</span><strong>1,286</strong><small>较昨日 <b>18.4%</b></small></div>
+          <div class="metric-icon">↗</div>
+        </article>
+        <article class="card metric-card">
+          <div><span>高危事件</span><strong>94</strong><small>较昨日 <b>11.2%</b></small></div>
+          <div class="metric-icon red">!</div>
+        </article>
+        <article class="card metric-card">
+          <div><span>待验证</span><strong>312</strong><small>较昨日 <b>6.8%</b></small></div>
+          <div class="metric-icon orange">□</div>
+        </article>
+        <article class="card metric-card">
+          <div><span>已处置</span><strong>860</strong><small>较昨日 <b>24.1%</b></small></div>
+          <div class="metric-icon gray">✓</div>
+        </article>
+      </section>
+
+      <section class="grid chart-grid section-gap">
+        <article class="card panel">
+          <div class="panel-title"><h2>命中趋势</h2><span class="subtle">近7天</span></div>
+          <svg class="chart" viewBox="0 0 640 155" role="img" aria-label="命中趋势">
+            <g stroke="#e1e9f7" stroke-width="1">
+              <line x1="34" y1="20" x2="620" y2="20" />
+              <line x1="34" y1="48" x2="620" y2="48" />
+              <line x1="34" y1="76" x2="620" y2="76" />
+              <line x1="34" y1="104" x2="620" y2="104" />
+              <line x1="34" y1="132" x2="620" y2="132" />
+            </g>
+            <path d="M34 126 L130 118 L226 120 L322 104 C370 86 396 28 444 34 C500 42 502 126 564 116 L620 80 L620 132 L34 132 Z" fill="rgba(47,141,255,.12)" />
+            <path d="M34 126 L130 118 L226 120 L322 104 C370 86 396 28 444 34 C500 42 502 126 564 116 L620 80" fill="none" stroke="#2f8dff" stroke-width="3" />
+            <g fill="#fff" stroke="#2f8dff" stroke-width="2">
+              <circle cx="34" cy="126" r="4" /><circle cx="130" cy="118" r="4" /><circle cx="226" cy="120" r="4" />
+              <circle cx="322" cy="104" r="4" /><circle cx="444" cy="34" r="4" /><circle cx="564" cy="116" r="4" /><circle cx="620" cy="80" r="4" />
+            </g>
+            <text x="30" y="148">06-12</text><text x="124" y="148">06-13</text><text x="220" y="148">06-14</text>
+            <text x="316" y="148">06-15</text><text x="438" y="148">06-16</text><text x="558" y="148">06-17</text><text x="604" y="148">06-18</text>
+          </svg>
+        </article>
+
+        <article class="card panel">
+          <div class="panel-title"><h2>来源分布</h2></div>
+          <div class="donut-wrap">
+            <div class="donut"></div>
+            <div class="legend">
+              <div class="legend-row"><span class="dot"></span><strong>网盘监测</strong><span>612 (47.6%)</span></div>
+              <div class="legend-row"><span class="dot orange"></span><strong>搜索引擎</strong><span>438 (34.1%)</span></div>
+              <div class="legend-row"><span class="dot green"></span><strong>代码监测</strong><span>236 (18.3%)</span></div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="grid module-grid section-gap">
+        <article class="card module-card">
+          <div class="module-head"><h3>网盘监测</h3><span class="pill green">运行中</span></div>
+          <p class="subtle">公开分享、口令分享、失效链接统一收敛。</p>
+          <div class="progress"><i style="width:72%"></i></div>
+        </article>
+        <article class="card module-card">
+          <div class="module-head"><h3>搜索引擎监测</h3><span class="pill orange">待复核</span></div>
+          <p class="subtle">页面标题、文件类型、命中关键词紧凑展示。</p>
+          <div class="progress"><i style="width:58%"></i></div>
+        </article>
+        <article class="card module-card">
+          <div class="module-head"><h3>代码监测</h3><span class="pill green">长期任务</span></div>
+          <p class="subtle">仓库、提交、密钥线索合并到同类面板。</p>
+          <div class="progress"><i style="width:84%"></i></div>
+        </article>
+      </section>
+
+      <section class="grid work-grid section-gap">
+        <article class="card table-card">
+          <div class="panel-title"><h2>检测结果列表（共 1,286 条）</h2><span class="subtle">⚙</span></div>
+          <table>
+            <colgroup>
+              <col style="width: 25%" /><col style="width: 12%" /><col style="width: 11%" /><col style="width: 11%" />
+              <col style="width: 13%" /><col style="width: 10%" /><col style="width: 11%" /><col style="width: 7%" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>文件名 / 标题</th>
+                <th>来源平台</th>
+                <th>分享类型</th>
+                <th>文件大小</th>
+                <th>命中关键词</th>
+                <th>风险等级</th>
+                <th>发现时间</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="file"><span class="file-type">PDF</span>宁德时代供应链深度分析-60页.pdf</span></td>
+                <td>阿里云盘</td><td><span class="pill">公开</span></td><td>10.65 MB</td><td>宁德时代</td><td><span class="pill red">高危</span></td><td>2026-06-18 17:32</td><td><span class="status">有效</span></td>
+              </tr>
+              <tr>
+                <td><span class="file"><span class="file-type">PDF</span>电力设备新能源行业800V高压快充新技术.pdf</span></td>
+                <td>阿里云盘</td><td><span class="pill">公开</span></td><td>1.10 MB</td><td>宁德时代</td><td><span class="pill red">高危</span></td><td>2026-06-18 17:32</td><td><span class="status">有效</span></td>
+              </tr>
+              <tr>
+                <td><span class="file"><span class="file-type" style="background:#72819a">FILE</span>宁德时代超级科技日媒体素材包</span></td>
+                <td>百度网盘</td><td><span class="pill orange">加密</span></td><td>4.16 MB</td><td>宁德时代</td><td><span class="pill orange">中危</span></td><td>2026-06-18 17:32</td><td><span class="status">需验证</span></td>
+              </tr>
+              <tr>
+                <td><span class="file"><span class="file-type">PDF</span>代码仓库泄露资产审计报告.pdf</span></td>
+                <td>GitHub</td><td><span class="pill">公开</span></td><td>3.48 MB</td><td>访问令牌</td><td><span class="pill red">高危</span></td><td>2026-06-18 16:01</td><td><span class="status">有效</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+
+        <aside class="grid">
+          <article class="card panel">
+            <div class="panel-title"><h2>详情摘要</h2><span class="pill green">new</span></div>
+            <div class="info-grid">
+              <span class="subtle">监测对象</span><strong>宁德时代</strong>
+              <span class="subtle">来源平台</span><strong>阿里云盘</strong>
+              <span class="subtle">命中关键词</span><strong>宁德时代、供应链</strong>
+              <span class="subtle">访问状态</span><strong>公开访问</strong>
+              <span class="subtle">最近发现</span><strong>2026-06-18 17:32</strong>
+            </div>
+          </article>
+
+          <article class="card panel">
+            <div class="panel-title"><h2>监测配置</h2><button class="button">保存</button></div>
+            <div class="config-row"><strong>网盘长期任务</strong><span class="subtle">每1小时</span><span class="toggle"></span></div>
+            <div class="config-row"><strong>代码长期任务</strong><span class="subtle">每6小时</span><span class="toggle"></span></div>
+            <div class="config-row"><strong>搜索引擎任务</strong><span class="subtle">每日</span><span class="toggle"></span></div>
+          </article>
+        </aside>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

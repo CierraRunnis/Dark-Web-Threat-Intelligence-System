@@ -1,9 +1,18 @@
 <template>
-  <div class="app-container" :class="{ 'sidebar-collapsed': shell.state.sidebarCollapsed }">
-    <Sidebar />
-    <div class="main-content">
-      <Header />
-      <main class="page-content">
+  <div
+    class="app-container"
+    :class="{ 'sidebar-collapsed': shell.state.sidebarCollapsed, 'app-container--blank': isBlankLayout }"
+  >
+    <Sidebar v-if="!isBlankLayout" />
+    <div class="main-content" :class="{ 'main-content--blank': isBlankLayout }">
+      <Header v-if="!isBlankLayout" />
+      <main
+        class="page-content"
+        :class="{
+          'page-content--code-monitoring': route.name === 'CodeMonitoringWorkbench',
+          'page-content--blank': isBlankLayout,
+        }"
+      >
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
             <component :is="Component" />
@@ -18,8 +27,12 @@
 import { provideShellLayout } from '@/composables/useShellLayout'
 import Sidebar from '@/components/layout/Sidebar.vue'
 import Header from '@/components/layout/Header.vue'
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
 
 const shell = provideShellLayout()
+const route = useRoute()
+const isBlankLayout = computed(() => route.meta.layout === 'blank')
 </script>
 
 <style lang="scss">
@@ -31,6 +44,10 @@ const shell = provideShellLayout()
   background: #ffffff;
 }
 
+.app-container--blank {
+  display: block;
+}
+
 .main-content {
   flex: 1;
   display: flex;
@@ -40,8 +57,17 @@ const shell = provideShellLayout()
   transition: margin-left 0.3s ease;
 }
 
+.main-content--blank {
+  min-height: 100vh;
+  margin-left: 0;
+}
+
 .app-container.sidebar-collapsed .main-content {
   margin-left: var(--ti-sidebar-collapsed);
+}
+
+.app-container.sidebar-collapsed .main-content--blank {
+  margin-left: 0;
 }
 
 .page-content {
@@ -49,6 +75,16 @@ const shell = provideShellLayout()
   padding: 28px;
   overflow-y: auto;
   background: #ffffff;
+}
+
+.page-content.page-content--code-monitoring {
+  padding: 8px 8px 16px;
+}
+
+.page-content.page-content--blank {
+  min-height: 100vh;
+  padding: 0;
+  overflow: hidden;
 }
 
 .fade-enter-active,

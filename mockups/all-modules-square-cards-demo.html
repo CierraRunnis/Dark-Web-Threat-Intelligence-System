@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>全模块方体卡片 Demo</title>
+  <style>
+    :root {
+      --primary: #2d5dff;
+      --primary-soft: rgba(45, 126, 255, 0.12);
+      --blue: #2f8dff;
+      --orange: #f0aa32;
+      --green: #36b37e;
+      --red: #eb4d56;
+      --purple: #6f7dff;
+      --page: #f6f8fc;
+      --surface: rgba(255, 255, 255, 0.96);
+      --panel: rgba(246, 250, 255, 0.98);
+      --border: rgba(45, 93, 255, 0.12);
+      --border-strong: rgba(45, 93, 255, 0.18);
+      --text: #1e2735;
+      --secondary: #536074;
+      --muted: #7f8898;
+      --shadow: 0 10px 24px rgba(32, 57, 96, 0.05);
+      --radius: 5px;
+      --gap: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+      font-size: 13px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 236px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      padding: 18px 14px;
+      border-right: 1px solid rgba(63, 80, 104, 0.09);
+      background: rgba(255, 255, 255, 0.94);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 36px;
+      margin-bottom: 20px;
+      font-weight: 800;
+    }
+
+    .brand-icon,
+    .nav-icon,
+    .mini-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius);
+      background: var(--primary-soft);
+      color: var(--primary);
+      flex: 0 0 auto;
+    }
+
+    .brand-icon {
+      width: 34px;
+      height: 34px;
+      font-size: 17px;
+    }
+
+    .nav {
+      display: grid;
+      gap: 7px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      height: 34px;
+      padding: 0 10px;
+      border-radius: var(--radius);
+      color: var(--secondary);
+      font-weight: 600;
+    }
+
+    .nav-item.active {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+    }
+
+    .nav-icon {
+      width: 24px;
+      height: 24px;
+      font-size: 12px;
+      background: rgba(45, 93, 255, 0.08);
+    }
+
+    .page {
+      padding: 16px 18px 22px;
+    }
+
+    .page-head,
+    .head-actions,
+    .tabs,
+    .section-title,
+    .module-title,
+    .inline,
+    .status {
+      display: flex;
+      align-items: center;
+    }
+
+    .page-head {
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 17px;
+      line-height: 1.2;
+    }
+
+    .head-actions {
+      gap: 8px;
+    }
+
+    .search,
+    .button,
+    .tabs {
+      height: 30px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .search {
+      width: 290px;
+      padding: 0 10px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .button {
+      padding: 0 12px;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .tabs {
+      width: fit-content;
+      padding: 1px;
+      margin-bottom: 10px;
+    }
+
+    .tab {
+      min-width: 82px;
+      height: 26px;
+      padding: 0 10px;
+      border-left: 1px solid rgba(45, 93, 255, 0.12);
+      color: var(--secondary);
+      font-size: 12px;
+      line-height: 26px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .tab:first-child {
+      border-left: 0;
+    }
+
+    .tab.active {
+      background: var(--primary-soft);
+      color: #155bd6;
+      box-shadow: inset 0 0 0 1px rgba(45, 126, 255, 0.45);
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .board {
+      display: grid;
+      gap: var(--gap);
+    }
+
+    .module-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--gap);
+    }
+
+    .wide-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+      gap: var(--gap);
+    }
+
+    .module-card {
+      min-width: 0;
+      padding: 11px;
+    }
+
+    .module-title {
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 9px;
+    }
+
+    .module-title h2 {
+      font-size: 14px;
+    }
+
+    .section-title {
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .section-title h3 {
+      font-size: 13px;
+    }
+
+    .subtle {
+      color: var(--secondary);
+      font-size: 12px;
+    }
+
+    .mini-icon {
+      width: 34px;
+      height: 34px;
+      font-size: 16px;
+    }
+
+    .mini-icon.red {
+      color: var(--red);
+      background: rgba(235, 77, 86, 0.12);
+    }
+
+    .mini-icon.orange {
+      color: var(--orange);
+      background: rgba(238, 157, 41, 0.13);
+    }
+
+    .mini-icon.green {
+      color: var(--green);
+      background: rgba(54, 179, 126, 0.13);
+    }
+
+    .mini-icon.purple {
+      color: var(--purple);
+      background: rgba(111, 125, 255, 0.12);
+    }
+
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 9px;
+    }
+
+    .metric {
+      min-height: 62px;
+      padding: 9px 10px;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .metric span {
+      display: block;
+      color: var(--secondary);
+      font-size: 12px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 5px;
+      font-size: 22px;
+      line-height: 1;
+    }
+
+    .mini-chart {
+      height: 82px;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      background:
+        linear-gradient(to bottom, rgba(45, 93, 255, 0.08) 1px, transparent 1px) 0 0 / 100% 20px,
+        rgba(255, 255, 255, 0.78);
+      overflow: hidden;
+    }
+
+    .mini-chart svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .list {
+      display: grid;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .list-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 70px 70px;
+      align-items: center;
+      min-height: 33px;
+      gap: 8px;
+      padding: 0 8px;
+      border-bottom: 1px solid rgba(45, 93, 255, 0.08);
+      background: rgba(255, 255, 255, 0.9);
+      font-size: 12px;
+    }
+
+    .list-row:last-child {
+      border-bottom: 0;
+    }
+
+    .ellipsis {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .pill,
+    .status {
+      width: fit-content;
+      height: 22px;
+      padding: 0 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #e8f3ff;
+      color: #1266cc;
+    }
+
+    .pill.red {
+      color: #c83338;
+      background: rgba(229, 85, 87, 0.12);
+    }
+
+    .pill.orange {
+      color: #b66a00;
+      background: rgba(255, 173, 76, 0.16);
+    }
+
+    .pill.green {
+      color: #178b5f;
+      background: rgba(54, 179, 126, 0.14);
+    }
+
+    .status {
+      gap: 5px;
+      background: rgba(54, 179, 126, 0.14);
+      color: #178b5f;
+    }
+
+    .status::before {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      content: "";
+    }
+
+    .control-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .control-card {
+      display: grid;
+      gap: 7px;
+      min-height: 88px;
+      padding: 10px;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .progress {
+      height: 7px;
+      overflow: hidden;
+      border-radius: 4px;
+      background: rgba(45, 93, 255, 0.08);
+    }
+
+    .progress i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--green));
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 88px minmax(0, 1fr);
+      row-gap: 8px;
+      column-gap: 10px;
+      padding: 9px;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      background: var(--panel);
+      font-size: 12px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      overflow: hidden;
+      border: 1px solid rgba(45, 93, 255, 0.14);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    th,
+    td {
+      height: 33px;
+      padding: 0 6px;
+      border-bottom: 1px solid rgba(45, 93, 255, 0.1);
+      overflow: hidden;
+      font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    th {
+      background: var(--panel);
+      color: var(--secondary);
+      font-weight: 700;
+      text-align: left;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .file-monitor {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .file-card {
+      display: grid;
+      gap: 8px;
+      min-height: 96px;
+      padding: 10px;
+      border: 1px solid rgba(45, 93, 255, 0.1);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    .netdisk-stable {
+      border-color: rgba(45, 93, 255, 0.18);
+      background: rgba(255, 255, 255, 0.98);
+    }
+
+    .toggle {
+      width: 36px;
+      height: 20px;
+      padding: 2px;
+      border-radius: 10px;
+      background: var(--primary);
+    }
+
+    .toggle::after {
+      display: block;
+      width: 16px;
+      height: 16px;
+      margin-left: 16px;
+      border-radius: 50%;
+      background: #fff;
+      content: "";
+    }
+
+    @media (max-width: 1280px) {
+      .layout {
+        grid-template-columns: 78px minmax(0, 1fr);
+      }
+
+      .brand span,
+      .nav-item span:not(.nav-icon) {
+        display: none;
+      }
+
+      .module-row,
+      .wide-row {
+        grid-template-columns: 1fr;
+      }
+
+      .control-grid,
+      .file-monitor {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-icon">▣</span><span>公网信息泄露监测平台</span></div>
+      <nav class="nav">
+        <div class="nav-item active"><span class="nav-icon">⌂</span><span>总览</span></div>
+        <div class="nav-item"><span class="nav-icon">锁</span><span>勒索情报</span></div>
+        <div class="nav-item"><span class="nav-icon">文</span><span>数据泄露情报</span></div>
+        <div class="nav-item"><span class="nav-icon">!</span><span>漏洞预警</span></div>
+        <div class="nav-item"><span class="nav-icon">趋</span><span>威胁态势</span></div>
+        <div class="nav-item"><span class="nav-icon">采</span><span>采集控制</span></div>
+        <div class="nav-item"><span class="nav-icon">档</span><span>文件监测</span></div>
+      </nav>
+    </aside>
+
+    <main class="page">
+      <header class="page-head">
+        <h1>全模块卡片统一预览</h1>
+        <div class="head-actions">
+          <div class="search">请输入关键词、组织、漏洞编号　⌕</div>
+          <button class="button">高级筛选</button>
+        </div>
+      </header>
+
+      <div class="tabs">
+        <div class="tab active">全部模块</div>
+        <div class="tab">勒索情报</div>
+        <div class="tab">数据泄露</div>
+        <div class="tab">漏洞预警</div>
+        <div class="tab">威胁态势</div>
+        <div class="tab">采集控制</div>
+        <div class="tab">文件监测</div>
+      </div>
+
+      <div class="board">
+        <section class="module-row">
+          <article class="card module-card">
+            <div class="module-title">
+              <h2>总览</h2>
+              <span class="mini-icon">⌂</span>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span>事件总数</span><strong>1,116</strong></div>
+              <div class="metric"><span>高危</span><strong>94</strong></div>
+              <div class="metric"><span>国家</span><strong>82</strong></div>
+            </div>
+            <div class="mini-chart">
+              <svg viewBox="0 0 360 82" preserveAspectRatio="none">
+                <path d="M0 70 L60 64 L120 66 L180 38 L240 46 L300 22 L360 30 L360 82 L0 82 Z" fill="rgba(47,141,255,.13)" />
+                <path d="M0 70 L60 64 L120 66 L180 38 L240 46 L300 22 L360 30" fill="none" stroke="#2f8dff" stroke-width="2.5" />
+              </svg>
+            </div>
+          </article>
+
+          <article class="card module-card">
+            <div class="module-title">
+              <h2>勒索情报</h2>
+              <span class="mini-icon red">锁</span>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span>组织</span><strong>37</strong></div>
+              <div class="metric"><span>受害者</span><strong>268</strong></div>
+              <div class="metric"><span>新增</span><strong>18</strong></div>
+            </div>
+            <div class="list">
+              <div class="list-row"><span class="ellipsis">LockBit 关联制造业受害者</span><span class="pill red">高危</span><span>今日</span></div>
+              <div class="list-row"><span class="ellipsis">Akira 发布新受害者清单</span><span class="pill orange">中危</span><span>昨日</span></div>
+            </div>
+          </article>
+
+          <article class="card module-card">
+            <div class="module-title">
+              <h2>数据泄露情报</h2>
+              <span class="mini-icon orange">文</span>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span>泄露事件</span><strong>346</strong></div>
+              <div class="metric"><span>敏感字段</span><strong>72</strong></div>
+              <div class="metric"><span>待核验</span><strong>41</strong></div>
+            </div>
+            <div class="list">
+              <div class="list-row"><span class="ellipsis">客户名单样本公开流转</span><span class="pill red">高危</span><span>7分钟前</span></div>
+              <div class="list-row"><span class="ellipsis">财务报表打包出售线索</span><span class="pill orange">中危</span><span>35分钟前</span></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="module-row">
+          <article class="card module-card">
+            <div class="module-title">
+              <h2>漏洞预警</h2>
+              <span class="mini-icon red">!</span>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span>新增漏洞</span><strong>52</strong></div>
+              <div class="metric"><span>在野利用</span><strong>9</strong></div>
+              <div class="metric"><span>影响产品</span><strong>31</strong></div>
+            </div>
+            <div class="list">
+              <div class="list-row"><span class="ellipsis">CVE-2026-18402 远程执行</span><span class="pill red">紧急</span><span>CVSS 9.8</span></div>
+              <div class="list-row"><span class="ellipsis">边界设备认证绕过漏洞</span><span class="pill orange">高危</span><span>CVSS 8.7</span></div>
+            </div>
+          </article>
+
+          <article class="card module-card">
+            <div class="module-title">
+              <h2>威胁态势</h2>
+              <span class="mini-icon purple">趋</span>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span>攻击活动</span><strong>128</strong></div>
+              <div class="metric"><span>活跃地区</span><strong>24</strong></div>
+              <div class="metric"><span>行业</span><strong>16</strong></div>
+            </div>
+            <div class="mini-chart">
+              <svg viewBox="0 0 360 82" preserveAspectRatio="none">
+                <path d="M0 62 L55 40 L110 54 L165 20 L220 38 L275 28 L330 46 L360 34" fill="none" stroke="#6f7dff" stroke-width="2.5" />
+                <path d="M0 62 L55 40 L110 54 L165 20 L220 38 L275 28 L330 46 L360 34 L360 82 L0 82 Z" fill="rgba(111,125,255,.12)" />
+              </svg>
+            </div>
+          </article>
+
+          <article class="card module-card">
+            <div class="module-title">
+              <h2>采集控制</h2>
+              <span class="mini-icon green">采</span>
+            </div>
+            <div class="control-grid">
+              <div class="control-card"><strong>暗网采集</strong><span class="status">运行</span><div class="progress"><i style="width:76%"></i></div></div>
+              <div class="control-card"><strong>搜索采集</strong><span class="status">运行</span><div class="progress"><i style="width:64%"></i></div></div>
+              <div class="control-card"><strong>网盘采集</strong><span class="status">运行</span><div class="progress"><i style="width:82%"></i></div></div>
+              <div class="control-card"><strong>代码采集</strong><span class="status">运行</span><div class="progress"><i style="width:58%"></i></div></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="card module-card">
+          <div class="module-title">
+            <h2>文件监测</h2>
+            <span class="subtle">搜索引擎 / 网盘 / 文库 / 代码</span>
+          </div>
+          <div class="file-monitor">
+            <div class="file-card">
+              <div class="section-title"><h3>搜索引擎监测</h3><span class="pill">公开结果</span></div>
+              <div class="metric-strip">
+                <div class="metric"><span>命中</span><strong>74</strong></div>
+                <div class="metric"><span>高危</span><strong>12</strong></div>
+                <div class="metric"><span>来源</span><strong>5</strong></div>
+              </div>
+              <div class="list-row"><span class="ellipsis">site:example.com 敏感 PDF</span><span class="pill red">高危</span><span>有效</span></div>
+            </div>
+
+            <div class="file-card netdisk-stable">
+              <div class="section-title"><h3>网盘监测</h3><span class="pill green">保持现状</span></div>
+              <div class="metric-strip">
+                <div class="metric"><span>分享链接</span><strong>21</strong></div>
+                <div class="metric"><span>高危文件</span><strong>5</strong></div>
+                <div class="metric"><span>失效</span><strong>6</strong></div>
+              </div>
+              <div class="list-row"><span class="ellipsis">宁德时代供应链深度分析.pdf</span><span class="pill">公开</span><span class="status">有效</span></div>
+            </div>
+
+            <div class="file-card">
+              <div class="section-title"><h3>文库监测</h3><span class="pill orange">待复核</span></div>
+              <div class="metric-strip">
+                <div class="metric"><span>文档</span><strong>38</strong></div>
+                <div class="metric"><span>截图</span><strong>16</strong></div>
+                <div class="metric"><span>站点</span><strong>4</strong></div>
+              </div>
+              <div class="list-row"><span class="ellipsis">商业案例课页面快照</span><span class="pill orange">中危</span><span>新发现</span></div>
+            </div>
+
+            <div class="file-card">
+              <div class="section-title"><h3>代码监测</h3><span class="pill green">长期任务</span></div>
+              <div class="metric-strip">
+                <div class="metric"><span>仓库</span><strong>23</strong></div>
+                <div class="metric"><span>密钥</span><strong>7</strong></div>
+                <div class="metric"><span>误报</span><strong>3</strong></div>
+              </div>
+              <div class="list-row"><span class="ellipsis">AccessKey 泄露提交记录</span><span class="pill red">高危</span><span>待处置</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="wide-row">
+          <article class="card module-card">
+            <div class="section-title"><h2>统一结果列表</h2><span class="subtle">各模块列表卡片同一边框、圆角、行高</span></div>
+            <table>
+              <colgroup>
+                <col style="width:26%" /><col style="width:13%" /><col style="width:13%" /><col style="width:15%" />
+                <col style="width:11%" /><col style="width:14%" /><col style="width:8%" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>标题</th><th>模块</th><th>来源</th><th>命中对象</th><th>等级</th><th>发现时间</th><th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>LockBit 关联制造业受害者</td><td>勒索情报</td><td>暗网站点</td><td>制造企业</td><td><span class="pill red">高危</span></td><td>2026-06-18 17:32</td><td><span class="status">有效</span></td></tr>
+                <tr><td>客户名单样本公开流转</td><td>数据泄露</td><td>论坛</td><td>客户名单</td><td><span class="pill red">高危</span></td><td>2026-06-18 16:58</td><td><span class="status">有效</span></td></tr>
+                <tr><td>CVE-2026-18402 远程执行</td><td>漏洞预警</td><td>NVD</td><td>边界设备</td><td><span class="pill red">紧急</span></td><td>2026-06-18 15:40</td><td><span class="status">有效</span></td></tr>
+                <tr><td>宁德时代供应链深度分析.pdf</td><td>网盘监测</td><td>阿里云盘</td><td>宁德时代</td><td><span class="pill red">高危</span></td><td>2026-06-18 17:32</td><td><span class="status">有效</span></td></tr>
+              </tbody>
+            </table>
+          </article>
+
+          <article class="card module-card">
+            <div class="section-title"><h2>事件详情</h2><span class="pill green">new</span></div>
+            <div class="info-grid">
+              <span class="subtle">所属模块</span><strong>数据泄露情报</strong>
+              <span class="subtle">监测对象</span><strong>宁德时代</strong>
+              <span class="subtle">来源</span><strong>暗网论坛 / 网盘源</strong>
+              <span class="subtle">风险等级</span><strong>高危</strong>
+              <span class="subtle">处置状态</span><strong>待核验</strong>
+              <span class="subtle">最近发现</span><strong>2026-06-18 17:32</strong>
+            </div>
+          </article>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

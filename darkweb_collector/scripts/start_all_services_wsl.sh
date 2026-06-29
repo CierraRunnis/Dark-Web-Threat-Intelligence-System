@@ -8,6 +8,13 @@ FRONTEND_URL="http://127.0.0.1:5173"
 SERVICE_WAIT_SECONDS=45
 VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
 VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-300}"
+DARKWEB_PANSOU_ENABLED="${DARKWEB_PANSOU_ENABLED:-1}"
+PANSOU_PORT="${PANSOU_PORT:-8888}"
+PANSOU_API_BASE="${PANSOU_API_BASE:-http://127.0.0.1:${PANSOU_PORT}}"
+PANSOU_CONTAINER_NAME="${PANSOU_CONTAINER_NAME:-darkweb-pansou}"
+PANSOU_IMAGE="${PANSOU_IMAGE:-ghcr.io/fish2018/pansou:latest}"
+PANSOU_CHANNELS="${PANSOU_CHANNELS:-tgsearchers3}"
+PANSOU_ENABLED_PLUGINS="${PANSOU_ENABLED_PLUGINS:-panyq,pansearch,qupansou,hunhepan,jikepan,pan666}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -336,12 +343,55 @@ build_env_exports() {
   exports+=("export DARKWEB_COLLECTOR_DB_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB")")
   exports+=("export DARKWEB_COLLECTOR_SOURCE_DB_PATH=$(printf '%q' "$COLLECTOR_SOURCE_DB")")
   exports+=("export DARKWEB_RUNTIME_DB_META_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB_META")")
+  if [[ "$DARKWEB_PANSOU_ENABLED" != "0" ]]; then
+    exports+=("export PANSOU_API_BASE=$(printf '%q' "$PANSOU_API_BASE")")
+  fi
   for var_name in TOR_SOCKS_HOST TOR_SOCKS_PORT PROXY_HOST PROXY_PORT; do
     if [[ -n "${!var_name:-}" ]]; then
       exports+=("export ${var_name}=$(printf '%q' "${!var_name}")")
     fi
   done
   printf '%s; ' "${exports[@]}"
+}
+
+ensure_pansou() {
+  if [[ "$DARKWEB_PANSOU_ENABLED" == "0" ]]; then
+    info "PanSou disabled"
+    return 0
+  fi
+  if curl -fsS "$PANSOU_API_BASE/api/health" >/dev/null 2>&1; then
+    info "PanSou already running: $PANSOU_API_BASE"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "PanSou is enabled but docker is unavailable; netdisk scan will continue with HTML aggregation sources only"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    warn "PanSou is enabled but docker engine is not running; netdisk scan will continue with HTML aggregation sources only"
+    return 0
+  fi
+  if docker ps --filter "name=^/${PANSOU_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "$PANSOU_CONTAINER_NAME"; then
+    info "PanSou container already running: $PANSOU_CONTAINER_NAME"
+    return 0
+  fi
+  if docker ps -a --filter "name=^/${PANSOU_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "$PANSOU_CONTAINER_NAME"; then
+    info "starting PanSou container: $PANSOU_CONTAINER_NAME"
+    docker start "$PANSOU_CONTAINER_NAME" >/dev/null || warn "failed to start PanSou container"
+  else
+    info "creating PanSou container: $PANSOU_CONTAINER_NAME"
+    docker run -d \
+      --name "$PANSOU_CONTAINER_NAME" \
+      -p "${PANSOU_PORT}:8888" \
+      -e CHANNELS="$PANSOU_CHANNELS" \
+      -e ENABLED_PLUGINS="$PANSOU_ENABLED_PLUGINS" \
+      "$PANSOU_IMAGE" >/dev/null || warn "failed to create PanSou container"
+  fi
+  if ! wait_for_http "$PANSOU_API_BASE/api/health" 30; then
+    warn "PanSou did not become ready within 30s: $PANSOU_API_BASE"
+  else
+    info "PanSou: $PANSOU_API_BASE"
+  fi
 }
 
 ensure_environment() {
@@ -376,6 +426,7 @@ ensure_environment() {
   fi
 
   sync_runtime_db_to_source
+  ensure_pansou
 }
 
 stop_session_if_exists() {
