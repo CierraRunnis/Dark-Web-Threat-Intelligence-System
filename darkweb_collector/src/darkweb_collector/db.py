@@ -19,7 +19,7 @@ class ManagedConnection(sqlite3.Connection):
 
 
 _SCHEMA_INIT_LOCK = Lock()
-_SCHEMA_INIT_FINGERPRINTS: set[tuple[str, int, int]] = set()
+_SCHEMA_INIT_FINGERPRINTS: set[str] = set()
 
 
 def _has_core_schema(connection: sqlite3.Connection) -> bool:
@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS document_hits (
     discovery_source TEXT NOT NULL,
     canonical_url TEXT NOT NULL,
     normalized_title TEXT NOT NULL,
+    resource_fingerprint TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL,
     access_state TEXT NOT NULL,
     confidence_score INTEGER NOT NULL DEFAULT 0,
@@ -285,6 +286,10 @@ ON document_hits(watchlist_id, risk_score, last_seen_at);
 
 CREATE INDEX IF NOT EXISTS idx_document_hits_review_status
 ON document_hits(review_status, access_state);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_hits_resource_fingerprint
+ON document_hits(watchlist_id, platform, resource_fingerprint)
+WHERE resource_fingerprint <> '';
 
 CREATE TABLE IF NOT EXISTS document_hit_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,6 +334,7 @@ CREATE TABLE IF NOT EXISTS exposure_scan_runs (
     candidate_count INTEGER NOT NULL DEFAULT 0,
     hit_count INTEGER NOT NULL DEFAULT 0,
     error_count INTEGER NOT NULL DEFAULT 0,
+    scan_stats_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL,
     errors_json TEXT NOT NULL DEFAULT '[]',
     started_at TEXT NOT NULL,
@@ -338,6 +344,48 @@ CREATE TABLE IF NOT EXISTS exposure_scan_runs (
 
 CREATE INDEX IF NOT EXISTS idx_exposure_scan_runs_watchlist
 ON exposure_scan_runs(watchlist_id, finished_at);
+
+CREATE TABLE IF NOT EXISTS netdisk_source_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watchlist_id INTEGER NOT NULL,
+    source_key TEXT NOT NULL,
+    term TEXT NOT NULL,
+    source_family TEXT NOT NULL DEFAULT 'netdisk_aggregator',
+    next_page INTEGER NOT NULL DEFAULT 1,
+    last_scanned_page INTEGER NOT NULL DEFAULT 0,
+    page_window_size INTEGER NOT NULL DEFAULT 4,
+    consecutive_empty_pages INTEGER NOT NULL DEFAULT 0,
+    consecutive_repeated_pages INTEGER NOT NULL DEFAULT 0,
+    last_candidate_signature TEXT NOT NULL DEFAULT '',
+    last_success_at TEXT NOT NULL DEFAULT '',
+    last_error_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    backoff_until TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(watchlist_id, source_key, term, source_family),
+    FOREIGN KEY (watchlist_id) REFERENCES exposure_watchlists(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_netdisk_source_states_watchlist
+ON netdisk_source_states(watchlist_id, source_key, term);
+
+CREATE TABLE IF NOT EXISTS netdisk_source_health (
+    source_key TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'healthy',
+    success_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    login_required_count INTEGER NOT NULL DEFAULT 0,
+    captcha_count INTEGER NOT NULL DEFAULT 0,
+    rate_limited_count INTEGER NOT NULL DEFAULT 0,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_success_at TEXT NOT NULL DEFAULT '',
+    last_error_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    backoff_until TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS code_watchlists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -566,12 +614,18 @@ LEGACY_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
     "monitoring_keyword_notifications": {
         "event_key": "TEXT NOT NULL DEFAULT ''",
     },
+    "document_hits": {
+        "resource_fingerprint": "TEXT NOT NULL DEFAULT ''",
+    },
     "code_hits": {
         "result_layer": "TEXT NOT NULL DEFAULT 'sensitive'",
     },
     "code_scan_runs": {
         "clue_hit_count": "INTEGER NOT NULL DEFAULT 0",
         "sensitive_hit_count": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "exposure_scan_runs": {
+        "scan_stats_json": "TEXT NOT NULL DEFAULT '[]'",
     },
 }
 
@@ -617,6 +671,13 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
         ON monitoring_keyword_notifications(event_key, status, dry_run)
         """
     )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_document_hits_resource_fingerprint
+        ON document_hits(watchlist_id, platform, resource_fingerprint)
+        WHERE resource_fingerprint <> ''
+        """
+    )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -638,17 +699,16 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     # journal mode in that case so the shared workspace DB remains usable.
                     pass
             stat = resolved.stat()
-            fingerprint = (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+            schema_key = str(resolved)
             if skip_wsl_checks and stat.st_size > 0:
                 _SCHEMA_INIT_FINGERPRINTS.clear()
-                _SCHEMA_INIT_FINGERPRINTS.add(fingerprint)
+                _SCHEMA_INIT_FINGERPRINTS.add(schema_key)
                 return connection
-            if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
+            if schema_key not in _SCHEMA_INIT_FINGERPRINTS:
                 with _SCHEMA_INIT_LOCK:
-                    if fingerprint not in _SCHEMA_INIT_FINGERPRINTS:
+                    if schema_key not in _SCHEMA_INIT_FINGERPRINTS:
                         _ensure_schema(connection)
-                        _SCHEMA_INIT_FINGERPRINTS.clear()
-                        _SCHEMA_INIT_FINGERPRINTS.add(fingerprint)
+                        _SCHEMA_INIT_FINGERPRINTS.add(schema_key)
             return connection
         except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
             last_error = exc
@@ -1797,7 +1857,7 @@ def get_document_hit(connection: sqlite3.Connection, hit_id: int) -> dict | None
     cursor = connection.execute(
         """
         SELECT id, watchlist_id, platform, platform_type, discovery_source, canonical_url, normalized_title,
-               title, access_state, confidence_score, risk_score, severity, review_status,
+               resource_fingerprint, title, access_state, confidence_score, risk_score, severity, review_status,
                matched_terms_json, file_count, evidence_count, share_owner, disclosure_time,
                first_seen_at, last_seen_at, last_snapshot_id, raw_json
         FROM document_hits
@@ -1837,7 +1897,7 @@ def list_document_hits(
     cursor = connection.execute(
         f"""
         SELECT h.id, h.watchlist_id, h.platform, h.platform_type, h.discovery_source, h.canonical_url,
-               h.normalized_title, h.title, h.access_state, h.confidence_score, h.risk_score,
+               h.normalized_title, h.resource_fingerprint, h.title, h.access_state, h.confidence_score, h.risk_score,
                h.severity, h.review_status, h.matched_terms_json, h.file_count, h.evidence_count,
                h.share_owner, h.disclosure_time, h.first_seen_at, h.last_seen_at, h.last_snapshot_id,
                h.raw_json, w.name AS watchlist_name, w.organization_name
@@ -1854,6 +1914,7 @@ def list_document_hits(
 
 
 def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
+    resource_fingerprint = str(payload.get("resource_fingerprint") or "").strip()
     signature = (
         int(payload.get("watchlist_id") or 0),
         str(payload.get("platform") or "").strip(),
@@ -1862,18 +1923,31 @@ def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
     )
     if not signature[0] or not signature[1] or not signature[2] or not signature[3]:
         raise ValueError("watchlist_id, platform, canonical_url, and normalized_title are required")
-    cursor = connection.execute(
-        """
-        SELECT id, first_seen_at
-        FROM document_hits
-        WHERE watchlist_id = ? AND platform = ? AND canonical_url = ? AND normalized_title = ?
-        """,
-        signature,
-    )
-    row = cursor.fetchone()
+    row = None
+    if resource_fingerprint:
+        cursor = connection.execute(
+            """
+            SELECT id, first_seen_at
+            FROM document_hits
+            WHERE watchlist_id = ? AND platform = ? AND resource_fingerprint = ?
+            """,
+            (signature[0], signature[1], resource_fingerprint),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        cursor = connection.execute(
+            """
+            SELECT id, first_seen_at
+            FROM document_hits
+            WHERE watchlist_id = ? AND platform = ? AND canonical_url = ? AND normalized_title = ?
+            """,
+            signature,
+        )
+        row = cursor.fetchone()
     values = (
         str(payload.get("platform_type") or "").strip() or "document_library",
         str(payload.get("discovery_source") or "").strip(),
+        resource_fingerprint,
         str(payload.get("title") or "").strip(),
         str(payload.get("access_state") or "").strip() or "unknown",
         int(payload.get("confidence_score") or 0),
@@ -1893,23 +1967,25 @@ def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
         connection.execute(
             """
             UPDATE document_hits
-            SET platform_type = ?, discovery_source = ?, title = ?, access_state = ?, confidence_score = ?,
+            SET platform_type = ?, discovery_source = ?,
+                resource_fingerprint = CASE WHEN ? <> '' THEN ? ELSE resource_fingerprint END,
+                title = ?, access_state = ?, confidence_score = ?,
                 risk_score = ?, severity = ?, review_status = ?, matched_terms_json = ?, file_count = ?,
                 evidence_count = ?, share_owner = ?, disclosure_time = ?, last_seen_at = ?,
                 last_snapshot_id = ?, raw_json = ?
             WHERE id = ?
             """,
-            (*values, int(row["id"])),
+            (values[0], values[1], values[2], values[2], *values[3:], int(row["id"])),
         )
         return int(row["id"])
     cursor = connection.execute(
         """
         INSERT INTO document_hits (
-            watchlist_id, platform, platform_type, discovery_source, canonical_url, normalized_title, title,
+            watchlist_id, platform, platform_type, discovery_source, canonical_url, normalized_title, resource_fingerprint, title,
             access_state, confidence_score, risk_score, severity, review_status, matched_terms_json,
             file_count, evidence_count, share_owner, disclosure_time, first_seen_at, last_seen_at,
             last_snapshot_id, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             signature[0],
@@ -1929,10 +2005,11 @@ def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
             values[10],
             values[11],
             values[12],
-            str(payload.get("first_seen_at") or values[13]),
             values[13],
+            str(payload.get("first_seen_at") or values[14]),
             values[14],
             values[15],
+            values[16],
         ),
     )
     return int(cursor.lastrowid)
@@ -2026,8 +2103,8 @@ def insert_exposure_scan_run(connection: sqlite3.Connection, payload: dict) -> i
         """
         INSERT INTO exposure_scan_runs (
             watchlist_id, source_families_json, requested_terms_json, candidate_count,
-            hit_count, error_count, status, errors_json, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            hit_count, error_count, scan_stats_json, status, errors_json, started_at, finished_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(payload.get("watchlist_id") or 0),
@@ -2036,6 +2113,7 @@ def insert_exposure_scan_run(connection: sqlite3.Connection, payload: dict) -> i
             int(payload.get("candidate_count") or 0),
             int(payload.get("hit_count") or 0),
             int(payload.get("error_count") or 0),
+            str(payload.get("scan_stats_json") or "[]"),
             str(payload.get("status") or "").strip() or "succeeded",
             str(payload.get("errors_json") or "[]"),
             str(payload.get("started_at") or ""),
@@ -2055,7 +2133,7 @@ def list_exposure_scan_runs(connection: sqlite3.Connection, watchlist_id: int | 
     cursor = connection.execute(
         f"""
         SELECT r.id, r.watchlist_id, r.source_families_json, r.requested_terms_json,
-               r.candidate_count, r.hit_count, r.error_count, r.status, r.errors_json,
+               r.candidate_count, r.hit_count, r.error_count, r.scan_stats_json, r.status, r.errors_json,
                r.started_at, r.finished_at, w.name AS watchlist_name, w.organization_name
         FROM exposure_scan_runs r
         JOIN exposure_watchlists w
@@ -2067,6 +2145,271 @@ def list_exposure_scan_runs(connection: sqlite3.Connection, watchlist_id: int | 
         tuple(params),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def list_netdisk_source_states(connection: sqlite3.Connection, watchlist_id: int | None = None) -> list[dict]:
+    params: list[object] = []
+    where_clause = ""
+    if watchlist_id is not None:
+        where_clause = "WHERE s.watchlist_id = ?"
+        params.append(int(watchlist_id))
+    cursor = connection.execute(
+        f"""
+        SELECT s.id, s.watchlist_id, s.source_key, s.term, s.source_family, s.next_page,
+               s.last_scanned_page, s.page_window_size, s.consecutive_empty_pages,
+               s.consecutive_repeated_pages, s.last_candidate_signature, s.last_success_at,
+               s.last_error_at, s.last_error, s.backoff_until, s.created_at, s.updated_at,
+               w.name AS watchlist_name, w.organization_name
+        FROM netdisk_source_states s
+        JOIN exposure_watchlists w
+          ON w.id = s.watchlist_id
+        {where_clause}
+        ORDER BY s.watchlist_id, s.source_key, s.term
+        """,
+        tuple(params),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_netdisk_source_state(
+    connection: sqlite3.Connection,
+    *,
+    watchlist_id: int,
+    source_key: str,
+    term: str,
+    source_family: str = "netdisk_aggregator",
+) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT id, watchlist_id, source_key, term, source_family, next_page,
+               last_scanned_page, page_window_size, consecutive_empty_pages,
+               consecutive_repeated_pages, last_candidate_signature, last_success_at,
+               last_error_at, last_error, backoff_until, created_at, updated_at
+        FROM netdisk_source_states
+        WHERE watchlist_id = ? AND source_key = ? AND term = ? AND source_family = ?
+        """,
+        (
+            int(watchlist_id),
+            str(source_key).strip(),
+            str(term).strip(),
+            str(source_family).strip() or "netdisk_aggregator",
+        ),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_netdisk_source_state(connection: sqlite3.Connection, payload: dict) -> int:
+    signature = (
+        int(payload.get("watchlist_id") or 0),
+        str(payload.get("source_key") or "").strip(),
+        str(payload.get("term") or "").strip(),
+        str(payload.get("source_family") or "").strip() or "netdisk_aggregator",
+    )
+    if not all(signature):
+        raise ValueError("watchlist_id, source_key, term, and source_family are required")
+    now = str(payload.get("updated_at") or "")
+    cursor = connection.execute(
+        """
+        SELECT id, created_at
+        FROM netdisk_source_states
+        WHERE watchlist_id = ? AND source_key = ? AND term = ? AND source_family = ?
+        """,
+        signature,
+    )
+    row = cursor.fetchone()
+    values = (
+        max(1, int(payload.get("next_page") or 1)),
+        max(0, int(payload.get("last_scanned_page") or 0)),
+        max(1, int(payload.get("page_window_size") or 4)),
+        max(0, int(payload.get("consecutive_empty_pages") or 0)),
+        max(0, int(payload.get("consecutive_repeated_pages") or 0)),
+        str(payload.get("last_candidate_signature") or ""),
+        str(payload.get("last_success_at") or ""),
+        str(payload.get("last_error_at") or ""),
+        str(payload.get("last_error") or ""),
+        str(payload.get("backoff_until") or ""),
+        now,
+    )
+    if row is not None:
+        connection.execute(
+            """
+            UPDATE netdisk_source_states
+            SET next_page = ?, last_scanned_page = ?, page_window_size = ?,
+                consecutive_empty_pages = ?, consecutive_repeated_pages = ?,
+                last_candidate_signature = ?, last_success_at = ?, last_error_at = ?,
+                last_error = ?, backoff_until = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (*values, int(row["id"])),
+        )
+        return int(row["id"])
+    cursor = connection.execute(
+        """
+        INSERT INTO netdisk_source_states (
+            watchlist_id, source_key, term, source_family, next_page, last_scanned_page,
+            page_window_size, consecutive_empty_pages, consecutive_repeated_pages,
+            last_candidate_signature, last_success_at, last_error_at, last_error,
+            backoff_until, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signature[0],
+            signature[1],
+            signature[2],
+            signature[3],
+            values[0],
+            values[1],
+            values[2],
+            values[3],
+            values[4],
+            values[5],
+            values[6],
+            values[7],
+            values[8],
+            values[9],
+            str(payload.get("created_at") or now),
+            values[10],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def reset_netdisk_source_states(
+    connection: sqlite3.Connection,
+    *,
+    watchlist_id: int | None = None,
+    source_key: str | None = None,
+    term: str | None = None,
+) -> int:
+    where_parts: list[str] = []
+    params: list[object] = []
+    if watchlist_id is not None:
+        where_parts.append("watchlist_id = ?")
+        params.append(int(watchlist_id))
+    if source_key:
+        where_parts.append("source_key = ?")
+        params.append(str(source_key).strip())
+    if term:
+        where_parts.append("term = ?")
+        params.append(str(term).strip())
+    where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    cursor = connection.execute(f"DELETE FROM netdisk_source_states {where_clause}", tuple(params))
+    return int(cursor.rowcount if cursor.rowcount is not None else 0)
+
+
+def list_netdisk_source_health(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT source_key, enabled, status, success_count, error_count, login_required_count,
+               captcha_count, rate_limited_count, consecutive_failures, last_success_at,
+               last_error_at, last_error, backoff_until, updated_at
+        FROM netdisk_source_health
+        ORDER BY source_key
+        """
+    )
+    rows = []
+    for row in cursor.fetchall():
+        payload = dict(row)
+        payload["enabled"] = bool(payload.get("enabled"))
+        rows.append(payload)
+    return rows
+
+
+def ensure_netdisk_source_health_records(connection: sqlite3.Connection, source_keys: list[dict] | list[str], updated_at: str) -> None:
+    for item in source_keys:
+        source_key = str(item.get("source_key") if isinstance(item, dict) else item).strip()
+        if not source_key:
+            continue
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO netdisk_source_health (source_key, updated_at)
+            VALUES (?, ?)
+            """,
+            (source_key, updated_at),
+        )
+
+
+def upsert_netdisk_source_health(connection: sqlite3.Connection, payload: dict) -> None:
+    source_key = str(payload.get("source_key") or "").strip()
+    if not source_key:
+        raise ValueError("source_key is required")
+    updated_at = str(payload.get("updated_at") or "")
+    cursor = connection.execute(
+        """
+        SELECT source_key, enabled, status, success_count, error_count, login_required_count,
+               captcha_count, rate_limited_count, consecutive_failures, last_success_at,
+               last_error_at, last_error, backoff_until, updated_at
+        FROM netdisk_source_health
+        WHERE source_key = ?
+        """,
+        (source_key,),
+    )
+    row = cursor.fetchone()
+    success_delta = max(0, int(payload.get("success_delta") or 0))
+    error_delta = max(0, int(payload.get("error_delta") or 0))
+    login_delta = max(0, int(payload.get("login_required_delta") or 0))
+    captcha_delta = max(0, int(payload.get("captcha_delta") or 0))
+    rate_limited_delta = max(0, int(payload.get("rate_limited_delta") or 0))
+    if row is None:
+        base = {
+            "enabled": True,
+            "status": "healthy",
+            "success_count": 0,
+            "error_count": 0,
+            "login_required_count": 0,
+            "captcha_count": 0,
+            "rate_limited_count": 0,
+            "consecutive_failures": 0,
+            "last_success_at": "",
+            "last_error_at": "",
+            "last_error": "",
+            "backoff_until": "",
+        }
+    else:
+        base = dict(row)
+    status = str(payload.get("status") or base.get("status") or "healthy")
+    if success_delta and not error_delta:
+        status = "healthy"
+    consecutive_failures = 0 if success_delta and not error_delta else int(base.get("consecutive_failures") or 0) + error_delta
+    values = (
+        1 if payload.get("enabled", base.get("enabled", True)) else 0,
+        status,
+        int(base.get("success_count") or 0) + success_delta,
+        int(base.get("error_count") or 0) + error_delta,
+        int(base.get("login_required_count") or 0) + login_delta,
+        int(base.get("captcha_count") or 0) + captcha_delta,
+        int(base.get("rate_limited_count") or 0) + rate_limited_delta,
+        consecutive_failures,
+        str(payload.get("last_success_at") or base.get("last_success_at") or ""),
+        str(payload.get("last_error_at") or base.get("last_error_at") or ""),
+        str(payload.get("last_error") or base.get("last_error") or ""),
+        str(payload.get("backoff_until") or base.get("backoff_until") or ""),
+        updated_at,
+    )
+    if row is None:
+        connection.execute(
+            """
+            INSERT INTO netdisk_source_health (
+                source_key, enabled, status, success_count, error_count, login_required_count,
+                captcha_count, rate_limited_count, consecutive_failures, last_success_at,
+                last_error_at, last_error, backoff_until, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (source_key, *values),
+        )
+        return
+    connection.execute(
+        """
+        UPDATE netdisk_source_health
+        SET enabled = ?, status = ?, success_count = ?, error_count = ?,
+            login_required_count = ?, captcha_count = ?, rate_limited_count = ?,
+            consecutive_failures = ?, last_success_at = ?, last_error_at = ?,
+            last_error = ?, backoff_until = ?, updated_at = ?
+        WHERE source_key = ?
+        """,
+        (*values, source_key),
+    )
 
 
 def list_code_watchlists(connection: sqlite3.Connection) -> list[dict]:
@@ -2460,6 +2803,39 @@ def insert_code_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
     return int(cursor.lastrowid)
 
 
+def update_code_scan_run(connection: sqlite3.Connection, scan_run_id: int, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE code_scan_runs
+           SET platforms_json = ?,
+               requested_terms_json = ?,
+               candidate_count = ?,
+               hit_count = ?,
+               clue_hit_count = ?,
+               sensitive_hit_count = ?,
+               error_count = ?,
+               status = ?,
+               errors_json = ?,
+               finished_at = ?
+         WHERE id = ?
+        """,
+        (
+            str(payload.get("platforms_json") or "[]"),
+            str(payload.get("requested_terms_json") or "[]"),
+            int(payload.get("candidate_count") or 0),
+            int(payload.get("hit_count") or 0),
+            int(payload.get("clue_hit_count") or 0),
+            int(payload.get("sensitive_hit_count") or 0),
+            int(payload.get("error_count") or 0),
+            str(payload.get("status") or "").strip() or "succeeded",
+            str(payload.get("errors_json") or "[]"),
+            str(payload.get("finished_at") or ""),
+            int(scan_run_id),
+        ),
+    )
+    return int(cursor.rowcount)
+
+
 def list_code_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None = None, limit: int | None = 100) -> list[dict]:
     params: list[object] = []
     where_clause = ""
@@ -2476,7 +2852,7 @@ def list_code_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None
         JOIN code_watchlists w
           ON w.id = r.watchlist_id
         {where_clause}
-        ORDER BY datetime(r.finished_at) DESC, r.id DESC
+        ORDER BY datetime(COALESCE(NULLIF(r.finished_at, ''), r.started_at)) DESC, r.id DESC
         {limit_clause}
         """,
         tuple(params),

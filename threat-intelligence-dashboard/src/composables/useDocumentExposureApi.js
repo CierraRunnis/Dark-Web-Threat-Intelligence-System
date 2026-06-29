@@ -20,6 +20,9 @@ export function useDocumentExposureApi() {
     loadSessions(module = 'document_exposure') {
       return requestJson(`/api/platform-sessions${buildQuery({ module })}`)
     },
+    loadPlatforms(module = 'document_exposure') {
+      return requestJson(`/api/exposure-platforms${buildQuery({ module })}`)
+    },
     launchLogin(platform) {
       return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/launch-login`, {
         method: 'POST',
@@ -64,6 +67,38 @@ export function useDocumentExposureApi() {
         watchlist_id: params.watchlistId,
         limit: params.limit,
       })}`)
+    },
+    loadNetdiskContinuousStatus(params = {}) {
+      return requestJson(`/api/document-exposures/netdisk/continuous-status${buildQuery({
+        watchlist_id: params.watchlistId,
+      })}`)
+    },
+    loadNetdiskSourceStates(params = {}) {
+      return requestJson(`/api/document-exposures/netdisk/source-states${buildQuery({
+        watchlist_id: params.watchlistId,
+      })}`)
+    },
+    loadNetdiskSourceHealth() {
+      return requestJson('/api/document-exposures/netdisk/source-health')
+    },
+    runNetdiskContinuousOnce() {
+      return requestJson('/api/document-exposures/netdisk/continuous/run', {
+        method: 'POST',
+      })
+    },
+    startNetdiskContinuous(payload) {
+      return requestJson('/api/document-exposures/netdisk/continuous/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    },
+    stopNetdiskContinuous(payload) {
+      return requestJson('/api/document-exposures/netdisk/continuous/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
     },
     loadHits(params = {}) {
       return requestJson(`/api/document-exposures${buildQuery({

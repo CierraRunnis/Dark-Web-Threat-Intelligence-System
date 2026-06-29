@@ -20,6 +20,14 @@ $ServiceWaitSeconds = 45
 $SchedulerIntervalSeconds = if ($env:SCHEDULER_INTERVAL_SECONDS) { [int]$env:SCHEDULER_INTERVAL_SECONDS } else { 60 }
 $VulnSyncIntervalSeconds = if ($env:VULN_SYNC_INTERVAL_SECONDS) { [int]$env:VULN_SYNC_INTERVAL_SECONDS } else { 3600 }
 $VulnSyncLimit = if ($env:VULN_SYNC_LIMIT) { [int]$env:VULN_SYNC_LIMIT } else { 300 }
+$PansouEnabled = $env:DARKWEB_PANSOU_ENABLED -ne "0"
+$PansouPort = if ($env:PANSOU_PORT) { [int]$env:PANSOU_PORT } else { 8888 }
+$PansouApiBase = if ($env:PANSOU_API_BASE) { $env:PANSOU_API_BASE.TrimEnd("/") } else { "http://127.0.0.1:$PansouPort" }
+$PansouRepoUrl = if ($env:PANSOU_REPO_URL) { $env:PANSOU_REPO_URL } else { "https://github.com/fish2018/pansou.git" }
+$PansouRef = if ($env:PANSOU_REF) { $env:PANSOU_REF } else { "" }
+$PansouChannels = if ($env:PANSOU_CHANNELS) { $env:PANSOU_CHANNELS } else { "tgsearchers3" }
+$PansouPlugins = if ($env:PANSOU_ENABLED_PLUGINS) { $env:PANSOU_ENABLED_PLUGINS } else { "panyq,pansearch,qupansou,hunhepan,jikepan,pan666" }
+$PansouGoProxy = if ($env:PANSOU_GOPROXY) { $env:PANSOU_GOPROXY } elseif ($env:GOPROXY) { $env:GOPROXY } else { "https://goproxy.cn,direct" }
 $BrowserConcurrency = 2
 if ($env:DARKWEB_BROWSER_CONCURRENCY) {
     try {
@@ -41,6 +49,9 @@ $RuntimeDir = Join-Path $CollectorRoot ".runtime\windows"
 $LogDir = Join-Path $RuntimeDir "logs"
 $PidFile = Join-Path $RuntimeDir "services.json"
 $RuntimePortsFile = Join-Path $RuntimeDir "ports.json"
+$PansouRuntimeDir = Join-Path $RuntimeDir "pansou"
+$PansouSourceDir = Join-Path $PansouRuntimeDir "src"
+$PansouExePath = Join-Path $PansouRuntimeDir "pansou.exe"
 $CommandBinDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel\bin"
 $DarkwebCommandPath = Join-Path $CommandBinDir "darkweb.cmd"
 $DefaultUserDataDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel"
@@ -57,15 +68,7 @@ $CollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) { $env:DARKWEB_COLL
 $CollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
     $configuredOutputRoot = [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
     $resolvedLegacyOutputRoot = [System.IO.Path]::GetFullPath($LegacyCollectorOutputRoot)
-    $resolvedProjectCollectorOutputRoot = [System.IO.Path]::GetFullPath($ProjectCollectorOutputRoot)
     if ($configuredOutputRoot -ieq $resolvedLegacyOutputRoot) {
-        $ProjectCollectorOutputRoot
-    }
-    elseif (
-        $configuredOutputRoot -ine $resolvedProjectCollectorOutputRoot -and
-        [System.IO.Path]::GetFileName($configuredOutputRoot).ToLowerInvariant() -eq "output" -and
-        [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($configuredOutputRoot)).ToLowerInvariant() -eq "darkweb_collector"
-    ) {
         $ProjectCollectorOutputRoot
     }
     else {
@@ -485,11 +488,8 @@ function Load-RuntimePorts {
 
 function Test-DarkwebApiReady {
     try {
-        $payload = Invoke-RestMethod -Uri $ApiJobsUrl -TimeoutSec 3
-        if ($null -eq $payload.site_health) {
-            return $false
-        }
-        return (@($payload.site_health).Count -gt 0)
+        $payload = Invoke-RestMethod -Uri $ApiHealthUrl -TimeoutSec 3
+        return ($payload.status -eq "ok")
     }
     catch {
         return $false
@@ -503,8 +503,7 @@ function Test-DarkwebFrontendReady {
         if (-not $htmlReady) {
             return $false
         }
-        $jobsPayload = Invoke-RestMethod -Uri "$FrontendUrl/api/jobs" -TimeoutSec 3
-        return ($null -ne $jobsPayload.site_health -and @($jobsPayload.site_health).Count -gt 0)
+        return $true
     }
     catch {
         return $false
@@ -689,6 +688,9 @@ function Test-DarkwebStackReady {
     if (-not (Test-DarkwebFrontendReady)) {
         return $false
     }
+    if ($PansouEnabled -and -not (Test-PansouReady)) {
+        return $false
+    }
     return $true
 }
 
@@ -793,7 +795,8 @@ function Test-ProjectManagedCommandLine {
         "node_modules\.bin",
         "vite\bin\vite.js",
         "npm-cli.js",
-        "npm run dev"
+        "npm run dev",
+        "pansou.exe"
     )
     return [bool]($markers | Where-Object { $CommandLine -like "*$_*" } | Select-Object -First 1)
 }
@@ -897,6 +900,7 @@ Set-Location -LiteralPath $quotedWorkDir
 `$env:DARKWEB_COLLECTOR_SITES_FILE = $(Quote-PS $CollectorSitesFile)
 `$env:DARKWEB_COLLECTOR_OUTPUT_ROOT = $(Quote-PS $CollectorOutputRoot)
 `$env:DARKWEB_BROWSER_CONCURRENCY = $(Quote-PS ([string]$BrowserConcurrency))
+`$env:PANSOU_API_BASE = $(Quote-PS $PansouApiBase)
 `$env:NPM_CONFIG_CACHE = $(Quote-PS (Join-Path $DefaultUserDataDir "npm-cache"))
 $Body *>> $quotedLog
 "@
@@ -1209,6 +1213,7 @@ set "VITE_API_TARGET=$ApiBaseUrl"
 set "DARKWEB_FRONTEND_PORT=$FrontendPort"
 set "DARKWEB_FRONTEND_URL=$FrontendUrl"
 set "VITE_FRONTEND_PORT=$FrontendPort"
+set "PANSOU_API_BASE=$PansouApiBase"
 if not exist "%COLLECTOR_ROOT%\scripts\start_all_services_windows.ps1" (
   echo [ERROR] DARKWEB_COLLECTOR_ROOT is not valid. Run .\darkweb.cmd register from the project root.
   exit /b 1
@@ -1234,6 +1239,7 @@ if "%~1"=="" (
     Set-UserEnv -Name "DARKWEB_API_TARGET" -Value $ApiBaseUrl
     Set-UserEnv -Name "DARKWEB_FRONTEND_PORT" -Value ([string]$FrontendPort)
     Set-UserEnv -Name "DARKWEB_FRONTEND_URL" -Value $FrontendUrl
+    Set-UserEnv -Name "PANSOU_API_BASE" -Value $PansouApiBase
     Write-Info "Registered darkweb command: $DarkwebCommandPath"
 }
 
@@ -1455,6 +1461,118 @@ function Ensure-Redis {
     return $record
 }
 
+function Test-PansouReady {
+    if (-not $PansouEnabled) {
+        return $false
+    }
+    try {
+        $response = Invoke-WebRequest -UseBasicParsing -Uri "$PansouApiBase/api/health" -TimeoutSec 3
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Ensure-PansouRuntime {
+    if (-not $PansouEnabled) {
+        return $false
+    }
+    if (Test-PansouReady) {
+        return $true
+    }
+    if (Test-Path -LiteralPath $PansouExePath) {
+        return $true
+    }
+
+    $git = Resolve-WorkingCommand -Names @("git.exe", "git") -Arguments @("--version")
+    if (-not $git) {
+        Write-Warn "PanSou is enabled but git is unavailable; set PANSOU_API_BASE to an existing PanSou service or install git."
+        return $false
+    }
+    $go = Resolve-WorkingCommand -Names @("go.exe", "go") -Arguments @("version")
+    if (-not $go) {
+        Write-Warn "PanSou is enabled but Go is unavailable; set PANSOU_API_BASE to an existing PanSou service or install Go 1.18+."
+        return $false
+    }
+
+    Ensure-Directory $PansouRuntimeDir
+    if (-not (Test-Path -LiteralPath $PansouSourceDir)) {
+        Write-Info "Installing PanSou source into $PansouSourceDir"
+        & $git clone --depth 1 $PansouRepoUrl $PansouSourceDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Failed to clone PanSou from $PansouRepoUrl"
+            return $false
+        }
+    }
+    if ($PansouRef) {
+        Write-Info "Checking out PanSou ref $PansouRef"
+        & $git -C $PansouSourceDir fetch --depth 1 origin $PansouRef
+        if ($LASTEXITCODE -eq 0) {
+            & $git -C $PansouSourceDir checkout FETCH_HEAD
+        }
+        else {
+            & $git -C $PansouSourceDir checkout $PansouRef
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Failed to checkout PanSou ref $PansouRef"
+            return $false
+        }
+    }
+
+    Write-Info "Building PanSou API binary"
+    Push-Location $PansouSourceDir
+    try {
+        $oldGoProxy = $env:GOPROXY
+        $env:GOPROXY = $PansouGoProxy
+        & $go build -ldflags "-s -w" -o $PansouExePath .
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Failed to build PanSou binary"
+            return $false
+        }
+    }
+    finally {
+        if ($null -ne $oldGoProxy) {
+            $env:GOPROXY = $oldGoProxy
+        }
+        else {
+            Remove-Item Env:GOPROXY -ErrorAction SilentlyContinue
+        }
+        Pop-Location
+    }
+    return (Test-Path -LiteralPath $PansouExePath)
+}
+
+function Start-Pansou {
+    if (-not $PansouEnabled) {
+        Write-Info "PanSou: disabled"
+        return $null
+    }
+    if (Test-PansouReady) {
+        Write-Info "PanSou: already running at $PansouApiBase"
+        return $null
+    }
+    if (-not (Ensure-PansouRuntime)) {
+        Write-Warn "PanSou is not available; netdisk scan will continue with HTML aggregation sources only."
+        return $null
+    }
+
+    $pansouExe = Quote-PS $PansouExePath
+    $record = Start-ManagedProcess -Name "pansou" -WorkingDirectory $PansouSourceDir -Body @"
+`$env:PORT = $(Quote-PS ([string]$PansouPort))
+`$env:CHANNELS = $(Quote-PS $PansouChannels)
+`$env:ENABLED_PLUGINS = $(Quote-PS $PansouPlugins)
+& $pansouExe
+"@
+    if (-not (Wait-ForHttp -Url "$PansouApiBase/api/health" -TimeoutSeconds 30)) {
+        Write-Warn "PanSou did not become ready within 30s. Check log: $($record.log)"
+    }
+    else {
+        Write-Info "PanSou: up ($PansouApiBase)"
+    }
+    return $record
+}
+
 function Ensure-RedisCanStart {
     Ensure-RedisRuntime
 }
@@ -1475,6 +1593,7 @@ function Ensure-Environment {
     Ensure-Directory $LogDir
     Invoke-TimedStep "Ensure-CollectorVenv" { Ensure-CollectorVenv }
     Invoke-TimedStep "Ensure-CollectorDependencies" { Ensure-CollectorDependencies }
+    Invoke-TimedStep "Ensure-PansouRuntime" { Ensure-PansouRuntime | Out-Null }
     Invoke-TimedStep "Ensure-PlaywrightRuntime" { Ensure-PlaywrightRuntime }
     Invoke-TimedStep "Ensure-DashboardDependencies" { Ensure-DashboardDependencies }
     Invoke-TimedStep "Ensure-RuntimeDatabase" { Ensure-RuntimeDatabase }
@@ -1513,6 +1632,10 @@ function Start-Services {
     $redisRecord = Ensure-Redis
     if ($redisRecord) {
         $records += $redisRecord
+    }
+    $pansouRecord = Start-Pansou
+    if ($pansouRecord) {
+        $records += $pansouRecord
     }
 
     $python = Quote-PS $VenvPython
@@ -1608,11 +1731,23 @@ function Show-Status {
         Write-Info "redis: down"
     }
 
+    if ($PansouEnabled) {
+        if (Test-PansouReady) {
+            Write-Info "pansou: up ($PansouApiBase)"
+        }
+        else {
+            Write-Info "pansou: down ($PansouApiBase)"
+        }
+    }
+    else {
+        Write-Info "pansou: disabled"
+    }
+
     if (Test-DarkwebApiReady) {
         Write-Info "api: up ($ApiJobsUrl)"
     }
     else {
-        Write-Info "api: down or not this project's API ($ApiJobsUrl must return non-empty site_health)"
+        Write-Info "api: down or not this project's API ($ApiHealthUrl must return status ok)"
     }
 
     if (Test-DarkwebFrontendReady) {

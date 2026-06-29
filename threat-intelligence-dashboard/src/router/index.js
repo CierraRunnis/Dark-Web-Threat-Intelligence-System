@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { hasAuthSession, isAuthSessionValidated, loadCurrentUser } from '@/composables/useAuth'
+import Login from '@/views/Login.vue'
 import Dashboard from '@/views/Dashboard.vue'
 import Ransomware from '@/views/Ransomware.vue'
 import DataLeak from '@/views/DataLeak.vue'
@@ -17,6 +19,16 @@ import CodeMonitoringScans from '@/views/CodeMonitoringScans.vue'
 import CodeMonitoringDetail from '@/views/CodeMonitoringDetail.vue'
 
 const routes = [
+  {
+    path: '/login',
+    name: 'Login',
+    component: Login,
+    meta: {
+      title: '登录',
+      hidden: true,
+      layout: 'blank',
+    },
+  },
   {
     path: '/',
     name: 'Dashboard',
@@ -111,7 +123,7 @@ const routes = [
       sourceFamily: 'netdisk_aggregator',
       monitorGroup: 'document-exposure',
       kicker: '文件监测',
-      subtitle: '聚焦网盘分享链接、访问状态、文件清单和风险处置。',
+      subtitle: '聚焦网盘分享链接、访问状态、文件清单和处置状态。',
     },
   },
   {
@@ -147,7 +159,7 @@ const routes = [
       title: '文件监测详情',
       hidden: true,
       kicker: '文件监测',
-      subtitle: '查看命中详情、证据预览、文件清单和处理记录。',
+      subtitle: '查看命中详情、链接信息、文件清单和处理记录。',
     },
   },
   {
@@ -163,13 +175,43 @@ const routes = [
   },
   {
     path: '/document-exposure/settings',
+    redirect: '/document-exposure/search-engine/settings',
+    meta: { hidden: true },
+  },
+  {
+    path: '/document-exposure/search-engine/settings',
     name: 'DocumentExposureSettings',
     component: DocumentExposureSettings,
     meta: {
-      title: '文件监测配置',
+      title: '搜索引擎监测配置',
       hidden: true,
+      sourceFamily: 'search_engine',
       kicker: '文件监测',
-      subtitle: '管理文档平台会话、监测对象、来源家族和文件类型。',
+      subtitle: '独立管理搜索引擎监测对象、关键词和搜索源。',
+    },
+  },
+  {
+    path: '/document-exposure/netdisk/settings',
+    name: 'DocumentExposureNetdiskSettings',
+    component: DocumentExposureSettings,
+    meta: {
+      title: '网盘监测配置',
+      hidden: true,
+      sourceFamily: 'netdisk_aggregator',
+      kicker: '文件监测',
+      subtitle: '独立管理网盘监测对象、关键词、文件类型和网盘信息源。',
+    },
+  },
+  {
+    path: '/document-exposure/document-library/settings',
+    name: 'DocumentExposureLibrarySettings',
+    component: DocumentExposureSettings,
+    meta: {
+      title: '文库监测配置',
+      hidden: true,
+      sourceFamily: 'document_library',
+      kicker: '文件监测',
+      subtitle: '独立管理文库监测对象、关键词和文库信息源。',
     },
   },
   {
@@ -232,6 +274,39 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+})
+
+router.beforeEach(async (to) => {
+  if (to.name === 'Login') {
+    if (hasAuthSession()) {
+      if (!isAuthSessionValidated()) {
+        const user = await loadCurrentUser()
+        if (!user) return true
+      }
+      const redirect = typeof to.query.redirect === 'string' && to.query.redirect.startsWith('/') ? to.query.redirect : '/'
+      return redirect === '/login' ? '/' : redirect
+    }
+    return true
+  }
+
+  if (!hasAuthSession()) {
+    return {
+      path: '/login',
+      query: { redirect: to.fullPath },
+    }
+  }
+
+  if (!isAuthSessionValidated()) {
+    const user = await loadCurrentUser()
+    if (!user) {
+      return {
+        path: '/login',
+        query: { redirect: to.fullPath },
+      }
+    }
+  }
+
+  return true
 })
 
 export default router

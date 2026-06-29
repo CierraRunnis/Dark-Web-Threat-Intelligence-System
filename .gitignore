@@ -7,6 +7,7 @@ __pycache__/
 venv/
 .venv/
 darkweb_collector/venv/
+darkweb_collector/venv.broken-*/
 
 # Node / frontend build outputs
 node_modules/
@@ -15,10 +16,18 @@ threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
 
 # Runtime data and crawler artifacts
+.npm-cache/
+.playwright-cli/
+output/
 darkweb_collector/.runtime/
 darkweb_collector/data/
 darkweb_collector/output/
+darkweb_collector/logs/
+darkweb_collector/*.log
 darkweb_collector/C*/
+threat-intelligence-dashboard/.npm-cache/
+threat-intelligence-dashboard/.codex*.log
+**/storage_state.json
 
 # OS / editor
 .DS_Store

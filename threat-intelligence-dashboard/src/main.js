@@ -6,6 +6,15 @@ import 'element-plus/dist/index.css'
 
 import App from './App.vue'
 import router from './router'
+import { AUTH_UNAUTHORIZED_EVENT, installAuthFetch } from './composables/useAuth'
+
+installAuthFetch()
+
+window.addEventListener(AUTH_UNAUTHORIZED_EVENT, () => {
+  const route = router.currentRoute.value
+  if (route.name === 'Login') return
+  router.replace({ path: '/login', query: { redirect: route.fullPath } })
+})
 
 const app = createApp(App)
 

@@ -1,2 +1,0 @@
-
-91d9a469ea47bb03f927007fd643504f1d633af3	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/vite/-/vite-5.4.21.tgz","integrity":null,"time":1780574244120,"size":"262","metadata":{"time":1780574244120,"url":"http://registry.npm.taobao.org/vite/-/vite-5.4.21.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/vite/-/vite-5.4.21.tgz"},"options":{"compress":true},"status":301}}
