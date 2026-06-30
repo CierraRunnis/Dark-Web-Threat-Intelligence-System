@@ -3,13 +3,16 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import secrets
 import time
 from pathlib import Path
 from threading import Lock, Thread
 
 from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -27,18 +30,22 @@ from darkweb_collector.bot_assistant import (
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
     dispatch_run_code_monitoring_once,
+    dispatch_run_netdisk_monitoring_once,
     dispatch_run_ransomware_sync_once,
     dispatch_run_site,
     dispatch_run_vulnerability_sync_once,
     get_code_monitoring_continuous_status,
     get_continuous_dispatch_status,
+    get_netdisk_monitoring_continuous_status,
     get_ransomware_sync_status,
     get_vulnerability_sync_status,
     start_code_monitoring_dispatch,
+    start_netdisk_monitoring_dispatch,
     start_ransomware_sync_dispatch,
     start_continuous_dispatch,
     start_vulnerability_sync_dispatch,
     stop_code_monitoring_dispatch,
+    stop_netdisk_monitoring_dispatch,
     stop_ransomware_sync_dispatch,
     stop_continuous_dispatch,
     stop_vulnerability_sync_dispatch,
@@ -50,8 +57,13 @@ from darkweb_collector.document_exposure import (
     build_document_exposure_detail,
     list_exposure_scan_runs_payload,
     build_document_exposure_summary,
+    ensure_netdisk_source_health_defaults,
     list_document_exposures_payload,
+    list_netdisk_source_health_payload,
+    list_netdisk_source_states_payload,
     list_watchlists_payload,
+    netdisk_source_policy,
+    reset_netdisk_source_states_payload,
     save_watchlist_payload,
     scan_watchlist_once,
 )
@@ -74,6 +86,7 @@ from darkweb_collector.document_exposure_sessions import (
     save_platform_session,
     verify_platform_session,
 )
+from darkweb_collector.document_exposure_platforms import list_exposure_platforms
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
 from darkweb_collector.db import get_db_connection, list_monitoring_keyword_notifications
@@ -85,9 +98,93 @@ app = FastAPI(title="Darkweb Collector API", version="1.0.0")
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
 _warmup_started = False
+_auth_lock = Lock()
+_auth_sessions: dict[str, dict[str, object]] = {}
 _api_auto_reload_enabled = os.environ.get("DARKWEB_API_AUTO_RELOAD") == "1"
 collector_output_dir = output_root()
 collector_output_dir.mkdir(parents=True, exist_ok=True)
+
+AUTH_EXEMPT_PATHS = {
+    "/api/auth/login",
+    "/api/health",
+}
+
+
+def _auth_enabled() -> bool:
+    return os.environ.get("DARKWEB_API_AUTH_DISABLED") != "1"
+
+
+def _auth_username() -> str:
+    return os.environ.get("DARKWEB_AUTH_USERNAME", "admin")
+
+
+def _auth_password() -> str:
+    return os.environ.get("DARKWEB_AUTH_PASSWORD", "").strip()
+
+
+def _auth_session_ttl_seconds() -> int:
+    try:
+        return max(60, int(os.environ.get("DARKWEB_AUTH_TTL_SECONDS", "43200")))
+    except ValueError:
+        return 43200
+
+
+def _auth_user_payload(username: str) -> dict[str, str]:
+    return {
+        "username": username,
+        "display_name": "个人用户" if username == "admin" else username,
+    }
+
+
+def _extract_bearer_token(authorization: str) -> str:
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+def _create_auth_session(username: str) -> tuple[str, float]:
+    now = time.time()
+    expires_at = now + _auth_session_ttl_seconds()
+    token = secrets.token_urlsafe(32)
+    with _auth_lock:
+        _auth_sessions[token] = {
+            "username": username,
+            "created_at": now,
+            "expires_at": expires_at,
+        }
+    return token, expires_at
+
+
+def _get_auth_user(token: str) -> dict[str, str] | None:
+    if not token:
+        return None
+    now = time.time()
+    with _auth_lock:
+        session = _auth_sessions.get(token)
+        if not session:
+            return None
+        expires_at = float(session.get("expires_at") or 0)
+        if expires_at < now:
+            _auth_sessions.pop(token, None)
+            return None
+        return _auth_user_payload(str(session.get("username") or ""))
+
+
+def _revoke_auth_session(token: str) -> None:
+    if not token:
+        return
+    with _auth_lock:
+        _auth_sessions.pop(token, None)
+
+
+def _requires_auth(request: Request) -> bool:
+    path = request.url.path
+    if not _auth_enabled() or request.method == "OPTIONS":
+        return False
+    if not path.startswith("/api/") or path in AUTH_EXEMPT_PATHS:
+        return False
+    return True
 
 
 def _reload_api_modules():
@@ -113,6 +210,18 @@ app.mount(
 )
 
 
+@app.middleware("http")
+async def require_api_auth(request: Request, call_next):
+    if not _requires_auth(request):
+        return await call_next(request)
+    token = _extract_bearer_token(request.headers.get("authorization", ""))
+    user = _get_auth_user(token)
+    if user is None:
+        return JSONResponse(status_code=401, content={"detail": "未登录或登录已过期"})
+    request.state.current_user = user
+    return await call_next(request)
+
+
 def _run_payload_warmup() -> None:
     started_at = time.perf_counter()
     try:
@@ -129,6 +238,10 @@ def warm_payloads_on_startup() -> None:
         ensure_wecom_aibot_listener()
     except Exception:
         logger.exception("failed to start WeCom AI Bot listener")
+    try:
+        ensure_netdisk_source_health_defaults()
+    except Exception:
+        logger.exception("failed to initialize netdisk source health records")
     global _warmup_started
     if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
         logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
@@ -143,6 +256,45 @@ def warm_payloads_on_startup() -> None:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = ""
+    account: str = ""
+    password: str = ""
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: AuthLoginRequest) -> dict:
+    username = (payload.username or payload.account).strip()
+    password = payload.password
+    expected_password = _auth_password()
+    if not expected_password:
+        raise HTTPException(status_code=503, detail="DARKWEB_AUTH_PASSWORD is not configured")
+    username_matches = secrets.compare_digest(username, _auth_username())
+    password_matches = secrets.compare_digest(password, expected_password)
+    if not username_matches or not password_matches:
+        raise HTTPException(status_code=401, detail="账号或密码错误")
+
+    token, expires_at = _create_auth_session(username)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": int(expires_at),
+        "user": _auth_user_payload(username),
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, str]:
+    return getattr(request.state, "current_user", _auth_user_payload(_auth_username()))
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request) -> dict[str, bool]:
+    token = _extract_bearer_token(request.headers.get("authorization", ""))
+    _revoke_auth_session(token)
+    return {"ok": True}
 
 
 @app.get("/api/intelligence")
@@ -298,6 +450,21 @@ class DocumentExposureReviewRequest(BaseModel):
     status: str
     reviewer: str = ""
     note: str = ""
+
+
+class NetdiskMonitoringContinuousStartRequest(BaseModel):
+    interval_seconds: int = 3600
+    watchlist_id: int = Field(..., gt=0)
+
+
+class NetdiskMonitoringContinuousStopRequest(BaseModel):
+    watchlist_id: int = Field(..., gt=0)
+
+
+class NetdiskSourceStateResetRequest(BaseModel):
+    watchlist_id: int | None = None
+    source_key: str = ""
+    term: str = ""
 
 
 class CodeWatchTermRequest(BaseModel):
@@ -483,6 +650,27 @@ def platform_sessions(module: str | None = None) -> list[dict]:
     return build_platform_session_payloads(module=module, manageable_only=True)
 
 
+@app.get("/api/exposure-platforms")
+def exposure_platforms(module: str | None = None) -> list[dict]:
+    rows = []
+    for platform in list_exposure_platforms(module=module):
+        row = {
+            "platform": platform.key,
+            "label": platform.label,
+            "module": platform.module,
+            "platform_type": platform.platform_type,
+            "homepage_url": platform.homepage_url,
+            "login_url": platform.login_url,
+            "domains": list(platform.domains),
+            "requires_login": platform.requires_login,
+            "discovery_only": platform.discovery_only,
+        }
+        if platform.platform_type == "netdisk_search":
+            row.update(netdisk_source_policy(platform.key))
+        rows.append(row)
+    return rows
+
+
 @app.post("/api/platform-sessions/auto-detect")
 def platform_sessions_auto_detect(module: str | None = None) -> list[dict]:
     return auto_detect_platform_sessions(module=module)
@@ -572,6 +760,50 @@ def document_exposures(
 @app.get("/api/document-exposures/summary")
 def document_exposure_summary(source_family: str | None = None) -> dict:
     return build_document_exposure_summary(source_family=source_family)
+
+
+@app.get("/api/document-exposures/netdisk/source-states")
+def netdisk_source_states(watchlist_id: int | None = None) -> list[dict]:
+    return list_netdisk_source_states_payload(watchlist_id=watchlist_id)
+
+
+@app.get("/api/document-exposures/netdisk/source-health")
+def netdisk_source_health() -> list[dict]:
+    return list_netdisk_source_health_payload()
+
+
+@app.post("/api/document-exposures/netdisk/source-states/reset")
+def netdisk_source_states_reset(payload: NetdiskSourceStateResetRequest) -> dict:
+    return reset_netdisk_source_states_payload(payload.model_dump())
+
+
+@app.get("/api/document-exposures/netdisk/continuous-status")
+def netdisk_monitoring_continuous_status(watchlist_id: int | None = None) -> dict:
+    return get_netdisk_monitoring_continuous_status(watchlist_id=watchlist_id)
+
+
+@app.post("/api/document-exposures/netdisk/continuous/run")
+def netdisk_monitoring_continuous_run() -> dict:
+    return dispatch_run_netdisk_monitoring_once()
+
+
+@app.post("/api/document-exposures/netdisk/continuous/start")
+def netdisk_monitoring_continuous_start(payload: NetdiskMonitoringContinuousStartRequest) -> dict:
+    try:
+        return start_netdisk_monitoring_dispatch(
+            interval_seconds=payload.interval_seconds,
+            watchlist_id=payload.watchlist_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/document-exposures/netdisk/continuous/stop")
+def netdisk_monitoring_continuous_stop(payload: NetdiskMonitoringContinuousStopRequest) -> dict:
+    try:
+        return stop_netdisk_monitoring_dispatch(watchlist_id=payload.watchlist_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/document-exposures/{hit_id}")
