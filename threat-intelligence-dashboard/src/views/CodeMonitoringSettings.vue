@@ -187,16 +187,23 @@
           <div class="watchlist-terms">
             <div class="watchlist-terms__header">
               <strong>检索词</strong>
-              <el-button plain size="small" @click="addTerm">新增检索词</el-button>
+              <div class="watchlist-terms__actions">
+                <el-button plain size="small" @click="downloadTermTemplate">下载模板</el-button>
+                <el-button plain size="small" :loading="importingTerms" @click="triggerTermImport">导入模板</el-button>
+                <el-button plain size="small" @click="addTerm">新增检索词</el-button>
+                <input
+                  ref="termImportInputRef"
+                  class="term-import-input"
+                  type="file"
+                  accept=".xlsx,.xls"
+                  @change="handleTermImportFile"
+                />
+              </div>
             </div>
             <div v-for="(term, index) in watchlistForm.terms" :key="`${term.term_type}-${index}`" class="watchlist-term-row">
               <el-input v-model="term.term" placeholder="检索词" />
               <el-select v-model="term.term_type" placeholder="类型" style="width: 160px">
-                <el-option label="企业名" value="company_name" />
-                <el-option label="域名" value="domain" />
-                <el-option label="项目名" value="project" />
-                <el-option label="产品名" value="product" />
-                <el-option label="自定义词" value="custom" />
+                <el-option v-for="item in termTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
               <el-switch v-model="term.enabled" />
               <el-button type="danger" plain size="small" @click="removeTerm(index)">删除</el-button>
@@ -220,9 +227,11 @@ const loadingSessions = ref(false)
 const detectingSessions = ref(false)
 const loadingWatchlists = ref(false)
 const savingWatchlist = ref(false)
+const importingTerms = ref(false)
 const platformSessions = ref([])
 const watchlists = ref([])
 const selectedWatchlistId = ref(null)
+const termImportInputRef = ref(null)
 const sessionDrafts = reactive({})
 const loginStarting = reactive({})
 
@@ -238,6 +247,21 @@ const ruleOptions = [
   { label: '内网 URL', value: 'internal_url' },
   { label: '账号口令', value: 'password' },
 ]
+const termTypeOptions = [
+  { label: '企业名', value: 'company_name', aliases: ['企业名', '公司名', '企业名称', 'company_name', 'company name', 'company'] },
+  { label: '域名', value: 'domain', aliases: ['域名', '主域名', 'domain', 'root_domain', 'root domain'] },
+  { label: '项目名', value: 'project', aliases: ['项目名', '项目', 'project', 'repo', 'repository'] },
+  { label: '产品名', value: 'product', aliases: ['产品名', '产品', 'product'] },
+  { label: '自定义词', value: 'custom', aliases: ['自定义词', '自定义', 'custom', 'keyword', '关键词'] },
+]
+const termTypeAliasMap = new Map(
+  termTypeOptions.flatMap((item) => item.aliases.map((alias) => [normalizeImportToken(alias), item.value])),
+)
+const importColumnHeaders = {
+  term: ['检索词', '搜索词', '关键词', 'term', 'keyword', 'query'],
+  term_type: ['类型', '检索词类型', 'term_type', 'type'],
+  enabled: ['是否启用', '启用', '状态', 'enabled', 'enable', 'active'],
+}
 
 const statusLabelMap = {
   configured: '已配置',
@@ -288,6 +312,45 @@ function normalizeLines(value) {
     .split(/\r?\n/)
     .map((item) => item.trim())
     .filter(Boolean)
+}
+
+function normalizeImportToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function readImportCell(row, headers) {
+  const normalizedRow = Object.fromEntries(
+    Object.entries(row || {}).map(([key, value]) => [normalizeImportToken(key), value]),
+  )
+  for (const header of headers) {
+    const value = normalizedRow[normalizeImportToken(header)]
+    if (value != null && String(value).trim() !== '') return value
+  }
+  return ''
+}
+
+function normalizeImportedTermType(value) {
+  if (String(value || '').trim() === '') return 'custom'
+  return termTypeAliasMap.get(normalizeImportToken(value)) || ''
+}
+
+function normalizeImportedEnabled(value) {
+  const text = normalizeImportToken(value)
+  if (!text) return true
+  if (['1', 'true', 'yes', 'y', '是', '启用', '开启', '开', '有效'].includes(text)) return true
+  if (['0', 'false', 'no', 'n', '否', '停用', '关闭', '关', '禁用', '无效'].includes(text)) return false
+  return null
+}
+
+function termKey(item) {
+  return `${String(item?.term || '').trim().toLowerCase()}::${String(item?.term_type || 'custom').toLowerCase()}`
+}
+
+function loadXlsx() {
+  return import('xlsx')
 }
 
 function toMultilineText(values) {
@@ -382,6 +445,122 @@ function removeTerm(index) {
   watchlistForm.terms.splice(index, 1)
 }
 
+async function downloadTermTemplate() {
+  try {
+    const XLSX = await loadXlsx()
+    const rows = [
+      ['检索词', '类型', '是否启用'],
+    ]
+    const sheet = XLSX.utils.aoa_to_sheet(rows)
+    sheet['!cols'] = [{ wch: 30 }, { wch: 16 }, { wch: 12 }]
+    const exampleSheet = XLSX.utils.aoa_to_sheet([
+      ['检索词', '类型', '是否启用'],
+      ['example.com', '域名', '是'],
+      ['示例企业', '企业名', '是'],
+      ['示例项目', '项目名', '否'],
+    ])
+    exampleSheet['!cols'] = [{ wch: 30 }, { wch: 16 }, { wch: 12 }]
+    const instructionSheet = XLSX.utils.aoa_to_sheet([
+      ['字段', '填写要求'],
+      ['检索词', '必填，每行一个检索词。'],
+      ['类型', `可填：${termTypeOptions.map((item) => item.label).join('、')}；留空按自定义词导入。`],
+      ['是否启用', '可填：是/否、启用/停用、true/false、1/0；留空默认启用。'],
+    ])
+    instructionSheet['!cols'] = [{ wch: 18 }, { wch: 72 }]
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, sheet, '检索词')
+    XLSX.utils.book_append_sheet(workbook, exampleSheet, '示例')
+    XLSX.utils.book_append_sheet(workbook, instructionSheet, '填写说明')
+    XLSX.writeFile(workbook, '代码监测检索词导入模板.xlsx')
+  } catch (error) {
+    ElMessage.error(error.message || '下载模板失败')
+  }
+}
+
+function triggerTermImport() {
+  termImportInputRef.value?.click()
+}
+
+function parseTermImportRows(rows) {
+  const imported = []
+  const errors = []
+  const importedKeys = new Set()
+  for (const [index, row] of rows.entries()) {
+    const rowNumber = index + 2
+    const rawTerm = String(readImportCell(row, importColumnHeaders.term) || '').trim()
+    if (!rawTerm) continue
+    const termType = normalizeImportedTermType(readImportCell(row, importColumnHeaders.term_type))
+    const enabled = normalizeImportedEnabled(readImportCell(row, importColumnHeaders.enabled))
+    if (!termType) {
+      errors.push(`第 ${rowNumber} 行类型无效`)
+      continue
+    }
+    if (enabled == null) {
+      errors.push(`第 ${rowNumber} 行启用状态无效`)
+      continue
+    }
+    const term = { term: rawTerm, term_type: termType, enabled }
+    const key = termKey(term)
+    if (importedKeys.has(key)) continue
+    importedKeys.add(key)
+    imported.push(term)
+  }
+  return { imported, errors }
+}
+
+function mergeImportedTerms(imported) {
+  const existingKeys = new Set(watchlistForm.terms.filter((item) => String(item.term || '').trim()).map(termKey))
+  let skipped = 0
+  const nextTerms = []
+  for (const item of imported) {
+    const key = termKey(item)
+    if (existingKeys.has(key)) {
+      skipped += 1
+      continue
+    }
+    existingKeys.add(key)
+    nextTerms.push(item)
+  }
+  watchlistForm.terms.push(...nextTerms)
+  return { added: nextTerms.length, skipped }
+}
+
+async function handleTermImportFile(event) {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  importingTerms.value = true
+  try {
+    const XLSX = await loadXlsx()
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: 'array' })
+    const sheetName = workbook.SheetNames.includes('检索词') ? '检索词' : workbook.SheetNames[0]
+    const sheet = workbook.Sheets[sheetName]
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false })
+    const { imported, errors } = parseTermImportRows(rows)
+    if (errors.length) {
+      ElMessage.error(`${errors.slice(0, 3).join('；')}${errors.length > 3 ? ` 等 ${errors.length} 个错误` : ''}`)
+      return
+    }
+    if (!imported.length) {
+      ElMessage.warning('模板中没有可导入的检索词')
+      return
+    }
+    const { added, skipped } = mergeImportedTerms(imported)
+    if (!added) {
+      ElMessage.warning(`没有新增检索词，已跳过 ${skipped} 条重复项`)
+      return
+    }
+    await saveWatchlist({
+      successMessage: `已导入 ${added} 条检索词${skipped ? `，跳过 ${skipped} 条重复项` : ''}`,
+    })
+  } catch (error) {
+    ElMessage.error(error.message || '导入检索词失败')
+  } finally {
+    importingTerms.value = false
+  }
+}
+
 async function loadSessions() {
   loadingSessions.value = true
   try {
@@ -432,7 +611,7 @@ async function loadWatchlists() {
   }
 }
 
-async function saveWatchlist() {
+async function saveWatchlist({ successMessage = '代码监测配置已保存' } = {}) {
   if (!watchlistForm.name.trim()) {
     ElMessage.error('请输入监测对象名称')
     return
@@ -454,7 +633,7 @@ async function saveWatchlist() {
     })
     applyWatchlist(payload)
     await loadWatchlists()
-    ElMessage.success('代码监测配置已保存')
+    ElMessage.success(successMessage)
   } catch (error) {
     ElMessage.error(error.message || '保存监测配置失败')
   } finally {
@@ -670,6 +849,17 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.watchlist-terms__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.term-import-input {
+  display: none;
+}
+
 .watchlist-term-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 160px 96px 80px;
@@ -683,6 +873,15 @@ onMounted(async () => {
   .watchlist-term-row,
   .enterprise-profile__grid {
     grid-template-columns: 1fr;
+  }
+
+  .watchlist-terms__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .watchlist-terms__actions {
+    justify-content: flex-start;
   }
 }
 </style>

@@ -7,15 +7,51 @@
         </el-button>
       </el-badge>
 
-      <el-button class="header__profile-btn" aria-label="个人用户">
-        <span class="header__profile-avatar">
-          <el-icon><UserFilled /></el-icon>
-        </span>
-        <span>个人用户</span>
-      </el-button>
+      <el-dropdown trigger="click" @command="handleUserCommand">
+        <el-button class="header__profile-btn" aria-label="用户菜单">
+          <span class="header__profile-avatar">
+            <el-icon><UserFilled /></el-icon>
+          </span>
+          <span class="header__profile-name">{{ displayName }}</span>
+          <el-icon class="header__profile-caret"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item disabled>账号：{{ username }}</el-dropdown-item>
+            <el-dropdown-item command="logout" divided>
+              <el-icon><SwitchButton /></el-icon>
+              退出登录
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
   </header>
 </template>
+
+<script setup>
+import { computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { useAuth } from '@/composables/useAuth'
+
+const router = useRouter()
+const { state, loadCurrentUser, logout } = useAuth()
+
+const username = computed(() => state.user?.username || 'admin')
+const displayName = computed(() => state.user?.display_name || username.value)
+
+onMounted(() => {
+  loadCurrentUser()
+})
+
+async function handleUserCommand(command) {
+  if (command !== 'logout') return
+  await logout()
+  ElMessage.success('已退出登录')
+  router.replace('/login')
+}
+</script>
 
 <style lang="scss" scoped>
 .header {
@@ -70,6 +106,19 @@
   color: var(--ti-primary);
 }
 
+.header__profile-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header__profile-caret {
+  margin-left: 6px;
+  color: var(--ti-text-muted);
+  font-size: 14px;
+}
+
 @media (max-width: 767px) {
   .header {
     min-height: 72px;
@@ -78,6 +127,10 @@
 
   .header__profile-btn {
     padding-right: 12px;
+  }
+
+  .header__profile-name {
+    max-width: 80px;
   }
 }
 </style>

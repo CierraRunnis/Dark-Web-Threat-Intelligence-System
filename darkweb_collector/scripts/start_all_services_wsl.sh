@@ -14,6 +14,13 @@ SERVICE_WAIT_SECONDS=45
 SCHEDULER_INTERVAL_SECONDS="${SCHEDULER_INTERVAL_SECONDS:-60}"
 VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
 VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-300}"
+DARKWEB_PANSOU_ENABLED="${DARKWEB_PANSOU_ENABLED:-1}"
+PANSOU_PORT="${PANSOU_PORT:-8888}"
+PANSOU_API_BASE="${PANSOU_API_BASE:-http://127.0.0.1:${PANSOU_PORT}}"
+PANSOU_CONTAINER_NAME="${PANSOU_CONTAINER_NAME:-darkweb-pansou}"
+PANSOU_IMAGE="${PANSOU_IMAGE:-ghcr.io/fish2018/pansou:latest}"
+PANSOU_CHANNELS="${PANSOU_CHANNELS:-tgsearchers3}"
+PANSOU_ENABLED_PLUGINS="${PANSOU_ENABLED_PLUGINS:-panyq,pansearch,qupansou,hunhepan,jikepan,pan666}"
 BROWSER_CONCURRENCY="${DARKWEB_BROWSER_CONCURRENCY:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -509,6 +516,9 @@ build_env_exports() {
   exports+=("export DARKWEB_COLLECTOR_DB_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB")")
   exports+=("export DARKWEB_COLLECTOR_SOURCE_DB_PATH=$(printf '%q' "$COLLECTOR_SOURCE_DB")")
   exports+=("export DARKWEB_RUNTIME_DB_META_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB_META")")
+  if [[ "$DARKWEB_PANSOU_ENABLED" != "0" ]]; then
+    exports+=("export PANSOU_API_BASE=$(printf '%q' "$PANSOU_API_BASE")")
+  fi
   exports+=("export DARKWEB_COLLECTOR_SITES_FILE=$(printf '%q' "$COLLECTOR_SITES_FILE")")
   exports+=("export DARKWEB_COLLECTOR_OUTPUT_ROOT=$(printf '%q' "$COLLECTOR_OUTPUT_ROOT")")
   exports+=("export DARKWEB_API_PORT=$(printf '%q' "$API_PORT")")
@@ -591,6 +601,13 @@ write_user_env_file() {
     printf 'export DARKWEB_COLLECTOR_DB_PATH=%q\n' "$COLLECTOR_RUNTIME_DB"
     printf 'export DARKWEB_COLLECTOR_SOURCE_DB_PATH=%q\n' "$COLLECTOR_SOURCE_DB"
     printf 'export DARKWEB_RUNTIME_DB_META_PATH=%q\n' "$COLLECTOR_RUNTIME_DB_META"
+    printf 'export DARKWEB_PANSOU_ENABLED=%q\n' "$DARKWEB_PANSOU_ENABLED"
+    printf 'export PANSOU_PORT=%q\n' "$PANSOU_PORT"
+    printf 'export PANSOU_API_BASE=%q\n' "$PANSOU_API_BASE"
+    printf 'export PANSOU_CONTAINER_NAME=%q\n' "$PANSOU_CONTAINER_NAME"
+    printf 'export PANSOU_IMAGE=%q\n' "$PANSOU_IMAGE"
+    printf 'export PANSOU_CHANNELS=%q\n' "$PANSOU_CHANNELS"
+    printf 'export PANSOU_ENABLED_PLUGINS=%q\n' "$PANSOU_ENABLED_PLUGINS"
     printf 'export DARKWEB_COLLECTOR_SITES_FILE=%q\n' "$COLLECTOR_SITES_FILE"
     printf 'export DARKWEB_COLLECTOR_OUTPUT_ROOT=%q\n' "$COLLECTOR_OUTPUT_ROOT"
     printf 'export DARKWEB_API_PORT=%q\n' "$API_PORT"
@@ -691,6 +708,49 @@ register_darkweb_command() {
   info "open a new shell, or run: . \"$USER_ENV_FILE\" && export PATH=\"$USER_BIN_DIR:\$PATH\""
 }
 
+ensure_pansou() {
+  if [[ "$DARKWEB_PANSOU_ENABLED" == "0" ]]; then
+    info "PanSou disabled"
+    return 0
+  fi
+
+  local health_url="${PANSOU_API_BASE%/}/api/health"
+
+  if curl -fsS "$health_url" >/dev/null 2>&1; then
+    info "PanSou already running: $PANSOU_API_BASE"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "PanSou is enabled but docker is unavailable; netdisk scan will continue with HTML aggregation sources only"
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    warn "PanSou is enabled but docker engine is not running; netdisk scan will continue with HTML aggregation sources only"
+    return 0
+  fi
+  if docker ps --filter "name=^/${PANSOU_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "$PANSOU_CONTAINER_NAME"; then
+    info "PanSou container already running: $PANSOU_CONTAINER_NAME"
+    return 0
+  fi
+  if docker ps -a --filter "name=^/${PANSOU_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "$PANSOU_CONTAINER_NAME"; then
+    info "starting PanSou container: $PANSOU_CONTAINER_NAME"
+    docker start "$PANSOU_CONTAINER_NAME" >/dev/null || warn "failed to start PanSou container"
+  else
+    info "creating PanSou container: $PANSOU_CONTAINER_NAME"
+    docker run -d \
+      --name "$PANSOU_CONTAINER_NAME" \
+      -p "${PANSOU_PORT}:8888" \
+      -e CHANNELS="$PANSOU_CHANNELS" \
+      -e ENABLED_PLUGINS="$PANSOU_ENABLED_PLUGINS" \
+      "$PANSOU_IMAGE" >/dev/null || warn "failed to create PanSou container"
+  fi
+  if ! wait_for_condition "curl -fsS $(printf '%q' "$health_url") >/dev/null 2>&1" 30; then
+    warn "PanSou did not become ready within 30s: $PANSOU_API_BASE"
+  else
+    info "PanSou: $PANSOU_API_BASE"
+  fi
+}
+
 ensure_environment() {
   validate_positive_integer "$API_PORT" "DARKWEB_API_PORT"
   validate_positive_integer "$FRONTEND_PORT" "DARKWEB_FRONTEND_PORT"
@@ -733,6 +793,7 @@ ensure_environment() {
 
   site_configs_ready || die "failed to load crawler site configuration from $COLLECTOR_SITES_FILE"
   sync_runtime_db_to_source
+  ensure_pansou
 }
 
 stop_session_if_exists() {
@@ -767,7 +828,7 @@ if [[ \$status -ne 0 ]]; then
 fi
 exec bash
 "
-  tmux new-window -t "${SESSION_NAME}:" -n "$window_name" "bash -lc $(printf '%q' "$wrapped_command")"
+  tmux new-window -t "${SESSION_NAME}:" -n "$window_name" "bash -c $(printf '%q' "$wrapped_command")"
 }
 
 wait_for_condition() {
@@ -776,7 +837,7 @@ wait_for_condition() {
   local started_at
   started_at="$(date +%s)"
   while true; do
-    if bash -lc "$command_body" >/dev/null 2>&1; then
+    if bash -c "$command_body" >/dev/null 2>&1; then
       return 0
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
@@ -1043,7 +1104,7 @@ while true; do
 done
 "
 
-  tmux new-session -d -s "$SESSION_NAME" -n "redis" "bash -lc $(printf '%q' "$redis_command")"
+  tmux new-session -d -s "$SESSION_NAME" -n "redis" "bash -c $(printf '%q' "$redis_command")"
   tmux setw -t "$SESSION_NAME" remain-on-exit on
 
   tmux_new_window "api" "$api_log" "$api_command"
