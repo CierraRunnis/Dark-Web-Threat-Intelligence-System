@@ -76,9 +76,8 @@ class VersionCheckTests(unittest.TestCase):
         self.assertEqual("当前已是最新版本", payload["message"])
 
     def test_system_version_endpoint(self) -> None:
-        with patch.dict(os.environ, {"DARKWEB_API_AUTH_DISABLED": "1"}, clear=False):
-            with patch("darkweb_collector.api_app.build_version_status", return_value={"status": "ok", "branch": "main"}):
-                response = TestClient(app).get("/api/system/version")
+        with patch("darkweb_collector.api_app.build_version_status", return_value={"status": "ok", "branch": "main"}):
+            response = TestClient(app).get("/api/system/version")
 
         self.assertEqual(200, response.status_code)
         self.assertEqual("main", response.json()["branch"])
