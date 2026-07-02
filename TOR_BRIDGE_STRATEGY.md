@@ -49,7 +49,7 @@ curl --socks5-hostname 127.0.0.1:9150 https://check.torproject.org/api/ip
 Reusable shell helper:
 
 ```bash
-source /mnt/d/bishe/torbrowser-socks-env.sh
+source /mnt/d/project/torbrowser-socks-env.sh
 curl https://check.torproject.org/api/ip
 ```
 
