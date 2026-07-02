@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
-from html import unescape
+from html import escape, unescape
 from html.parser import HTMLParser
 import json
 import logging
@@ -34,6 +34,7 @@ from darkweb_collector.db import (
     list_netdisk_source_states,
     replace_exposure_watch_terms,
     reset_netdisk_source_states,
+    update_document_hit_snapshot_files,
     update_document_hit_last_snapshot,
     upsert_document_hit,
     upsert_exposure_watchlist,
@@ -143,11 +144,32 @@ DISCOVERY_SOURCES: tuple[DiscoverySource, ...] = (
     DiscoverySource("doc88", "道客巴巴直搜", "https://www.doc88.com/search?q={query}", "document_library"),
     DiscoverySource("book118", "原创力直搜", "https://max.book118.com/search.html?q={query}", "document_library"),
     DiscoverySource("iask_share", "爱问共享直搜", "https://ishare.iask.sina.com.cn/search.php?key={query}", "document_library"),
+    DiscoverySource("renrendoc", "人人文库", "https://www.renrendoc.com/search.html?keyword={query}", "document_library"),
+    DiscoverySource("jinchutou", "金锄头文库", "https://so.jinchutou.com/search.html?keyword={query}", "document_library"),
+    DiscoverySource("mbalib_doc", "MBA智库文档", "https://doc.mbalib.com/search?q={query}", "document_library"),
+    DiscoverySource("wenku_360", "360文库", "https://wenku.so.com/s?q={query}", "document_library"),
+    DiscoverySource("tencent_wenku", "腾讯文库", "https://wenku.docs.qq.com/search?keyword={query}", "document_library"),
+    DiscoverySource("quark_doc", "夸克文档", "https://doc.quark.cn/search?keyword={query}", "document_library"),
+    DiscoverySource("taodocs", "淘豆网", "https://www.taodocs.com/search.html?q={query}", "document_library"),
+    DiscoverySource("doczj", "文档之家", "https://www.doczj.com/search.html?q={query}", "document_library"),
+    DiscoverySource("souhong_wenku", "搜弘文库", "https://mwenku.chochina.com/search?q={query}", "document_library"),
 )
 
 NETDISK_DEFAULT_SOURCE_KEYS = ("pikasoo", "lzpanx", "esoua", "pandashi", "pansou")
 NETDISK_OPTIONAL_SOURCE_KEYS = ("panhub",)
 NETDISK_FALLBACK_SOURCE_KEYS = ("xiaobaipan", "xiaobudian", "lingfengyun", "dalipan", "panyq")
+DOCUMENT_LIBRARY_DEFAULT_SOURCE_KEYS = (
+    "renrendoc",
+    "jinchutou",
+    "mbalib_doc",
+    "wenku_360",
+    "tencent_wenku",
+    "quark_doc",
+    "taodocs",
+    "doczj",
+    "souhong_wenku",
+)
+DOCUMENT_LIBRARY_RESTRICTED_SOURCE_KEYS = ("baidu_wenku", "docin", "doc88", "book118", "iask_share")
 NETDISK_PAGINATED_SOURCE_KEYS = {"pikasoo", "lzpanx", "esoua", "pandashi"}
 NETDISK_SEARCH_PAGE_SAFETY_CAP = 20
 NETDISK_SOURCE_NOTES = {
@@ -163,9 +185,26 @@ NETDISK_SOURCE_NOTES = {
     "dalipan": "当前搜索页返回 404，默认不扫描",
     "panyq": "当前触发验证码/安全验证，默认不扫描",
 }
+DOCUMENT_LIBRARY_SOURCE_NOTES = {
+    "renrendoc": "公开文档列表和详情页可匿名访问，默认扫描",
+    "jinchutou": "公开文档搜索和详情页可匿名访问，默认扫描",
+    "mbalib_doc": "管理类文档资源丰富，默认扫描公开搜索和详情页",
+    "wenku_360": "公开文库搜索入口，默认低频扫描",
+    "tencent_wenku": "公开文库入口，默认采集公开预览线索",
+    "quark_doc": "公开文档入口，默认采集公开预览线索",
+    "taodocs": "公开分类和详情页可匿名访问，默认扫描",
+    "doczj": "公开文档列表和详情页可匿名访问，默认扫描",
+    "souhong_wenku": "偏企业报告和 HR 文档，默认扫描",
+    "baidu_wenku": "登录和风控较重，默认不扫描",
+    "docin": "登录和付费限制较多，默认不扫描",
+    "doc88": "登录和付费限制较多，默认不扫描",
+    "book118": "登录、付费和采集限制较多，默认不扫描",
+    "iask_share": "老站稳定性不确定，默认不扫描",
+}
 NETDISK_SCAN_MODE_ENV = "NETDISK_SCAN_MODE"
 NETDISK_SCAN_MODE_LEGACY = "legacy"
 NETDISK_SCAN_MODE_INCREMENTAL = "incremental"
+DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_ENV = "DARKWEB_DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_SOURCES"
 
 
 DEFAULT_TERMS = [
@@ -174,6 +213,8 @@ DEFAULT_TERMS = [
     {"term": "内部", "term_type": "sensitive_keyword", "weight": 6, "enabled": True},
 ]
 DEFAULT_SOURCE_FAMILIES = ["netdisk_aggregator", "search_engine", "document_library"]
+DEFAULT_PAGE_LIMIT = 4
+DOCUMENT_LIBRARY_DEFAULT_PAGE_LIMIT = 10
 DEFAULT_FILE_TYPES = ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "zip", "rar", "7z", "txt", "csv"]
 SOURCE_FAMILY_LABELS = {
     "search_engine": "搜索引擎监测",
@@ -290,8 +331,19 @@ def _normalize_source_families(value: Any) -> list[str]:
     return rows or list(DEFAULT_SOURCE_FAMILIES)
 
 
+def _default_page_limit_for_source_families(source_families: Any) -> int:
+    families = _normalize_source_families(source_families)
+    if families == ["document_library"]:
+        return DOCUMENT_LIBRARY_DEFAULT_PAGE_LIMIT
+    return DEFAULT_PAGE_LIMIT
+
+
 def _include_unstable_netdisk_sources() -> bool:
     return _normalize_text(os.getenv("DARKWEB_NETDISK_INCLUDE_UNSTABLE_SOURCES")).lower() in {"1", "true", "yes"}
+
+
+def _include_restricted_document_library_sources() -> bool:
+    return _normalize_text(os.getenv(DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_ENV)).lower() in {"1", "true", "yes"}
 
 
 def netdisk_source_policy(source_key: str) -> dict[str, Any]:
@@ -322,6 +374,26 @@ def netdisk_source_policy(source_key: str) -> dict[str, Any]:
     return {}
 
 
+def document_library_source_policy(source_key: str) -> dict[str, Any]:
+    key = _normalize_text(source_key)
+    note = DOCUMENT_LIBRARY_SOURCE_NOTES.get(key, "")
+    if key in DOCUMENT_LIBRARY_DEFAULT_SOURCE_KEYS:
+        return {
+            "scan_tier": "primary",
+            "scan_enabled": True,
+            "scan_priority": DOCUMENT_LIBRARY_DEFAULT_SOURCE_KEYS.index(key) + 1,
+            "scan_note": note,
+        }
+    if key in DOCUMENT_LIBRARY_RESTRICTED_SOURCE_KEYS:
+        return {
+            "scan_tier": "restricted",
+            "scan_enabled": _include_restricted_document_library_sources(),
+            "scan_priority": 100 + DOCUMENT_LIBRARY_RESTRICTED_SOURCE_KEYS.index(key) + 1,
+            "scan_note": note,
+        }
+    return {}
+
+
 def _netdisk_scan_mode() -> str:
     value = _normalize_text(os.getenv(NETDISK_SCAN_MODE_ENV)).lower()
     if value == NETDISK_SCAN_MODE_INCREMENTAL:
@@ -329,15 +401,20 @@ def _netdisk_scan_mode() -> str:
     return NETDISK_SCAN_MODE_LEGACY
 
 
-def _netdisk_source_key_rows() -> list[dict[str, str]]:
+def _source_key_rows(source_family: str | None = None) -> list[dict[str, str]]:
+    selected_family = _normalize_text(source_family)
     return [
         {"source_key": source.key, "source_label": source.label}
         for source in DISCOVERY_SOURCES
-        if _source_family_for_source(source) == "netdisk_aggregator"
+        if not selected_family or _source_family_for_source(source) == selected_family
     ]
 
 
-def _netdisk_source_label(source_key: str) -> str:
+def _netdisk_source_key_rows() -> list[dict[str, str]]:
+    return _source_key_rows("netdisk_aggregator")
+
+
+def _source_label(source_key: str) -> str:
     key = _normalize_text(source_key)
     for source in DISCOVERY_SOURCES:
         if source.key == key:
@@ -345,10 +422,18 @@ def _netdisk_source_label(source_key: str) -> str:
     return key
 
 
-def ensure_netdisk_source_health_defaults() -> None:
+def _netdisk_source_label(source_key: str) -> str:
+    return _source_label(source_key)
+
+
+def ensure_source_health_defaults(source_family: str | None = None) -> None:
     with get_db_connection() as connection:
-        ensure_netdisk_source_health_records(connection, _netdisk_source_key_rows(), _now_utc_iso())
+        ensure_netdisk_source_health_records(connection, _source_key_rows(source_family), _now_utc_iso())
         connection.commit()
+
+
+def ensure_netdisk_source_health_defaults() -> None:
+    ensure_source_health_defaults("netdisk_aggregator")
 
 
 def _ordered_discovery_sources(source_families: list[str] | None = None) -> list[DiscoverySource]:
@@ -362,10 +447,16 @@ def _ordered_discovery_sources(source_families: list[str] | None = None) -> list
             policy = netdisk_source_policy(source.key)
             if policy and not policy.get("scan_enabled"):
                 continue
+        if source_family == "document_library":
+            policy = document_library_source_policy(source.key)
+            if policy and not policy.get("scan_enabled"):
+                continue
         sources.append(source)
 
     if selected == {"netdisk_aggregator"}:
         return sorted(sources, key=lambda item: netdisk_source_policy(item.key).get("scan_priority", 999))
+    if selected == {"document_library"}:
+        return sorted(sources, key=lambda item: document_library_source_policy(item.key).get("scan_priority", 999))
     return sources
 
 
@@ -445,9 +536,32 @@ def _netdisk_error_status(error_text: str) -> str:
         return "login_required"
     if "captcha" in lowered or "security_verification" in lowered:
         return "captcha"
-    if "rate_limited" in lowered or "too many" in lowered:
+    if "rate_limited" in lowered or "too many" in lowered or "429" in lowered:
         return "rate_limited"
     return "error"
+
+
+def _source_health_payload(source: DiscoverySource, error_text: str, updated_at: str) -> dict[str, Any]:
+    status = _netdisk_error_status(error_text) if error_text else "healthy"
+    payload: dict[str, Any] = {
+        "source_key": source.key,
+        "updated_at": updated_at,
+        "status": status,
+    }
+    if error_text:
+        payload.update(
+            {
+                "error_delta": 1,
+                "last_error_at": updated_at,
+                "last_error": error_text,
+                "login_required_delta": 1 if status == "login_required" else 0,
+                "captcha_delta": 1 if status == "captcha" else 0,
+                "rate_limited_delta": 1 if status == "rate_limited" else 0,
+            }
+        )
+    else:
+        payload.update({"success_delta": 1, "last_success_at": updated_at})
+    return payload
 
 
 def _source_scan_stat(source: DiscoverySource) -> dict[str, Any]:
@@ -2060,6 +2174,7 @@ def _search_candidate_pages_for_source(
     scan_mode: str = NETDISK_SCAN_MODE_LEGACY,
     netdisk_state: dict[str, Any] | None = None,
     state_updates: list[dict[str, Any]] | None = None,
+    health_updates: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     page_seen_urls: set[str] = set()
@@ -2137,7 +2252,6 @@ def _search_candidate_pages_for_source(
         else:
             next_page = previous_next_page
         updated_at = _now_utc_iso()
-        status = _netdisk_error_status(error_text) if error_text else "healthy"
         consecutive_empty_pages = (
             int((netdisk_state or {}).get("consecutive_empty_pages") or 0) + 1
             if last_page_empty
@@ -2148,24 +2262,7 @@ def _search_candidate_pages_for_source(
             if last_page_repeated
             else 0
         )
-        health_payload = {
-            "source_key": source.key,
-            "updated_at": updated_at,
-            "status": status,
-        }
-        if error_text:
-            health_payload.update(
-                {
-                    "error_delta": 1,
-                    "last_error_at": updated_at,
-                    "last_error": error_text,
-                    "login_required_delta": 1 if status == "login_required" else 0,
-                    "captcha_delta": 1 if status == "captcha" else 0,
-                    "rate_limited_delta": 1 if status == "rate_limited" else 0,
-                }
-            )
-        else:
-            health_payload.update({"success_delta": 1, "last_success_at": updated_at})
+        health_payload = _source_health_payload(source, error_text, updated_at)
         state_updates.append(
             {
                 "watchlist_id": int(watchlist_id),
@@ -2187,6 +2284,8 @@ def _search_candidate_pages_for_source(
                 "_health": health_payload,
             }
         )
+    elif source_family == "document_library" and health_updates is not None:
+        health_updates.append(_source_health_payload(source, error_text, _now_utc_iso()))
     return rows
 
 
@@ -2236,18 +2335,168 @@ def _write_snapshot_files(
     term: str,
     page_title: str,
     html: str,
-    screenshot_png: bytes,
+    screenshot_png: bytes | None,
     payload: dict[str, Any],
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     base_dir = _query_output_dir(watchlist_name, platform_key, term)
     stem = safe_stem(page_title or platform_key, "detail")
     html_path = base_dir / f"{stem}.html"
-    screenshot_path = base_dir / f"{stem}.png"
     dump_text(html_path, html)
-    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-    screenshot_path.write_bytes(screenshot_png)
+    screenshot_path = None
+    if screenshot_png:
+        screenshot_path = base_dir / f"{stem}.png"
+        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_path.write_bytes(screenshot_png)
     dump_json(base_dir / f"{stem}.json", payload)
     return html_path, screenshot_path
+
+
+def _mirror_html_from_hit_payload(
+    *,
+    watchlist_name: str,
+    platform_key: str,
+    platform_label: str,
+    page_title: str,
+    page_url: str,
+    source_url: str,
+    source_query: str,
+    access_state: str,
+    preview_text: str,
+    matched_terms: list[dict[str, Any]],
+    file_list: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> str:
+    def cell(label: str, value: Any) -> str:
+        return f"<tr><th>{escape(label)}</th><td>{escape(str(value or ''))}</td></tr>"
+
+    term_rows = "".join(
+        f"<li>{escape(str(item.get('term') or ''))} <span>{escape(str(item.get('term_type') or ''))}</span></li>"
+        for item in matched_terms
+        if _normalize_text(item.get("term"))
+    )
+    file_rows = "".join(
+        "<tr>"
+        f"<td>{escape(str(item.get('name') or ''))}</td>"
+        f"<td>{escape(str(item.get('path') or item.get('name') or ''))}</td>"
+        f"<td>{escape(str(item.get('size') or ''))}</td>"
+        f"<td>{escape(str(item.get('source') or ''))}</td>"
+        "</tr>"
+        for item in file_list
+    )
+    metadata_json = escape(json.dumps(payload, ensure_ascii=False, indent=2))
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>{escape(page_title or platform_label or platform_key)}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #172033; background: #f5f7fb; }}
+    main {{ max-width: 1120px; margin: 0 auto; padding: 32px 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 24px; }}
+    section {{ margin-top: 18px; padding: 18px; border: 1px solid #dbe3f1; border-radius: 12px; background: #fff; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 10px 12px; border-bottom: 1px solid #edf1f7; text-align: left; vertical-align: top; }}
+    th {{ width: 160px; color: #667085; font-weight: 600; }}
+    pre {{ white-space: pre-wrap; word-break: break-word; }}
+    ul {{ margin: 0; padding-left: 18px; }}
+    .muted {{ color: #667085; }}
+  </style>
+</head>
+<body>
+  <main>
+    <p class="muted">Document exposure mirror snapshot</p>
+    <h1>{escape(page_title or page_url)}</h1>
+    <section>
+      <table>
+        {cell("Watchlist", watchlist_name)}
+        {cell("Platform", platform_label or platform_key)}
+        {cell("Access state", access_state)}
+        {cell("Source query", source_query)}
+        {cell("Source URL", source_url)}
+        {cell("Page URL", page_url)}
+      </table>
+    </section>
+    <section>
+      <h2>Matched terms</h2>
+      <ul>{term_rows or "<li>None</li>"}</ul>
+    </section>
+    <section>
+      <h2>Preview text</h2>
+      <pre>{escape(preview_text or "")}</pre>
+    </section>
+    <section>
+      <h2>File list</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Path</th><th>Size</th><th>Source</th></tr></thead>
+        <tbody>{file_rows or '<tr><td colspan="4">No parsed files</td></tr>'}</tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Raw metadata</h2>
+      <pre>{metadata_json}</pre>
+    </section>
+  </main>
+</body>
+</html>"""
+
+
+def _list_from_payload(value: Any) -> list[Any]:
+    parsed = _parse_json(value, value)
+    return parsed if isinstance(parsed, list) else []
+
+
+def _ensure_netdisk_snapshot_mirror(
+    *,
+    row: dict[str, Any],
+    watchlist: dict[str, Any] | None,
+    snapshot: dict[str, Any],
+    matched_terms: list[dict[str, Any]],
+    raw_payload: dict[str, Any],
+) -> str:
+    html_path_raw = _normalize_text(snapshot.get("html_path"))
+    if html_path_raw and Path(html_path_raw).exists():
+        return html_path_raw
+
+    platform_key = str(row.get("platform") or "")
+    platform = get_exposure_platform(platform_key) if platform_key in PLATFORMS else None
+    file_list = _list_from_payload(snapshot.get("file_list_json"))
+    if not file_list:
+        file_list = _build_file_list(
+            [_normalize_text(item) for item in _list_from_payload(raw_payload.get("file_names")) if _normalize_text(item)],
+            [_normalize_text(item) for item in _list_from_payload(raw_payload.get("file_sizes")) if _normalize_text(item)],
+            [item for item in _list_from_payload(raw_payload.get("file_entries")) if isinstance(item, dict)],
+        )
+
+    page_title = _normalize_text(snapshot.get("page_title")) or _normalize_text(row.get("title")) or platform_key
+    page_url = _normalize_text(snapshot.get("page_url")) or _normalize_text(row.get("canonical_url"))
+    source_query = _normalize_text(snapshot.get("source_query")) or _normalize_text(raw_payload.get("source_query"))
+    source_url = _normalize_text(snapshot.get("source_url")) or _normalize_text(raw_payload.get("source_url"))
+    preview_text = _normalize_text(snapshot.get("preview_text") or snapshot.get("ocr_text") or raw_payload.get("preview_text"))
+    access_state = _normalize_text(snapshot.get("access_state")) or _normalize_text(row.get("access_state")) or "unknown"
+    mirror_html = _mirror_html_from_hit_payload(
+        watchlist_name=str((watchlist or {}).get("name") or row.get("watchlist_id") or "watchlist"),
+        platform_key=platform_key,
+        platform_label=platform.label if platform else platform_key,
+        page_title=page_title,
+        page_url=page_url,
+        source_url=source_url,
+        source_query=source_query,
+        access_state=access_state,
+        preview_text=preview_text,
+        matched_terms=matched_terms,
+        file_list=[item for item in file_list if isinstance(item, dict)],
+        payload=raw_payload,
+    )
+    html_path, _ = _write_snapshot_files(
+        str((watchlist or {}).get("name") or row.get("watchlist_id") or "watchlist"),
+        platform_key or "netdisk",
+        source_query or "mirror",
+        page_title,
+        mirror_html,
+        None,
+        raw_payload,
+    )
+    return str(html_path)
 
 
 def ensure_default_watchlist() -> dict[str, Any]:
@@ -2257,12 +2506,13 @@ def ensure_default_watchlist() -> dict[str, Any]:
             watchlist = existing[0]
             terms = list_exposure_watch_terms(connection, int(watchlist["id"]))
             metadata = _watchlist_metadata(watchlist)
+            source_families = metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
             return {
                 **watchlist,
                 "terms": terms,
-                "source_families": metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES),
+                "source_families": source_families,
                 "file_types": metadata.get("file_types") or list(DEFAULT_FILE_TYPES),
-                "page_limit": int(metadata.get("page_limit") or 4),
+                "page_limit": int(metadata.get("page_limit") or _default_page_limit_for_source_families(source_families)),
                 "detail_fetch": bool(metadata.get("detail_fetch", True)),
             }
         now = _now_utc_iso()
@@ -2322,13 +2572,14 @@ def list_watchlists_payload() -> list[dict[str, Any]]:
         payloads = []
         for row in rows:
             metadata = _watchlist_metadata(row)
+            source_families = metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
             payloads.append(
                 {
                     **row,
                     "terms": list_exposure_watch_terms(connection, int(row["id"])),
-                    "source_families": metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES),
+                    "source_families": source_families,
                     "file_types": metadata.get("file_types") or list(DEFAULT_FILE_TYPES),
-                    "page_limit": int(metadata.get("page_limit") or 4),
+                    "page_limit": int(metadata.get("page_limit") or _default_page_limit_for_source_families(source_families)),
                     "detail_fetch": bool(metadata.get("detail_fetch", True)),
                 }
             )
@@ -2337,6 +2588,8 @@ def list_watchlists_payload() -> list[dict[str, Any]]:
 
 def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
     now = _now_utc_iso()
+    source_families = payload.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
+    page_limit = int(payload.get("page_limit") or _default_page_limit_for_source_families(source_families))
     with get_db_connection() as connection:
         watchlist_id = upsert_exposure_watchlist(
             connection,
@@ -2348,9 +2601,9 @@ def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "notes": payload.get("notes", ""),
                 "metadata_json": _json_dumps(
                     {
-                        "source_families": payload.get("source_families") or list(DEFAULT_SOURCE_FAMILIES),
+                        "source_families": source_families,
                         "file_types": payload.get("file_types") or list(DEFAULT_FILE_TYPES),
-                        "page_limit": int(payload.get("page_limit") or 4),
+                        "page_limit": page_limit,
                         "detail_fetch": bool(payload.get("detail_fetch", True)),
                     }
                 ),
@@ -2377,12 +2630,13 @@ def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
         connection.commit()
         watchlist = get_exposure_watchlist(connection, watchlist_id)
         metadata = _watchlist_metadata(watchlist or {})
+        saved_source_families = metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
         return {
             **(watchlist or {}),
             "terms": list_exposure_watch_terms(connection, watchlist_id),
-            "source_families": metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES),
+            "source_families": saved_source_families,
             "file_types": metadata.get("file_types") or list(DEFAULT_FILE_TYPES),
-            "page_limit": int(metadata.get("page_limit") or 4),
+            "page_limit": int(metadata.get("page_limit") or _default_page_limit_for_source_families(saved_source_families)),
             "detail_fetch": bool(metadata.get("detail_fetch", True)),
         }
 
@@ -2408,7 +2662,17 @@ def scan_watchlist_once(
     watchlist_meta = _watchlist_metadata(watchlist)
     selected_source_families = _normalize_source_families(source_families or watchlist_meta.get("source_families"))
     selected_file_types = _normalize_file_types(file_types or watchlist_meta.get("file_types"))
-    selected_page_limit = int(page_limit or watchlist_meta.get("page_limit") or max_candidates_per_term or 4)
+    watchlist_source_families = _normalize_source_families(watchlist_meta.get("source_families"))
+    use_watchlist_page_limit = not source_families or selected_source_families == watchlist_source_families
+    configured_page_limit = page_limit or (watchlist_meta.get("page_limit") if use_watchlist_page_limit else None)
+    selected_page_limit = int(
+        configured_page_limit
+        or (
+            _default_page_limit_for_source_families(selected_source_families)
+            if selected_source_families == ["document_library"]
+            else max_candidates_per_term or DEFAULT_PAGE_LIMIT
+        )
+    )
     selected_detail_fetch = bool(
         detail_fetch
         if detail_fetch is not None
@@ -2421,6 +2685,7 @@ def scan_watchlist_once(
     )
     netdisk_states_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     netdisk_state_updates: list[dict[str, Any]] = []
+    source_health_updates: list[dict[str, Any]] = []
     if "netdisk_aggregator" in selected_source_families:
         ensure_netdisk_source_health_defaults()
         with get_db_connection() as connection:
@@ -2428,6 +2693,8 @@ def scan_watchlist_once(
                 (str(row.get("source_key") or ""), str(row.get("term") or "")): row
                 for row in list_netdisk_source_states(connection, watchlist_id=int(watchlist["id"]))
             }
+    if "document_library" in selected_source_families:
+        ensure_source_health_defaults("document_library")
 
     total_candidates = 0
     total_hits = 0
@@ -2456,6 +2723,7 @@ def scan_watchlist_once(
                 scan_mode=selected_netdisk_scan_mode,
                 netdisk_state=netdisk_states_by_key.get((source.key, term)),
                 state_updates=netdisk_state_updates,
+                health_updates=source_health_updates,
             )
             total_candidates += len(candidates)
             for candidate in candidates:
@@ -2681,18 +2949,38 @@ def scan_watchlist_once(
                     )
                     html_path = ""
                     screenshot_path = ""
-                    if detail_platform.platform_type != "netdisk_share":
-                        html_path_obj, screenshot_path_obj = _write_snapshot_files(
-                            str(watchlist["name"]),
-                            detail_platform.key,
-                            term,
-                            detail["page_title"],
-                            detail["html"],
-                            detail["screenshot_png"],
-                            raw_payload,
+                    file_list_payload = _build_file_list(
+                        detail["file_names"],
+                        detail.get("file_sizes") or [],
+                        detail.get("file_entries") or [],
+                    )
+                    snapshot_html = str(detail.get("html") or "").strip()
+                    if not snapshot_html:
+                        snapshot_html = _mirror_html_from_hit_payload(
+                            watchlist_name=str(watchlist["name"]),
+                            platform_key=detail_platform.key,
+                            platform_label=detail_platform.label,
+                            page_title=detail["page_title"],
+                            page_url=detail["page_url"],
+                            source_url=candidate_source_url,
+                            source_query=term,
+                            access_state=detail["access_state"],
+                            preview_text=detail["preview_text"],
+                            matched_terms=matches,
+                            file_list=file_list_payload,
+                            payload=raw_payload,
                         )
-                        html_path = str(html_path_obj)
-                        screenshot_path = str(screenshot_path_obj)
+                    html_path_obj, screenshot_path_obj = _write_snapshot_files(
+                        str(watchlist["name"]),
+                        detail_platform.key,
+                        term,
+                        detail["page_title"],
+                        snapshot_html,
+                        detail.get("screenshot_png") or None,
+                        raw_payload,
+                    )
+                    html_path = str(html_path_obj)
+                    screenshot_path = str(screenshot_path_obj or "")
                     snapshot_id = insert_document_hit_snapshot(
                         connection,
                         {
@@ -2706,13 +2994,7 @@ def scan_watchlist_once(
                             "screenshot_path": screenshot_path,
                             "ocr_text": detail["ocr_text"],
                             "preview_text": detail["preview_text"],
-                            "file_list_json": _json_dumps(
-                                _build_file_list(
-                                    detail["file_names"],
-                                    detail.get("file_sizes") or [],
-                                    detail.get("file_entries") or [],
-                                )
-                            ),
+                            "file_list_json": _json_dumps(file_list_payload),
                             "access_state": detail["access_state"],
                             "matched_terms_json": _json_dumps(matches),
                             "raw_json": _json_dumps(raw_payload),
@@ -2749,6 +3031,8 @@ def scan_watchlist_once(
             health_payload = state_update.get("_health")
             if isinstance(health_payload, dict):
                 upsert_netdisk_source_health(connection, health_payload)
+        for health_payload in source_health_updates:
+            upsert_netdisk_source_health(connection, health_payload)
         insert_exposure_scan_run(
             connection,
             {
@@ -2781,12 +3065,17 @@ def list_document_exposures_payload(
     limit: int | None = 200,
 ) -> list[dict[str, Any]]:
     ensure_default_watchlist()
+    platform_type_filter = {
+        "document_library": "document_library",
+        "netdisk_aggregator": "netdisk_share",
+    }.get(_normalize_text(source_family))
     with get_db_connection() as connection:
         rows = list_document_hits(
             connection,
             watchlist_id=watchlist_id,
             review_status=review_status,
             platform=platform,
+            platform_type=platform_type_filter,
             access_state=access_state,
             limit=limit,
         )
@@ -2903,17 +3192,69 @@ def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
         if row is None:
             return None
         watchlist = get_exposure_watchlist(connection, int(row["watchlist_id"]))
+        matched_terms_for_mirror = json.loads(str(row.get("matched_terms_json") or "[]"))
+        raw_payload_for_mirror = json.loads(str(row.get("raw_json") or "{}"))
         snapshots = list_document_hit_snapshots(connection, hit_id)
+        if row.get("platform_type") == "netdisk_share":
+            mirror_updated = False
+            if not snapshots:
+                fallback_file_list = _build_file_list(
+                    [_normalize_text(item) for item in _list_from_payload(raw_payload_for_mirror.get("file_names")) if _normalize_text(item)],
+                    [_normalize_text(item) for item in _list_from_payload(raw_payload_for_mirror.get("file_sizes")) if _normalize_text(item)],
+                    [item for item in _list_from_payload(raw_payload_for_mirror.get("file_entries")) if isinstance(item, dict)],
+                )
+                snapshot_id = insert_document_hit_snapshot(
+                    connection,
+                    {
+                        "hit_id": int(hit_id),
+                        "fetched_at": row.get("last_seen_at") or _now_utc_iso(),
+                        "source_query": raw_payload_for_mirror.get("source_query") or "",
+                        "source_url": raw_payload_for_mirror.get("source_url") or "",
+                        "page_url": row.get("canonical_url") or raw_payload_for_mirror.get("page_url") or "",
+                        "page_title": row.get("title") or "",
+                        "html_path": "",
+                        "screenshot_path": "",
+                        "ocr_text": raw_payload_for_mirror.get("preview_text") or "",
+                        "preview_text": raw_payload_for_mirror.get("preview_text") or "",
+                        "file_list_json": _json_dumps(fallback_file_list),
+                        "access_state": row.get("access_state") or "unknown",
+                        "matched_terms_json": row.get("matched_terms_json") or "[]",
+                        "raw_json": row.get("raw_json") or "{}",
+                    },
+                )
+                update_document_hit_last_snapshot(connection, int(hit_id), snapshot_id)
+                snapshots = list_document_hit_snapshots(connection, hit_id)
+                mirror_updated = True
+            for snapshot in snapshots:
+                html_path_raw = _normalize_text(snapshot.get("html_path"))
+                if html_path_raw and Path(html_path_raw).exists():
+                    continue
+                html_path = _ensure_netdisk_snapshot_mirror(
+                    row=row,
+                    watchlist=watchlist,
+                    snapshot=snapshot,
+                    matched_terms=matched_terms_for_mirror,
+                    raw_payload=raw_payload_for_mirror,
+                )
+                update_document_hit_snapshot_files(
+                    connection,
+                    int(snapshot["id"]),
+                    html_path=html_path,
+                    screenshot_path=_normalize_text(snapshot.get("screenshot_path")),
+                )
+                mirror_updated = True
+            if mirror_updated:
+                connection.commit()
+                snapshots = list_document_hit_snapshots(connection, hit_id)
         reviews = list_document_hit_reviews(connection, hit_id)
     matched_terms = json.loads(str(row.get("matched_terms_json") or "[]"))
     raw_payload = json.loads(str(row.get("raw_json") or "{}"))
-    is_netdisk_detail = row.get("platform_type") == "netdisk_share"
     formatted_snapshots = []
     for item in snapshots:
         file_list = json.loads(str(item.get("file_list_json") or "[]"))
         matched_snapshot_terms = json.loads(str(item.get("matched_terms_json") or "[]"))
-        html_path_raw = "" if is_netdisk_detail else _normalize_text(item.get("html_path"))
-        screenshot_path_raw = "" if is_netdisk_detail else _normalize_text(item.get("screenshot_path"))
+        html_path_raw = _normalize_text(item.get("html_path"))
+        screenshot_path_raw = _normalize_text(item.get("screenshot_path"))
         html_path = Path(html_path_raw) if html_path_raw else None
         screenshot_path = Path(screenshot_path_raw) if screenshot_path_raw else None
         formatted_snapshots.append(
@@ -2937,10 +3278,10 @@ def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
         )
     latest_snapshot = formatted_snapshots[0] if formatted_snapshots else {}
     preview_assets: list[dict[str, str]] = []
-    if not is_netdisk_detail and latest_snapshot.get("screenshotUrl"):
+    if latest_snapshot.get("screenshotUrl"):
         preview_assets.append({"kind": "screenshot", "label": "页面截图", "url": latest_snapshot["screenshotUrl"]})
-    if not is_netdisk_detail and latest_snapshot.get("htmlUrl"):
-        preview_assets.append({"kind": "html", "label": "页面快照", "url": latest_snapshot["htmlUrl"]})
+    if latest_snapshot.get("htmlUrl"):
+        preview_assets.append({"kind": "html", "label": "镜像文件", "url": latest_snapshot["htmlUrl"]})
     file_list: list[dict[str, Any]] = []
     seen_files: set[str] = set()
     for snapshot in formatted_snapshots:
@@ -3300,14 +3641,25 @@ def list_netdisk_source_states_payload(watchlist_id: int | None = None) -> list[
     return payloads
 
 
-def list_netdisk_source_health_payload() -> list[dict[str, Any]]:
-    ensure_netdisk_source_health_defaults()
+def list_netdisk_source_health_payload(source_family: str | None = None) -> list[dict[str, Any]]:
+    normalized_family = _normalize_text(source_family) or None
+    ensure_source_health_defaults(normalized_family or "netdisk_aggregator")
     with get_db_connection() as connection:
         rows = list_netdisk_source_health(connection)
+    if normalized_family:
+        allowed_sources = {
+            source.key
+            for source in DISCOVERY_SOURCES
+            if _source_family_for_source(source) == normalized_family
+        }
+        rows = [row for row in rows if str(row.get("source_key") or "") in allowed_sources]
     return [
         {
             "sourceKey": str(row.get("source_key") or ""),
-            "sourceLabel": _netdisk_source_label(str(row.get("source_key") or "")),
+            "sourceLabel": _source_label(str(row.get("source_key") or "")),
+            "sourceFamily": _source_family_for_source(
+                next((source for source in DISCOVERY_SOURCES if source.key == str(row.get("source_key") or "")), None)
+            ),
             "enabled": bool(row.get("enabled")),
             "status": str(row.get("status") or "healthy"),
             "successCount": int(row.get("success_count") or 0),

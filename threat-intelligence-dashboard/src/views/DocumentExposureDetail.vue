@@ -13,22 +13,22 @@
           </div>
         </div>
         <div class="detail-shell__tags">
-          <span v-if="!isNetdiskDetail" :class="['severity-tag', `severity-tag--${detail.severity || 'low'}`]">{{ detail.riskScore || 0 }} 分</span>
+          <span v-if="!isCompactDetail" :class="['severity-tag', `severity-tag--${detail.severity || 'low'}`]">{{ detail.riskScore || 0 }} 分</span>
           <span class="neutral-tag">{{ detail.reviewStatus || 'new' }}</span>
         </div>
       </header>
 
-      <section v-if="isNetdiskDetail" class="detail-grid detail-grid--files">
+      <section v-if="isCompactDetail" class="detail-grid detail-grid--files">
         <article class="detail-card detail-card--preview detail-card--netdisk-summary">
           <div class="detail-card__header">
             <div>
               <div class="detail-card__eyebrow">预览</div>
-              <h3>分享链接信息</h3>
+              <h3>{{ compactPreviewTitle }}</h3>
             </div>
           </div>
           <div class="preview-stage preview-stage--share">
             <dl class="share-preview-list share-preview-list--merged">
-              <template v-for="item in sharePreviewItems" :key="item.label">
+              <template v-for="item in compactPreviewItems" :key="item.label">
                 <dt>{{ item.label }}</dt>
                 <dd>
                   <div v-if="item.kind === 'keywords'" class="share-keyword-tags">
@@ -74,6 +74,18 @@
                 </dd>
               </template>
             </dl>
+            <div v-if="detail.previewAssets?.length" class="asset-links asset-links--share">
+              <a
+                v-for="asset in detail.previewAssets || []"
+                :key="asset.url"
+                :href="asset.url"
+                target="_blank"
+                rel="noreferrer"
+                class="asset-link"
+              >
+                {{ asset.label }}
+              </a>
+            </div>
           </div>
         </article>
       </section>
@@ -134,7 +146,7 @@
         </article>
       </section>
 
-      <section v-if="!isNetdiskDetail" class="detail-grid detail-grid--bottom">
+      <section v-if="!isCompactDetail" class="detail-grid detail-grid--bottom">
         <article class="detail-card">
           <div class="detail-card__header">
             <div>
@@ -167,7 +179,7 @@
         </article>
       </section>
 
-      <section class="detail-grid detail-grid--bottom detail-grid--files">
+      <section v-if="!isDocumentLibraryDetail" class="detail-grid detail-grid--bottom detail-grid--files">
         <article class="detail-card detail-card--files">
           <div class="detail-card__header">
             <div>
@@ -299,6 +311,8 @@ const sourceFamily = computed(() => route.params.sourceFamily || 'search_engine'
 const hitId = computed(() => route.params.hitId)
 const currentConfig = computed(() => DETAIL_CONFIG[sourceFamily.value] || DETAIL_CONFIG.search_engine)
 const isNetdiskDetail = computed(() => sourceFamily.value === 'netdisk_aggregator')
+const isDocumentLibraryDetail = computed(() => sourceFamily.value === 'document_library')
+const isCompactDetail = computed(() => isNetdiskDetail.value || isDocumentLibraryDetail.value)
 
 const PLATFORM_ICON_META = {
   baidupan_share: { text: '百', className: 'baidu', url: 'https://nd-static.bdstatic.com/m-static/wp-brand/favicon.ico' },
@@ -341,6 +355,22 @@ const sharePreviewItems = computed(() => [
   { label: '链接状态', value: linkValidityLabel(detail), kind: 'status' },
   { label: '命中关键词', kind: 'keywords' },
 ])
+
+const compactPreviewTitle = computed(() => (isDocumentLibraryDetail.value ? '文档来源信息' : '分享链接信息'))
+
+const documentLibraryPreviewItems = computed(() => [
+  { label: '监测对象', value: detail.watchlistName || '-' },
+  { label: '所属机构', value: detail.organizationName || '-' },
+  { label: '来源平台', value: detail.platformLabel || '-', kind: 'platform' },
+  { label: '发现来源', value: detail.discoverySourceLabel || '-' },
+  { label: '文档类型', value: detail.documentMeta?.primaryFileType || detail.primaryFileType || '-' },
+  { label: '访问状态', value: detail.accessStateLabel || linkValidityLabel(detail), kind: 'status' },
+  { label: '文档链接', value: detail.canonicalUrl || '-', kind: 'link', copyValue: detail.canonicalUrl || '' },
+  { label: '发现时间', value: formatDateTime(detail.rawPayload?.source_datetime || detail.lastSeenAt) || '-' },
+  { label: '命中关键词', kind: 'keywords' },
+])
+
+const compactPreviewItems = computed(() => (isDocumentLibraryDetail.value ? documentLibraryPreviewItems.value : sharePreviewItems.value))
 
 const infoItems = computed(() => {
   const base = [
@@ -743,6 +773,7 @@ watch(hitId, loadDetail, { immediate: true })
 }
 
 .preview-stage--share {
+  flex-direction: column;
   align-items: flex-start;
   justify-content: flex-start;
   min-height: 0;
@@ -890,6 +921,10 @@ watch(hitId, loadDetail, { immediate: true })
 
 .asset-links {
   margin-top: 16px;
+}
+
+.asset-links--share {
+  margin-top: 14px;
 }
 
 .asset-link,

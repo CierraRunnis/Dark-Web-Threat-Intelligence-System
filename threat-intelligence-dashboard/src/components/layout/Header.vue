@@ -18,6 +18,10 @@
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item disabled>账号：{{ username }}</el-dropdown-item>
+            <el-dropdown-item command="change-password" divided>
+              <el-icon><Key /></el-icon>
+              修改密码
+            </el-dropdown-item>
             <el-dropdown-item command="logout" divided>
               <el-icon><SwitchButton /></el-icon>
               退出登录
@@ -27,29 +31,134 @@
       </el-dropdown>
     </div>
   </header>
+
+  <el-dialog v-model="passwordDialogVisible" title="修改密码" width="420px" destroy-on-close>
+    <el-form
+      ref="passwordFormRef"
+      class="password-form"
+      :model="passwordForm"
+      :rules="passwordRules"
+      label-position="top"
+      @keyup.enter="submitPasswordChange"
+    >
+      <el-form-item label="当前密码" prop="currentPassword">
+        <el-input
+          v-model="passwordForm.currentPassword"
+          type="password"
+          autocomplete="current-password"
+          show-password
+        />
+      </el-form-item>
+      <el-form-item label="新密码" prop="newPassword">
+        <el-input
+          v-model="passwordForm.newPassword"
+          type="password"
+          autocomplete="new-password"
+          show-password
+        />
+      </el-form-item>
+      <el-form-item label="确认新密码" prop="confirmPassword">
+        <el-input
+          v-model="passwordForm.confirmPassword"
+          type="password"
+          autocomplete="new-password"
+          show-password
+        />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="passwordDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="passwordSubmitting" @click="submitPasswordChange">保存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuth } from '@/composables/useAuth'
 
 const router = useRouter()
-const { state, loadCurrentUser, logout } = useAuth()
+const { state, loadCurrentUser, changePassword, logout } = useAuth()
+const passwordDialogVisible = ref(false)
+const passwordSubmitting = ref(false)
+const passwordFormRef = ref()
+const passwordForm = reactive({
+  currentPassword: '',
+  newPassword: '',
+  confirmPassword: '',
+})
 
 const username = computed(() => state.user?.username || 'admin')
 const displayName = computed(() => state.user?.display_name || username.value)
+
+const passwordRules = {
+  currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
+  newPassword: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { min: 6, message: '新密码至少 6 位', trigger: 'blur' },
+  ],
+  confirmPassword: [
+    { required: true, message: '请再次输入新密码', trigger: 'blur' },
+    { validator: validateConfirmPassword, trigger: 'blur' },
+  ],
+}
 
 onMounted(() => {
   loadCurrentUser()
 })
 
 async function handleUserCommand(command) {
+  if (command === 'change-password') {
+    openPasswordDialog()
+    return
+  }
   if (command !== 'logout') return
   await logout()
   ElMessage.success('已退出登录')
   router.replace('/login')
+}
+
+function validateConfirmPassword(_rule, value, callback) {
+  if (value !== passwordForm.newPassword) {
+    callback(new Error('两次输入的新密码不一致'))
+    return
+  }
+  callback()
+}
+
+function resetPasswordForm() {
+  passwordForm.currentPassword = ''
+  passwordForm.newPassword = ''
+  passwordForm.confirmPassword = ''
+  passwordFormRef.value?.clearValidate()
+}
+
+function openPasswordDialog() {
+  resetPasswordForm()
+  passwordDialogVisible.value = true
+}
+
+async function submitPasswordChange() {
+  if (!passwordFormRef.value || passwordSubmitting.value) return
+  try {
+    await passwordFormRef.value.validate()
+  } catch {
+    return
+  }
+
+  passwordSubmitting.value = true
+  try {
+    await changePassword(passwordForm.currentPassword, passwordForm.newPassword)
+    ElMessage.success('密码已修改')
+    passwordDialogVisible.value = false
+    resetPasswordForm()
+  } catch (error) {
+    ElMessage.error(error.message || '修改密码失败')
+  } finally {
+    passwordSubmitting.value = false
+  }
 }
 </script>
 
@@ -117,6 +226,10 @@ async function handleUserCommand(command) {
   margin-left: 6px;
   color: var(--ti-text-muted);
   font-size: 14px;
+}
+
+.password-form :deep(.el-form-item:last-child) {
+  margin-bottom: 0;
 }
 
 @media (max-width: 767px) {

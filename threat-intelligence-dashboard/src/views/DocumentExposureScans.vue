@@ -218,10 +218,7 @@ const selectedWatchlist = computed(() => {
 })
 
 const isSelectedNetdiskWatchlist = computed(() => {
-  const families = Array.isArray(selectedWatchlist.value?.source_families)
-    ? selectedWatchlist.value.source_families
-    : scanForm.sourceFamilies
-  return Array.isArray(families) && families.includes('netdisk_aggregator')
+  return Array.isArray(scanForm.sourceFamilies) && scanForm.sourceFamilies.includes('netdisk_aggregator')
 })
 
 const continuousStartDisabled = computed(() => {
@@ -259,12 +256,20 @@ function isNetdiskOnly(sourceFamilies) {
   return Array.isArray(sourceFamilies) && sourceFamilies.length === 1 && sourceFamilies[0] === 'netdisk_aggregator'
 }
 
+function isDocumentLibraryOnly(sourceFamilies) {
+  return Array.isArray(sourceFamilies) && sourceFamilies.length === 1 && sourceFamilies[0] === 'document_library'
+}
+
+function defaultPageLimit(sourceFamilies) {
+  return isDocumentLibraryOnly(sourceFamilies) ? 10 : 4
+}
+
 function applyWatchlist(payload) {
   if (!payload) return
   scanForm.watchlistId = payload.id
   scanForm.sourceFamilies = Array.isArray(payload.source_families) ? [...payload.source_families] : []
   scanForm.fileTypes = Array.isArray(payload.file_types) ? [...payload.file_types] : []
-  scanForm.pageLimit = Number(payload.page_limit || 4)
+  scanForm.pageLimit = Number(payload.page_limit || defaultPageLimit(scanForm.sourceFamilies))
   scanForm.detailFetch = isNetdiskOnly(scanForm.sourceFamilies) ? false : Boolean(payload.detail_fetch ?? true)
 }
 
@@ -387,6 +392,18 @@ watch(
     if (target) applyWatchlist(target)
     await loadScans()
     await loadContinuousStatus()
+  }
+)
+
+watch(
+  () => [...scanForm.sourceFamilies],
+  (families, previousFamilies) => {
+    if (isDocumentLibraryOnly(families) && !isDocumentLibraryOnly(previousFamilies) && Number(scanForm.pageLimit || 0) <= 4) {
+      scanForm.pageLimit = 10
+    }
+    if (isNetdiskOnly(families)) {
+      scanForm.detailFetch = false
+    }
   }
 )
 

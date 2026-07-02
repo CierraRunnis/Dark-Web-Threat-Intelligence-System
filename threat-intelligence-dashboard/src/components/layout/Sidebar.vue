@@ -63,9 +63,25 @@
     </nav>
 
     <div class="sidebar__footer">
-      <div v-show="!shell.state.sidebarCollapsed" class="sidebar__watch">
-        <span class="sidebar__watch-label">监测范围</span>
-        <p>{{ monitoringRangeText }}</p>
+      <div
+        v-show="!shell.state.sidebarCollapsed"
+        class="sidebar__version"
+        :class="{ 'sidebar__version--update': versionStatus?.update_available }"
+      >
+        <div class="sidebar__version-head">
+          <span class="sidebar__version-label">版本信息</span>
+          <el-icon v-if="versionStatus?.update_available" class="sidebar__version-icon sidebar__version-icon--warning">
+            <WarningFilled />
+          </el-icon>
+          <el-icon v-else class="sidebar__version-icon">
+            <CircleCheck />
+          </el-icon>
+        </div>
+        <strong>{{ versionTitle }}</strong>
+        <p>{{ versionDescription }}</p>
+        <a v-if="versionStatus?.update_available && versionStatus?.compare_url" :href="versionStatus.compare_url" target="_blank" rel="noreferrer">
+          查看 main 更新
+        </a>
       </div>
       <button class="sidebar__collapse" @click="shell.toggleSidebar">
         <el-icon>
@@ -78,14 +94,17 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useShellLayout } from '@/composables/useShellLayout'
-import { useIntelligenceData } from '@/composables/useIntelligenceData'
 
 const route = useRoute()
 const shell = useShellLayout()
-const { data } = useIntelligenceData()
+const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
+const versionStatus = ref(null)
+const versionLoading = ref(false)
+const versionError = ref('')
+let versionTimer = null
 
 const navTree = [
   { type: 'item', path: '/', title: '总览', icon: 'DataLine' },
@@ -146,23 +165,44 @@ watch(
   { immediate: true },
 )
 
-const monitoringRangeText = computed(() => {
-  const dataLeakEvents = Array.isArray(data.value.dataLeakEvents) ? data.value.dataLeakEvents : []
-  const ransomwareEvents = Array.isArray(data.value.ransomwareEvents) ? data.value.ransomwareEvents : []
-  const vulnerabilityEvents = Array.isArray(data.value.vulnerabilityEvents) ? data.value.vulnerabilityEvents : []
-  const documentExposureEvents = Array.isArray(data.value.documentExposureEvents) ? data.value.documentExposureEvents : []
-  const allEvents = [...dataLeakEvents, ...ransomwareEvents, ...vulnerabilityEvents, ...documentExposureEvents]
+const versionTitle = computed(() => {
+  if (versionLoading.value && !versionStatus.value) return '检查中'
+  if (versionError.value && !versionStatus.value) return '检查失败'
+  if (versionStatus.value?.update_available) return '发现新版本'
+  return `当前 ${versionStatus.value?.current?.short_commit || 'local'}`
+})
 
-  const countries = new Set()
-  const industries = new Set()
-  for (const item of allEvents) {
-    const country = String(item.country || '').trim()
-    const industry = String(item.industry || '').trim()
-    if (country && country !== '未知') countries.add(country)
-    if (industry && !['未知', '其他'].includes(industry)) industries.add(industry)
+const versionDescription = computed(() => {
+  if (versionError.value && !versionStatus.value) return versionError.value
+  if (!versionStatus.value) return '正在检查 GitHub main 分支'
+  const current = versionStatus.value.current?.short_commit || 'local'
+  const latest = versionStatus.value.latest?.short_commit || '-'
+  if (versionStatus.value.update_available) return `本地 ${current} / main ${latest}`
+  return `main 分支已同步 · ${latest || current}`
+})
+
+async function loadVersionStatus() {
+  if (versionLoading.value) return
+  versionLoading.value = true
+  versionError.value = ''
+  try {
+    const response = await fetch('/api/system/version')
+    if (!response.ok) throw new Error(`版本检查失败：${response.status}`)
+    versionStatus.value = await response.json()
+  } catch (error) {
+    versionError.value = error.message || '无法检查 GitHub 更新'
+  } finally {
+    versionLoading.value = false
   }
+}
 
-  return `${countries.size} 国家 / ${industries.size} 行业 / ${allEvents.length} 事件`
+onMounted(() => {
+  loadVersionStatus()
+  versionTimer = window.setInterval(loadVersionStatus, VERSION_CHECK_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (versionTimer) window.clearInterval(versionTimer)
 })
 </script>
 
@@ -345,7 +385,7 @@ const monitoringRangeText = computed(() => {
   border-top: 1px solid var(--ti-border-soft);
 }
 
-.sidebar__watch {
+.sidebar__version {
   margin-bottom: 12px;
   padding: 14px;
   border-radius: 18px;
@@ -353,7 +393,19 @@ const monitoringRangeText = computed(() => {
   border: 1px solid var(--ti-border-soft);
 }
 
-.sidebar__watch-label {
+.sidebar__version--update {
+  border-color: rgba(232, 128, 48, 0.32);
+  background: rgba(255, 248, 238, 0.86);
+}
+
+.sidebar__version-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sidebar__version-label {
   display: inline-block;
   margin-bottom: 6px;
   color: var(--ti-accent-strong);
@@ -363,10 +415,35 @@ const monitoringRangeText = computed(() => {
   text-transform: uppercase;
 }
 
-.sidebar__watch p {
+.sidebar__version-icon {
+  color: var(--ti-success-strong);
+  font-size: 15px;
+}
+
+.sidebar__version-icon--warning {
+  color: var(--ti-warning-strong);
+}
+
+.sidebar__version strong {
+  display: block;
+  color: var(--ti-text-primary);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.sidebar__version p {
+  margin-top: 4px;
   color: var(--ti-text-secondary);
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.5;
+}
+
+.sidebar__version a {
+  display: inline-flex;
+  margin-top: 8px;
+  color: var(--ti-primary);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .sidebar__collapse {
@@ -388,7 +465,7 @@ const monitoringRangeText = computed(() => {
 
   .sidebar__brand-text,
   .sidebar__item-text,
-  .sidebar__watch,
+  .sidebar__version,
   .sidebar__children {
     display: none !important;
   }

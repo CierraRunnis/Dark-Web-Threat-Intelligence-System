@@ -1,23 +1,23 @@
 {
   "site_name": "dragonforceblog",
-  "db_path": "D:\\bishe\\darkweb_collector\\samples\\dragonforceblog\\results\\dragonforceblog.db",
+  "db_path": "<project-root>\\darkweb_collector\\samples\\dragonforceblog\\results\\dragonforceblog.db",
   "results": [
     {
       "file": "list_page_1.html",
       "page_type": "list",
-      "output_json": "D:\\bishe\\darkweb_collector\\samples\\dragonforceblog\\results\\list_page_1.parsed.json",
+      "output_json": "<project-root>\\darkweb_collector\\samples\\dragonforceblog\\results\\list_page_1.parsed.json",
       "victim_count": 24
     },
     {
       "file": "list_page_2.html",
       "page_type": "list",
-      "output_json": "D:\\bishe\\darkweb_collector\\samples\\dragonforceblog\\results\\list_page_2.parsed.json",
+      "output_json": "<project-root>\\darkweb_collector\\samples\\dragonforceblog\\results\\list_page_2.parsed.json",
       "victim_count": 24
     },
     {
       "file": "detail_1.html",
       "page_type": "detail",
-      "output_json": "D:\\bishe\\darkweb_collector\\samples\\dragonforceblog\\results\\detail_1.parsed.json",
+      "output_json": "<project-root>\\darkweb_collector\\samples\\dragonforceblog\\results\\detail_1.parsed.json",
       "detail_status": "ok",
       "page_title": "DragonForce | Blog"
     }

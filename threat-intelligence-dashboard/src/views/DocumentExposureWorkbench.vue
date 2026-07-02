@@ -1,9 +1,9 @@
 <template>
   <div class="monitoring-workbench ti-page">
-    <section v-if="sourceFamily === 'netdisk_aggregator'" class="netdisk-board">
+    <section v-if="isCompactBoard" class="netdisk-board">
       <header class="netdisk-toolbar">
         <div class="netdisk-title">
-          <h2>网盘监测</h2>
+          <h2>{{ currentConfig.title }}</h2>
           <el-icon><InfoFilled /></el-icon>
         </div>
         <div class="netdisk-toolbar__controls">
@@ -42,10 +42,10 @@
               {{ item.label }}
             </button>
           </div>
-          <el-button plain class="netdisk-settings-btn" title="网盘监测配置" @click="router.push(currentConfig.settingsRoute)">
+          <el-button plain class="netdisk-settings-btn" :title="`${currentConfig.title}配置`" @click="router.push(currentConfig.settingsRoute)">
             <el-icon><Setting /></el-icon>
           </el-button>
-          <el-input v-model="keyword" clearable class="netdisk-search" placeholder="请输入关键词、文件名或链接">
+          <el-input v-model="keyword" clearable class="netdisk-search" :placeholder="currentConfig.searchPlaceholder">
             <template #suffix>
               <el-icon><Search /></el-icon>
             </template>
@@ -76,14 +76,14 @@
       <section class="netdisk-chart-grid">
         <article class="netdisk-panel netdisk-panel--trend">
           <div class="netdisk-panel__title">
-            <h3>分享链接趋势</h3>
+            <h3>{{ currentConfig.trendTitle }}</h3>
             <span>{{ rangeDisplayLabel }}</span>
           </div>
           <v-chart class="netdisk-chart" :option="netdiskTrendOption" autoresize />
         </article>
         <article class="netdisk-panel netdisk-panel--distribution">
           <div class="netdisk-panel__title">
-            <h3>平台分布</h3>
+            <h3>{{ currentConfig.distributionTitle }}</h3>
           </div>
           <div class="netdisk-distribution">
             <v-chart class="netdisk-donut" :option="netdiskDistributionOption" autoresize />
@@ -100,7 +100,7 @@
 
       <section class="netdisk-panel netdisk-panel--table">
         <div class="netdisk-panel__title netdisk-panel__title--table">
-          <h3>检测结果列表（共 {{ formatNumber(filteredHits.length) }} 条）</h3>
+          <h3>{{ currentConfig.tableTitle }}（共 {{ formatNumber(filteredHits.length) }} 条）</h3>
         </div>
         <div class="netdisk-table-shell">
           <el-table :data="pagedHits" table-layout="fixed" :row-class-name="tableRowClassName">
@@ -133,11 +133,16 @@
                 </span>
                 <span v-else-if="column.key === 'shareCode'" class="muted-cell">{{ row.shareCode || '-' }}</span>
                 <span v-else-if="column.key === 'primaryFileSize'" class="muted-cell">{{ primaryFileSize(row) }}</span>
+                <span v-else-if="column.key === 'accessState'" :class="['validity-pill', `validity-pill--${linkValidityType(row)}`]">
+                  <span class="validity-dot"></span>
+                  {{ accessStateDisplayLabel(row) }}
+                </span>
                 <span v-else-if="column.key === 'riskScore'" :class="['severity-pill', `severity-pill--${row.severity || 'low'}`]">
                   {{ severityLabel(row) }}
                 </span>
                 <span v-else-if="column.key === 'matchedTerms'">{{ matchedTermsText(row) }}</span>
                 <span v-else-if="column.key === 'lastSeenAt'">{{ formatDateTime(row.lastSeenAt) || '-' }}</span>
+                <span v-else-if="column.key === 'reviewStatus'">{{ row.reviewStatusLabel || row.reviewStatus || '-' }}</span>
                 <span v-else-if="column.key === 'linkValidity'" :class="['validity-pill', `validity-pill--${linkValidityType(row)}`]">
                   <span class="validity-dot"></span>
                   {{ linkValidityLabel(row) }}
@@ -374,6 +379,7 @@ const FAMILY_CONFIG = {
     trendTitle: '分享链接发现趋势',
     distributionTitle: '平台分布',
     tableTitle: '网盘命中列表',
+    searchPlaceholder: '请输入关键词、文件名或链接',
     footerHint: '详情页展示分享链接信息、文件清单和处置动作。',
     columns: [
       { key: 'primaryFileName', label: '文件名', minWidth: 178, value: (row) => primaryFileName(row) },
@@ -396,16 +402,17 @@ const FAMILY_CONFIG = {
     trendTitle: '文档发现趋势',
     distributionTitle: '平台分布',
     tableTitle: '文库命中列表',
+    searchPlaceholder: '请输入关键词、文档标题或来源链接',
     footerHint: '详情页展示文档截图、预览文本、文件信息和处置流转。',
     columns: [
-      { key: 'title', label: '文档标题', minWidth: 260, value: (row) => row.title || '-' },
-      { key: 'platformLabel', label: '来源站点', width: 150, value: (row) => row.platformLabel || '-' },
-      { key: 'primaryFileType', label: '文档类型', width: 120, value: (row) => (row.primaryFileType || '-').toUpperCase() },
-      { key: 'fileCount', label: '文件数', width: 100, value: (row) => formatNumber(row.fileCount) },
-      { key: 'matchedTerms', label: '命中关键词', minWidth: 200, value: () => '' },
-      { key: 'riskScore', label: '风险级别', width: 110, value: () => '' },
-      { key: 'lastSeenAt', label: '发现时间', minWidth: 160, value: () => '' },
-      { key: 'reviewStatus', label: '处理状态', width: 120, value: () => '' },
+      { key: 'title', label: '文档标题', minWidth: 220, value: (row) => row.title || '-' },
+      { key: 'platformLabel', label: '来源站点', minWidth: 104, value: (row) => row.platformLabel || '-' },
+      { key: 'primaryFileType', label: '文档类型', minWidth: 76, value: (row) => (row.primaryFileType || '-').toUpperCase() },
+      { key: 'accessState', label: '访问状态', minWidth: 86, value: () => '' },
+      { key: 'matchedTerms', label: '命中关键词', minWidth: 118, value: () => '' },
+      { key: 'riskScore', label: '风险等级', minWidth: 76, value: () => '' },
+      { key: 'lastSeenAt', label: '发现时间', minWidth: 118, value: () => '' },
+      { key: 'reviewStatus', label: '处置状态', minWidth: 92, value: () => '' },
     ],
     sourceLabel: (row) => row.platformLabel || row.platform || '未知平台',
   },
@@ -457,6 +464,7 @@ const PLATFORM_ICON_META = {
 
 const sourceFamily = computed(() => route.meta.sourceFamily || 'search_engine')
 const currentConfig = computed(() => FAMILY_CONFIG[sourceFamily.value] || FAMILY_CONFIG.search_engine)
+const isCompactBoard = computed(() => ['netdisk_aggregator', 'document_library'].includes(sourceFamily.value))
 
 const metricCards = computed(() => {
   const base = [
@@ -497,11 +505,20 @@ const sourceChips = computed(() => {
 
 const netdiskPlatformTabs = computed(() => [
   { key: 'all', label: '全部' },
-  ...netdiskPlatformOrder.map((label) => ({ key: label, label })),
+  ...(sourceFamily.value === 'netdisk_aggregator'
+    ? [
+        ...netdiskPlatformOrder,
+        ...netdiskPlatformDistribution.value
+          .map((item) => normalizePlatformLabel(item.name))
+          .filter((label) => label && !netdiskPlatformOrder.includes(label)),
+      ]
+    : netdiskPlatformDistribution.value.map((item) => normalizePlatformLabel(item.name)))
+    .filter((label, index, rows) => label && rows.indexOf(label) === index)
+    .map((label) => ({ key: label, label })),
 ])
 
 const rangeDateBounds = computed(() => {
-  if (sourceFamily.value !== 'netdisk_aggregator') return null
+  if (!isCompactBoard.value) return null
   if (selectedRange.value === 'custom') {
     const [start, end] = Array.isArray(customDateRange.value) ? customDateRange.value : []
     return start && end ? normalizeDateBounds(start, end) : null
@@ -518,7 +535,7 @@ const rangeDisplayLabel = computed(() => {
 })
 
 const dateScopedHits = computed(() => {
-  if (sourceFamily.value !== 'netdisk_aggregator') return hits.value
+  if (!isCompactBoard.value) return hits.value
   const bounds = rangeDateBounds.value
   if (!bounds) return hits.value
   return hits.value.filter((row) => {
@@ -530,6 +547,19 @@ const dateScopedHits = computed(() => {
 const passwordShareCount = computed(() => dateScopedHits.value.filter((row) => row.shareType === 'password_share').length)
 const highSeverityCount = computed(() => dateScopedHits.value.filter((row) => row.severity === 'high').length)
 const netdiskInvalidCount = computed(() => dateScopedHits.value.filter((row) => ['removed', 'forbidden'].includes(row.accessState)).length)
+const publicDocumentCount = computed(() => {
+  const publicRows = dateScopedHits.value.filter((row) => row.accessState === 'public').length
+  return publicRows || dateScopedHits.value.length
+})
+const gatedDocumentCount = computed(() => dateScopedHits.value.filter((row) => ['login_required', 'captcha'].includes(row.accessState)).length)
+const recent24hCount = computed(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000
+  return dateScopedHits.value.filter((row) => {
+    const text = row?.lastSeenAt || row?.firstSeenAt || ''
+    const time = text ? new Date(String(text).replace(' ', 'T')).getTime() : 0
+    return time && time >= cutoff
+  }).length
+})
 
 const netdiskTrendRows = computed(() => {
   const bounds = rangeDateBounds.value
@@ -567,36 +597,70 @@ const trendDeltaText = computed(() => {
   return `${(((current - previous) / previous) * 100).toFixed(1)}%`
 })
 
-const netdiskMetricCards = computed(() => [
-  {
-    label: '发现分享链接',
-    value: dateScopedHits.value.length,
-    delta: trendDeltaText.value,
-    deltaType: 'up',
-    icon: 'link',
-  },
-  {
-    label: '高危文件',
-    value: highSeverityCount.value || summary.highRiskCount,
-    delta: '21.1%',
-    deltaType: 'up',
-    icon: 'alert',
-  },
-  {
-    label: '口令分享',
-    value: passwordShareCount.value,
-    delta: '16.3%',
-    deltaType: 'up',
-    icon: 'lock',
-  },
-  {
-    label: '已失效链接',
-    value: netdiskInvalidCount.value,
-    delta: '9.4%',
-    deltaType: 'up',
-    icon: 'broken',
-  },
-])
+const netdiskMetricCards = computed(() => {
+  if (sourceFamily.value === 'document_library') {
+    return [
+      {
+        label: '公开文档数',
+        value: publicDocumentCount.value,
+        delta: trendDeltaText.value,
+        deltaType: 'up',
+        icon: 'link',
+      },
+      {
+        label: '高风险文档',
+        value: highSeverityCount.value || summary.highRiskCount,
+        delta: '需复核',
+        deltaType: 'up',
+        icon: 'alert',
+      },
+      {
+        label: '需登录/验证',
+        value: gatedDocumentCount.value,
+        delta: '访问受限',
+        deltaType: 'up',
+        icon: 'lock',
+      },
+      {
+        label: '近24h新增',
+        value: recent24hCount.value || summary.recentCount,
+        delta: '持续监测',
+        deltaType: 'up',
+        icon: 'broken',
+      },
+    ]
+  }
+  return [
+    {
+      label: '发现分享链接',
+      value: dateScopedHits.value.length,
+      delta: trendDeltaText.value,
+      deltaType: 'up',
+      icon: 'link',
+    },
+    {
+      label: '高危文件',
+      value: highSeverityCount.value || summary.highRiskCount,
+      delta: '21.1%',
+      deltaType: 'up',
+      icon: 'alert',
+    },
+    {
+      label: '口令分享',
+      value: passwordShareCount.value,
+      delta: '16.3%',
+      deltaType: 'up',
+      icon: 'lock',
+    },
+    {
+      label: '已失效链接',
+      value: netdiskInvalidCount.value,
+      delta: '9.4%',
+      deltaType: 'up',
+      icon: 'broken',
+    },
+  ]
+})
 
 const netdiskLegendRows = computed(() => {
   const rows = [...netdiskPlatformDistribution.value]
@@ -944,8 +1008,12 @@ function linkValidityLabel(row) {
   }[linkValidityType(row)]
 }
 
+function accessStateDisplayLabel(row) {
+  return row?.accessStateLabel || linkValidityLabel(row)
+}
+
 function tableRowClassName() {
-  return sourceFamily.value === 'netdisk_aggregator' ? 'compact-netdisk-row' : ''
+  return isCompactBoard.value ? 'compact-netdisk-row' : ''
 }
 
 async function loadData() {

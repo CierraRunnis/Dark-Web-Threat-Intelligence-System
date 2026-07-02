@@ -78,8 +78,10 @@ export function useDocumentExposureApi() {
         watchlist_id: params.watchlistId,
       })}`)
     },
-    loadNetdiskSourceHealth() {
-      return requestJson('/api/document-exposures/netdisk/source-health')
+    loadNetdiskSourceHealth(params = {}) {
+      return requestJson(`/api/document-exposures/netdisk/source-health${buildQuery({
+        source_family: params.sourceFamily,
+      })}`)
     },
     runNetdiskContinuousOnce() {
       return requestJson('/api/document-exposures/netdisk/continuous/run', {

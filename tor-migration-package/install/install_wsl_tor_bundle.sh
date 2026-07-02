@@ -16,11 +16,12 @@ install -m 0644 "${pkg_root}/etc/tor/"* /etc/tor/
 install -m 0755 "${pkg_root}/usr/local/bin/"* /usr/local/bin/
 install -m 0644 "${pkg_root}/systemd/tor@default.service.d/proxy.conf" /etc/systemd/system/tor@default.service.d/proxy.conf
 
-if id -u alex >/dev/null 2>&1; then
-  install -d -m 0755 /home/alex
-  if [[ -f "${pkg_root}/home/alex/.wsl-proxy-env.sh" ]]; then
-    install -m 0644 "${pkg_root}/home/alex/.wsl-proxy-env.sh" /home/alex/.wsl-proxy-env.sh
-    chown alex:alex /home/alex/.wsl-proxy-env.sh
+target_user="${SUDO_USER:-${USER:-}}"
+if [[ -n "${target_user}" && "${target_user}" != "root" ]] && id -u "${target_user}" >/dev/null 2>&1; then
+  target_home="$(getent passwd "${target_user}" | cut -d: -f6)"
+  if [[ -n "${target_home}" && -d "${target_home}" && -f "${pkg_root}/home/user/.wsl-proxy-env.sh" ]]; then
+    install -m 0644 "${pkg_root}/home/user/.wsl-proxy-env.sh" "${target_home}/.wsl-proxy-env.sh"
+    chown "${target_user}:${target_user}" "${target_home}/.wsl-proxy-env.sh"
   fi
 fi
 

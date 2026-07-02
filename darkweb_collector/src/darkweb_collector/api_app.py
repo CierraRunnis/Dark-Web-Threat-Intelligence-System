@@ -92,9 +92,10 @@ import darkweb_collector.normalized_intelligence as normalized_intelligence_modu
 from darkweb_collector.db import get_db_connection, list_monitoring_keyword_notifications
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
 from darkweb_collector.runtime import output_root
+from darkweb_collector.version_check import build_version_status
 
 
-app = FastAPI(title="Darkweb Collector API", version="1.0.0")
+app = FastAPI(title="Darkweb Collector API", version="v.0.10.0")
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
 _warmup_started = False
@@ -108,6 +109,7 @@ AUTH_EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/health",
 }
+DEFAULT_AUTH_PASSWORD = "123456"
 
 
 def _auth_enabled() -> bool:
@@ -118,8 +120,42 @@ def _auth_username() -> str:
     return os.environ.get("DARKWEB_AUTH_USERNAME", "admin")
 
 
+def _default_auth_password_file() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "DarkWebThreatIntel" / "auth-password.txt"
+
+    user_profile = os.environ.get("USERPROFILE", "").strip()
+    if user_profile:
+        return Path(user_profile) / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
+
+    return Path.home() / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
+
+
+def _auth_password_file_path() -> Path:
+    password_file = os.environ.get("DARKWEB_AUTH_PASSWORD_FILE", "").strip()
+    return Path(password_file) if password_file else _default_auth_password_file()
+
+
 def _auth_password() -> str:
-    return os.environ.get("DARKWEB_AUTH_PASSWORD", "").strip()
+    password = os.environ.get("DARKWEB_AUTH_PASSWORD", "").strip()
+    if password:
+        return password
+
+    try:
+        password = _auth_password_file_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        password = ""
+    return password or DEFAULT_AUTH_PASSWORD
+
+
+def _write_auth_password(password: str) -> None:
+    if os.environ.get("DARKWEB_AUTH_PASSWORD", "").strip():
+        raise HTTPException(status_code=409, detail="DARKWEB_AUTH_PASSWORD is controlled by environment")
+
+    password_path = _auth_password_file_path()
+    password_path.parent.mkdir(parents=True, exist_ok=True)
+    password_path.write_text(password, encoding="utf-8")
 
 
 def _auth_session_ttl_seconds() -> int:
@@ -258,10 +294,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/system/version")
+def system_version() -> dict:
+    return build_version_status()
+
+
 class AuthLoginRequest(BaseModel):
     username: str = ""
     account: str = ""
     password: str = ""
+
+
+class AuthPasswordChangeRequest(BaseModel):
+    current_password: str = ""
+    new_password: str = ""
 
 
 @app.post("/api/auth/login")
@@ -269,8 +315,6 @@ def auth_login(payload: AuthLoginRequest) -> dict:
     username = (payload.username or payload.account).strip()
     password = payload.password
     expected_password = _auth_password()
-    if not expected_password:
-        raise HTTPException(status_code=503, detail="DARKWEB_AUTH_PASSWORD is not configured")
     username_matches = secrets.compare_digest(username, _auth_username())
     password_matches = secrets.compare_digest(password, expected_password)
     if not username_matches or not password_matches:
@@ -294,6 +338,19 @@ def auth_me(request: Request) -> dict[str, str]:
 def auth_logout(request: Request) -> dict[str, bool]:
     token = _extract_bearer_token(request.headers.get("authorization", ""))
     _revoke_auth_session(token)
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(payload: AuthPasswordChangeRequest) -> dict[str, bool]:
+    current_password = payload.current_password
+    new_password = payload.new_password.strip()
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="new password must be at least 6 characters")
+    if not secrets.compare_digest(current_password, _auth_password()):
+        raise HTTPException(status_code=400, detail="current password is incorrect")
+
+    _write_auth_password(new_password)
     return {"ok": True}
 
 
@@ -768,8 +825,8 @@ def netdisk_source_states(watchlist_id: int | None = None) -> list[dict]:
 
 
 @app.get("/api/document-exposures/netdisk/source-health")
-def netdisk_source_health() -> list[dict]:
-    return list_netdisk_source_health_payload()
+def netdisk_source_health(source_family: str | None = None) -> list[dict]:
+    return list_netdisk_source_health_payload(source_family=source_family)
 
 
 @app.post("/api/document-exposures/netdisk/source-states/reset")
