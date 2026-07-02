@@ -108,6 +108,7 @@ collector_output_dir.mkdir(parents=True, exist_ok=True)
 AUTH_EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/health",
+    "/api/system/version",
 }
 DEFAULT_AUTH_PASSWORD = "123456"
 

@@ -169,17 +169,25 @@ const versionTitle = computed(() => {
   if (versionLoading.value && !versionStatus.value) return '检查中'
   if (versionError.value && !versionStatus.value) return '检查失败'
   if (versionStatus.value?.update_available) return '发现新版本'
-  return `当前 ${versionStatus.value?.current?.short_commit || 'local'}`
+  return `当前 ${currentVersionLabel.value}`
 })
 
 const versionDescription = computed(() => {
   if (versionError.value && !versionStatus.value) return versionError.value
-  if (!versionStatus.value) return '正在检查 GitHub main 分支'
-  const current = versionStatus.value.current?.short_commit || 'local'
-  const latest = versionStatus.value.latest?.short_commit || '-'
-  if (versionStatus.value.update_available) return `本地 ${current} / main ${latest}`
-  return `main 分支已同步 · ${latest || current}`
+  if (!versionStatus.value) return '正在检查版本信息'
+  const branch = versionStatus.value.branch || versionStatus.value.current?.branch || 'main'
+  const latest = versionStatus.value.latest?.short_commit || ''
+  if (versionStatus.value.update_available) {
+    return `本地 ${currentVersionLabel.value} / ${branch} ${latest || '-'}`
+  }
+  return latest ? `${branch} 分支已同步 · ${latest}` : `${branch} 分支已同步`
 })
+
+const currentVersionLabel = computed(() => (
+  versionStatus.value?.current?.version
+  || versionStatus.value?.current?.short_commit
+  || 'local'
+))
 
 async function loadVersionStatus() {
   if (versionLoading.value) return
