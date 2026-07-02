@@ -526,6 +526,10 @@ function defaultDetailFetch() {
   return currentSourceFamily.value === 'document_library'
 }
 
+function defaultPageLimit() {
+  return currentSourceFamily.value === 'document_library' ? 10 : 4
+}
+
 function emptyWatchlist() {
   return {
     id: null,
@@ -535,7 +539,7 @@ function emptyWatchlist() {
     enabled: true,
     source_families: [currentSourceFamily.value],
     file_types: [],
-    page_limit: 4,
+    page_limit: defaultPageLimit(),
     detail_fetch: defaultDetailFetch(),
     terms: [],
   }
@@ -551,7 +555,7 @@ function applyWatchlist(payload) {
   watchlistForm.enabled = next.enabled ?? true
   watchlistForm.source_families = [currentSourceFamily.value]
   watchlistForm.file_types = Array.isArray(next.file_types) ? [...next.file_types] : []
-  watchlistForm.page_limit = Number(next.page_limit || 4)
+  watchlistForm.page_limit = Number(next.page_limit || defaultPageLimit())
   watchlistForm.detail_fetch = Boolean(next.detail_fetch ?? defaultDetailFetch())
   watchlistForm.terms = Array.isArray(next.terms) ? next.terms.map((item) => ({ ...item })) : []
 }

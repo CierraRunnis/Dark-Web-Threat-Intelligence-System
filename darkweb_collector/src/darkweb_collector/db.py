@@ -1875,6 +1875,7 @@ def list_document_hits(
     watchlist_id: int | None = None,
     review_status: str | None = None,
     platform: str | None = None,
+    platform_type: str | None = None,
     access_state: str | None = None,
     limit: int | None = None,
 ) -> list[dict]:
@@ -1889,6 +1890,9 @@ def list_document_hits(
     if platform:
         where_parts.append("h.platform = ?")
         params.append(str(platform).strip())
+    if platform_type:
+        where_parts.append("h.platform_type = ?")
+        params.append(str(platform_type).strip())
     if access_state:
         where_parts.append("h.access_state = ?")
         params.append(str(access_state).strip())
@@ -2055,6 +2059,17 @@ def list_document_hit_snapshots(connection: sqlite3.Connection, hit_id: int) -> 
         (int(hit_id),),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def update_document_hit_snapshot_files(connection: sqlite3.Connection, snapshot_id: int, *, html_path: str = "", screenshot_path: str = "") -> None:
+    connection.execute(
+        """
+        UPDATE document_hit_snapshots
+        SET html_path = ?, screenshot_path = ?
+        WHERE id = ?
+        """,
+        (str(html_path or ""), str(screenshot_path or ""), int(snapshot_id)),
+    )
 
 
 def update_document_hit_last_snapshot(connection: sqlite3.Connection, hit_id: int, snapshot_id: int) -> None:

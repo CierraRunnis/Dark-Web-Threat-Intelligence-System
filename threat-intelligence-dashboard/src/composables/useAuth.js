@@ -148,12 +148,28 @@ export async function logout() {
   }
 }
 
+export async function changePassword(currentPassword, newPassword) {
+  const response = await fetch('/api/auth/change-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+  if (!response.ok) {
+    throw new Error((await readErrorMessage(response)) || '修改密码失败')
+  }
+  return response.json()
+}
+
 export function useAuth() {
   return {
     state,
     isAuthenticated: computed(() => Boolean(state.token && state.validated)),
     login: loginWithPassword,
     loadCurrentUser,
+    changePassword,
     logout,
   }
 }
