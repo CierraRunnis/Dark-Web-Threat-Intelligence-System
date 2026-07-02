@@ -169,7 +169,7 @@ const versionTitle = computed(() => {
   if (versionLoading.value && !versionStatus.value) return '检查中'
   if (versionError.value && !versionStatus.value) return '检查失败'
   if (versionStatus.value?.update_available) return '发现新版本'
-  return `当前 ${currentVersionLabel.value}`
+  return currentVersionLabel.value
 })
 
 const versionDescription = computed(() => {
