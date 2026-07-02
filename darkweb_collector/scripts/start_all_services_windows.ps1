@@ -57,6 +57,12 @@ $DarkwebCommandPath = Join-Path $CommandBinDir "darkweb.cmd"
 $DefaultUserDataDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel"
 $LegacyCollectorOutputRoot = Join-Path $DefaultUserDataDir "output"
 $ProjectCollectorOutputRoot = Join-Path $CollectorRoot "output"
+$AuthPasswordFile = if ($env:DARKWEB_AUTH_PASSWORD_FILE) {
+    [System.IO.Path]::GetFullPath($env:DARKWEB_AUTH_PASSWORD_FILE)
+}
+else {
+    Join-Path $DefaultUserDataDir "auth-password.txt"
+}
 $NodeExePath = ""
 $NodeBinDir = ""
 $RequirementsStamp = Join-Path $VenvDir ".requirements.sha256"
@@ -173,6 +179,23 @@ function Ensure-Directory {
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path | Out-Null
     }
+}
+
+function New-AuthPassword {
+    return "123456"
+}
+
+function Ensure-AuthPasswordFile {
+    if ($env:DARKWEB_AUTH_PASSWORD) {
+        return
+    }
+    $parent = Split-Path -Parent $AuthPasswordFile
+    Ensure-Directory $parent
+    if ((Test-Path -LiteralPath $AuthPasswordFile) -and ((Get-Content -LiteralPath $AuthPasswordFile -Raw).Trim())) {
+        return
+    }
+    New-AuthPassword | Set-Content -LiteralPath $AuthPasswordFile -Encoding ASCII -NoNewline
+    Write-Info "Initialized local auth password file: $AuthPasswordFile"
 }
 
 function Remove-GeneratedDirectory {
@@ -899,6 +922,7 @@ Set-Location -LiteralPath $quotedWorkDir
 `$env:DARKWEB_COLLECTOR_DB_PATH = $(Quote-PS $CollectorDbPath)
 `$env:DARKWEB_COLLECTOR_SITES_FILE = $(Quote-PS $CollectorSitesFile)
 `$env:DARKWEB_COLLECTOR_OUTPUT_ROOT = $(Quote-PS $CollectorOutputRoot)
+`$env:DARKWEB_AUTH_PASSWORD_FILE = $(Quote-PS $AuthPasswordFile)
 `$env:DARKWEB_BROWSER_CONCURRENCY = $(Quote-PS ([string]$BrowserConcurrency))
 `$env:PANSOU_API_BASE = $(Quote-PS $PansouApiBase)
 `$env:NPM_CONFIG_CACHE = $(Quote-PS (Join-Path $DefaultUserDataDir "npm-cache"))
@@ -1234,6 +1258,7 @@ if "%~1"=="" (
     Set-UserEnv -Name "DARKWEB_COLLECTOR_DB_PATH" -Value $CollectorDbPath
     Set-UserEnv -Name "DARKWEB_COLLECTOR_SITES_FILE" -Value $CollectorSitesFile
     Set-UserEnv -Name "DARKWEB_COLLECTOR_OUTPUT_ROOT" -Value $CollectorOutputRoot
+    Set-UserEnv -Name "DARKWEB_AUTH_PASSWORD_FILE" -Value $AuthPasswordFile
     Set-UserEnv -Name "REDIS_URL" -Value $RedisUrl
     Set-UserEnv -Name "DARKWEB_API_PORT" -Value ([string]$ApiPort)
     Set-UserEnv -Name "DARKWEB_API_TARGET" -Value $ApiBaseUrl
@@ -1581,6 +1606,7 @@ function Ensure-Environment {
     Invoke-TimedStep "Ensure-PythonRuntime" { Ensure-PythonRuntime | Out-Null }
     Invoke-TimedStep "Ensure-NodeRuntime" { Ensure-NodeRuntime | Out-Null }
     Invoke-TimedStep "Ensure-RedisCanStart" { Ensure-RedisCanStart }
+    Invoke-TimedStep "Ensure-AuthPasswordFile" { Ensure-AuthPasswordFile }
     Invoke-TimedStep "Register-DarkwebCommand" { Register-DarkwebCommand }
     if (-not (Test-Path -LiteralPath (Join-Path $CollectorRoot "scripts\serve_api.py"))) {
         Stop-WithError "API launcher not found under collector scripts."

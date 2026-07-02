@@ -109,6 +109,296 @@ class DocumentExposureTests(unittest.TestCase):
         self.assertTrue(pansou_enabled)
         self.assertFalse(panyq_enabled)
 
+    def test_document_library_sources_are_registered(self) -> None:
+        keys = {source.key for source in DISCOVERY_SOURCES}
+        self.assertTrue(
+            {
+                "renrendoc",
+                "jinchutou",
+                "mbalib_doc",
+                "wenku_360",
+                "tencent_wenku",
+                "quark_doc",
+                "taodocs",
+                "doczj",
+                "souhong_wenku",
+            }.issubset(keys)
+        )
+        self.assertEqual("renrendoc", platform_from_url("https://www.renrendoc.com/paper/123.html").key)
+        self.assertEqual("jinchutou", platform_from_url("https://www.jinchutou.com/shtml/example.html").key)
+        self.assertEqual("mbalib_doc", platform_from_url("https://doc.mbalib.com/view/example").key)
+
+    def test_document_library_scan_uses_public_sources_by_default(self) -> None:
+        with patch.dict(os.environ, {"DARKWEB_DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_SOURCES": ""}, clear=False):
+            keys = [source.key for source, _ in _build_search_urls("Acme", ["document_library"])]
+
+        self.assertEqual(
+            [
+                "renrendoc",
+                "jinchutou",
+                "mbalib_doc",
+                "wenku_360",
+                "tencent_wenku",
+                "quark_doc",
+                "taodocs",
+                "doczj",
+                "souhong_wenku",
+            ],
+            keys,
+        )
+        self.assertNotIn("baidu_wenku", keys)
+        self.assertNotIn("book118", keys)
+
+    def test_document_library_defaults_to_larger_candidate_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_watchlist_payload(
+                    {
+                        "name": "Library Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "source_families": ["document_library"],
+                        "terms": [{"term": "Acme", "term_type": "company_name", "weight": 10, "enabled": True}],
+                    }
+                )
+                self.assertEqual(10, watchlist["page_limit"])
+
+                with patch("darkweb_collector.document_exposure._build_search_urls", return_value=[]):
+                    result = scan_watchlist_once(int(watchlist["id"]), source_families=["document_library"])
+
+                self.assertEqual(10, result["page_limit"])
+
+    def test_document_library_scan_does_not_inherit_netdisk_page_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_watchlist_payload(
+                    {
+                        "name": "Netdisk Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "source_families": ["netdisk_aggregator"],
+                        "page_limit": 4,
+                        "terms": [{"term": "Acme", "term_type": "company_name", "weight": 10, "enabled": True}],
+                    }
+                )
+                with patch("darkweb_collector.document_exposure._build_search_urls", return_value=[]):
+                    result = scan_watchlist_once(int(watchlist["id"]), source_families=["document_library"])
+
+                self.assertEqual(10, result["page_limit"])
+
+    def test_document_library_scan_records_public_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            source = next(item for item in DISCOVERY_SOURCES if item.key == "renrendoc")
+            platform = get_exposure_platform("renrendoc")
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_watchlist_payload(
+                    {
+                        "name": "Library Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "notes": "",
+                        "source_families": ["document_library"],
+                        "file_types": ["pdf"],
+                        "terms": [
+                            {"term": "Acme", "term_type": "company_name", "weight": 15, "enabled": True},
+                        ],
+                    }
+                )
+
+                with patch(
+                    "darkweb_collector.document_exposure._build_search_urls",
+                    return_value=[(source, "https://www.renrendoc.com/search.html?keyword=Acme")],
+                ), patch(
+                    "darkweb_collector.document_exposure._search_candidates_for_source",
+                    return_value=[
+                        {
+                            "url": "https://www.renrendoc.com/paper/acme-plan.html",
+                            "title": "Acme 内部方案.pdf",
+                            "source": "renrendoc",
+                            "preview_text": "Acme 内部方案.pdf",
+                        }
+                    ],
+                ), patch(
+                    "darkweb_collector.document_exposure._detail_payload_from_page",
+                    return_value={
+                        "platform": platform,
+                        "page_url": "https://www.renrendoc.com/paper/acme-plan.html",
+                        "page_title": "Acme 内部方案.pdf",
+                        "html": "<html>Acme 内部方案.pdf</html>",
+                        "screenshot_png": b"png",
+                        "preview_text": "Acme 内部方案.pdf 包含内部材料",
+                        "ocr_text": "Acme 内部方案.pdf 包含内部材料",
+                        "file_names": ["Acme 内部方案.pdf"],
+                        "file_sizes": ["128 KB"],
+                        "share_code": "",
+                        "share_type": "public_share",
+                        "access_state": "public",
+                        "source_query": "Acme",
+                        "source_url": "https://www.renrendoc.com/search.html?keyword=Acme",
+                    },
+                ):
+                    result = scan_watchlist_once(
+                        int(watchlist["id"]),
+                        source_families=["document_library"],
+                        file_types=["pdf"],
+                    )
+
+                self.assertEqual(1, result["hits"])
+                exposures = list_document_exposures_payload(source_family="document_library")
+                self.assertEqual(1, len(exposures))
+                self.assertEqual("renrendoc", exposures[0]["platform"])
+                self.assertEqual("document_library", exposures[0]["sourceFamily"])
+                detail = build_document_exposure_detail(int(exposures[0]["id"]))
+                self.assertTrue(detail["latestSnapshot"]["htmlPath"])
+                self.assertTrue(detail["latestSnapshot"]["screenshotPath"])
+                self.assertTrue(Path(detail["latestSnapshot"]["htmlPath"]).exists())
+                self.assertTrue(Path(detail["latestSnapshot"]["screenshotPath"]).exists())
+                self.assertTrue(detail["previewAssets"])
+                health = [row for row in list_netdisk_source_health_payload(source_family="document_library") if row["sourceKey"] == "renrendoc"]
+                self.assertEqual(1, len(health))
+                self.assertEqual("healthy", health[0]["status"])
+                self.assertEqual(1, health[0]["successCount"])
+
+    def test_document_library_list_filter_applies_before_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_watchlist_payload(
+                    {
+                        "name": "Acme Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "terms": [{"term": "Acme", "term_type": "company_name", "weight": 10, "enabled": True}],
+                    }
+                )
+                with get_db_connection() as connection:
+                    for index in range(3):
+                        upsert_document_hit(
+                            connection,
+                            {
+                                "watchlist_id": int(watchlist["id"]),
+                                "platform": "aliyundrive_share",
+                                "platform_type": "netdisk_share",
+                                "discovery_source": "pansou",
+                                "canonical_url": f"https://www.aliyundrive.com/s/acme-{index}",
+                                "normalized_title": f"acme-netdisk-{index}",
+                                "title": f"Acme netdisk {index}",
+                                "access_state": "public",
+                                "confidence_score": 90,
+                                "risk_score": 90,
+                                "severity": "high",
+                                "matched_terms_json": json.dumps([{"term": "Acme"}], ensure_ascii=False),
+                                "file_count": 1,
+                                "share_owner": "",
+                                "disclosure_time": "",
+                                "first_seen_at": "2026-06-04T00:00:00+00:00",
+                                "last_seen_at": "2026-06-04T02:00:00+00:00",
+                                "raw_json": json.dumps({"file_names": ["Acme.pdf"]}, ensure_ascii=False),
+                            },
+                        )
+                    upsert_document_hit(
+                        connection,
+                        {
+                            "watchlist_id": int(watchlist["id"]),
+                            "platform": "tencent_wenku",
+                            "platform_type": "document_library",
+                            "discovery_source": "tencent_wenku",
+                            "canonical_url": "https://wenku.docs.qq.com/detail?docId=acme",
+                            "normalized_title": "acme-document-library",
+                            "title": "Acme document library report",
+                            "access_state": "unknown",
+                            "confidence_score": 70,
+                            "risk_score": 30,
+                            "severity": "low",
+                            "matched_terms_json": json.dumps([{"term": "Acme"}], ensure_ascii=False),
+                            "file_count": 1,
+                            "share_owner": "",
+                            "disclosure_time": "",
+                            "first_seen_at": "2026-06-04T00:00:00+00:00",
+                            "last_seen_at": "2026-06-04T01:00:00+00:00",
+                            "raw_json": json.dumps({"preview_text": "Acme report"}, ensure_ascii=False),
+                        },
+                    )
+                    connection.commit()
+
+                exposures = list_document_exposures_payload(
+                    watchlist_id=int(watchlist["id"]),
+                    source_family="document_library",
+                    limit=1,
+                )
+                self.assertEqual(1, len(exposures))
+                self.assertEqual("tencent_wenku", exposures[0]["platform"])
+                self.assertEqual("document_library", exposures[0]["sourceFamily"])
+
+    def test_document_library_scan_records_login_and_captcha_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            renrendoc = next(item for item in DISCOVERY_SOURCES if item.key == "renrendoc")
+            jinchutou = next(item for item in DISCOVERY_SOURCES if item.key == "jinchutou")
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_watchlist_payload(
+                    {
+                        "name": "Library Health Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "notes": "",
+                        "source_families": ["document_library"],
+                        "terms": [
+                            {"term": "Acme", "term_type": "company_name", "weight": 15, "enabled": True},
+                        ],
+                    }
+                )
+
+                with patch(
+                    "darkweb_collector.document_exposure._build_search_urls",
+                    return_value=[(renrendoc, "https://www.renrendoc.com/search.html?keyword=Acme")],
+                ), patch(
+                    "darkweb_collector.document_exposure._search_candidates_for_source",
+                    side_effect=RuntimeError("renrendoc:login_required"),
+                ):
+                    scan_watchlist_once(int(watchlist["id"]), source_families=["document_library"])
+
+                with patch(
+                    "darkweb_collector.document_exposure._build_search_urls",
+                    return_value=[(jinchutou, "https://so.jinchutou.com/search.html?keyword=Acme")],
+                ), patch(
+                    "darkweb_collector.document_exposure._search_candidates_for_source",
+                    side_effect=RuntimeError("jinchutou:captcha_or_security_verification"),
+                ):
+                    scan_watchlist_once(int(watchlist["id"]), source_families=["document_library"])
+
+                health = {row["sourceKey"]: row for row in list_netdisk_source_health_payload(source_family="document_library")}
+
+        self.assertEqual("login_required", health["renrendoc"]["status"])
+        self.assertEqual(1, health["renrendoc"]["loginRequiredCount"])
+        self.assertEqual("captcha", health["jinchutou"]["status"])
+        self.assertEqual(1, health["jinchutou"]["captchaCount"])
+
     def test_unstable_netdisk_sources_are_opt_in(self) -> None:
         with patch.dict(
             os.environ,
@@ -848,6 +1138,9 @@ class DocumentExposureTests(unittest.TestCase):
 
         file_names = [item["name"] for item in detail["fileList"]]
         self.assertEqual([("https://www.aliyundrive.com/s/deep", "")], calls)
+        self.assertTrue(detail["previewAssets"])
+        self.assertEqual("镜像文件", detail["previewAssets"][0]["label"])
+        self.assertTrue(detail["latestSnapshot"]["htmlPath"])
         self.assertEqual("share_listing", detail["fileListMeta"]["quality"])
         self.assertEqual("动力电池巨头宁德时代怎样布局储能（下）.pdf", detail["fileList"][0]["name"])
         self.assertEqual("matched_preview", detail["fileList"][0]["source"])
@@ -1251,9 +1544,6 @@ class DocumentExposureTests(unittest.TestCase):
                     "darkweb_collector.document_exposure._detail_payload_from_page",
                     side_effect=AssertionError("netdisk scan should not fetch page artifacts"),
                 ), patch(
-                    "darkweb_collector.document_exposure._write_snapshot_files",
-                    side_effect=AssertionError("netdisk scan should not write mirror files"),
-                ), patch(
                     "darkweb_collector.document_exposure._netdisk_file_entries_from_baidupan",
                     return_value=[
                         {
@@ -1278,9 +1568,11 @@ class DocumentExposureTests(unittest.TestCase):
                 self.assertEqual("8m7d", exposures[0]["shareCode"])
                 self.assertEqual("password_share", exposures[0]["shareType"])
                 detail = build_document_exposure_detail(int(exposures[0]["id"]))
-                self.assertEqual([], detail["previewAssets"])
-                self.assertEqual("", detail["latestSnapshot"]["htmlPath"])
+                self.assertTrue(detail["previewAssets"])
+                self.assertTrue(detail["latestSnapshot"]["htmlPath"])
+                self.assertTrue(Path(detail["latestSnapshot"]["htmlPath"]).exists())
                 self.assertEqual("", detail["latestSnapshot"]["screenshotPath"])
+                self.assertIn("Acme", Path(detail["latestSnapshot"]["htmlPath"]).read_text(encoding="utf-8"))
 
     def test_netdisk_scan_does_not_limit_candidates_per_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
