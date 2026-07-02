@@ -44,6 +44,104 @@
       </div>
     </section>
 
+    <section class="ti-card ti-reveal-up tor-bridge-panel">
+      <div class="tor-bridge-panel__header">
+        <div>
+          <h3>网桥</h3>
+          <p>在 Tor 被封锁的地区，网桥可用于安全访问 Tor 网络。不同地区的网络环境存在差异，网桥效果可能因人而异。</p>
+        </div>
+        <div class="health-actions">
+          <el-button plain :loading="torBridgeLoading" @click="loadTorBridgeStatus">刷新状态</el-button>
+          <el-button type="primary" :loading="torBridgeStartLoading || torBridgeSaveLoading" :disabled="!torBridgeConfig.enabled || torBridgeConfig.process_running" @click="startTorBridge">连接</el-button>
+          <el-button type="danger" plain :loading="torBridgeStopLoading" :disabled="!torBridgeConfig.process_running" @click="stopTorBridge">断开</el-button>
+        </div>
+      </div>
+
+      <div class="tor-bridge-body">
+        <div class="tor-bridge-primary">
+          <div class="tor-bridge-toggle">
+            <el-switch v-model="torBridgeConfig.enabled" @change="handleTorBridgeEnabledChange" />
+            <span>使用网桥</span>
+          </div>
+
+          <div class="tor-bridge-current">
+            <div class="tor-bridge-current__head">
+              <strong>您的网桥</strong>
+              <div>
+                <span>内置</span>
+                <el-button text class="tor-bridge-current__menu" @click="openBuiltinBridgeDialog">...</el-button>
+              </div>
+            </div>
+            <div class="tor-bridge-current__body">
+              <strong>{{ torBridgeModeLabel }}</strong>
+              <p>{{ torBridgeDescription }}</p>
+            </div>
+          </div>
+
+          <div class="tor-bridge-change">
+            <h4>更换网桥</h4>
+            <div class="tor-bridge-change__row">
+              <div>
+                <span>选择 Tor 浏览器内置网桥</span>
+                <p>obfs4 / Snowflake / meek</p>
+              </div>
+              <el-button @click="openBuiltinBridgeDialog">选择内置网桥...</el-button>
+            </div>
+            <div class="tor-bridge-change__row">
+              <div>
+                <span>输入已知的网桥地址</span>
+                <p>粘贴 Bridge 行后连接</p>
+              </div>
+              <el-button @click="openCustomBridgeDialog">更换网桥...</el-button>
+            </div>
+          </div>
+        </div>
+
+        <div class="tor-bridge-runtime">
+          <div class="tor-bridge-runtime__item">
+            <span>连接状态</span>
+            <strong>{{ torBridgeStatusLabel }}</strong>
+          </div>
+          <div class="tor-bridge-runtime__item">
+            <span>采集代理</span>
+            <strong>{{ torBridgeConfig.collector_proxy || `socks5h://${torBridgeConfig.socks_host}:${torBridgeConfig.socks_port}` }}</strong>
+          </div>
+          <div class="tor-bridge-runtime__item">
+            <span>检测方式</span>
+            <strong>自动检测</strong>
+          </div>
+        </div>
+      </div>
+      <p v-if="torBridgeConfig.last_error" class="panel-note panel-note--danger">最近错误：{{ torBridgeConfig.last_error }}</p>
+    </section>
+
+    <el-dialog v-model="builtinBridgeDialogVisible" title="选择内置网桥" width="720px" class="builtin-bridge-dialog">
+      <p class="builtin-bridge-dialog__intro">Tor 浏览器包括一些称为“可插拔传输”的特殊网桥，可隐藏您使用 Tor 这一事实。</p>
+      <el-radio-group v-model="builtinBridgeSelection" class="builtin-bridge-list">
+        <el-radio v-for="option in builtinBridgeOptions" :key="option.value" :label="option.value" class="builtin-bridge-option">
+          <div>
+            <div class="builtin-bridge-option__title">
+              <strong>{{ option.label }}</strong>
+              <span v-if="option.value === torBridgeConfig.bridge_mode">当前网桥</span>
+            </div>
+            <p>{{ option.description }}</p>
+          </div>
+        </el-radio>
+      </el-radio-group>
+      <template #footer>
+        <el-button type="primary" :loading="torBridgeStartLoading || torBridgeSaveLoading" @click="confirmBuiltinBridgeSelection">连接</el-button>
+        <el-button @click="builtinBridgeDialogVisible = false">取消</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="customBridgeDialogVisible" title="输入已知的网桥地址" width="720px">
+      <el-input v-model="customBridgeLinesDraft" type="textarea" :rows="6" placeholder="Bridge obfs4 ... / Bridge snowflake ..." />
+      <template #footer>
+        <el-button type="primary" :loading="torBridgeStartLoading || torBridgeSaveLoading" @click="confirmCustomBridgeSelection">连接</el-button>
+        <el-button @click="customBridgeDialogVisible = false">取消</el-button>
+      </template>
+    </el-dialog>
+
     <section class="ti-card ti-reveal-up">
       <div class="ti-card-header">
         <div class="ti-card-title">公开源漏洞同步</div>
@@ -431,12 +529,77 @@ const ransomwareLastSourceLabel = computed(() => {
     return raw
   }
 })
+const torBridgeModeLabel = computed(() => {
+  const labels = {
+    snowflake: 'Snowflake',
+    obfs4: 'obfs4',
+    webtunnel: 'WebTunnel',
+    meek_lite: 'meek',
+    vanilla: 'Vanilla',
+    custom: 'Custom',
+  }
+  return labels[torBridgeConfig.value.bridge_mode] || torBridgeConfig.value.bridge_mode || '未设置'
+})
+const builtinBridgeOptions = [
+  {
+    value: 'obfs4',
+    label: 'obfs4',
+    description: '可使 Tor 流量看似随机数据，在审查严格的地区可能无效。',
+  },
+  {
+    value: 'snowflake',
+    label: 'Snowflake',
+    description: '通过 Snowflake 代理路由连接，使其看似视频通话。',
+  },
+  {
+    value: 'meek_lite',
+    label: 'meek',
+    description: '通过大型云服务提供商将您连接到 Tor 网络。可能在审查严格的地区有效，但通常速度很慢。',
+  },
+]
+const torBridgeDescription = computed(() => {
+  const option = builtinBridgeOptions.find((item) => item.value === torBridgeConfig.value.bridge_mode)
+  if (option) return option.description
+  if (torBridgeConfig.value.bridge_count) return `已配置 ${torBridgeConfig.value.bridge_count} 条网桥地址。`
+  return '通过内置网桥连接，Tor 和传输插件会自动检测。'
+})
+const torBridgeStatusLabel = computed(() => {
+  if (!torBridgeConfig.value.process_running) return '未运行'
+  return torBridgeConfig.value.process_pid ? `运行中 #${torBridgeConfig.value.process_pid}` : '运行中'
+})
 
 const runningAllSites = ref(false)
 const continuousLoading = ref(false)
 const vulnerabilityRunLoading = ref(false)
 const vulnerabilityContinuousLoading = ref(false)
 const vulnerabilityIntervalHours = ref(1)
+const torBridgeLoading = ref(false)
+const torBridgeSaveLoading = ref(false)
+const torBridgeStartLoading = ref(false)
+const torBridgeStopLoading = ref(false)
+const torBridgeLinesText = ref('')
+const builtinBridgeDialogVisible = ref(false)
+const customBridgeDialogVisible = ref(false)
+const builtinBridgeSelection = ref('snowflake')
+const customBridgeLinesDraft = ref('')
+const torBridgeConfig = ref({
+  enabled: false,
+  bridge_mode: 'snowflake',
+  tor_executable: '',
+  transport_executable: '',
+  socks_host: '127.0.0.1',
+  socks_port: 9050,
+  bridge_lines: [],
+  extra_torrc_lines: [],
+  bridge_count: 0,
+  process_running: false,
+  process_pid: null,
+  collector_proxy: '',
+  settings_path: '',
+  torrc_path: '',
+  data_directory: '',
+  last_error: '',
+})
 const ransomwareRunLoading = ref(false)
 const ransomwareContinuousLoading = ref(false)
 const ransomwareSaveLoading = ref(false)
@@ -574,8 +737,156 @@ async function loadRansomwareConfig() {
   }
 }
 
+function textToLines(value) {
+  return String(value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function applyTorBridgeStatus(payload) {
+  torBridgeConfig.value = {
+    ...torBridgeConfig.value,
+    ...payload,
+    socks_port: Number(payload?.socks_port || 9050),
+    bridge_lines: Array.isArray(payload?.bridge_lines) ? payload.bridge_lines : [],
+    extra_torrc_lines: Array.isArray(payload?.extra_torrc_lines) ? payload.extra_torrc_lines : [],
+  }
+  torBridgeLinesText.value = torBridgeConfig.value.bridge_lines.join('\n')
+}
+
+async function loadTorBridgeStatus() {
+  torBridgeLoading.value = true
+  try {
+    const response = await fetch('/api/tor-bridge/status')
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyTorBridgeStatus(await response.json())
+  } catch (error) {
+    ElMessage.error(error.message || '读取 Tor 网桥状态失败')
+  } finally {
+    torBridgeLoading.value = false
+  }
+}
+
+async function saveTorBridgeConfig(options = {}) {
+  const silent = Boolean(options?.silent)
+  torBridgeSaveLoading.value = true
+  try {
+    const response = await fetch('/api/tor-bridge/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: Boolean(torBridgeConfig.value.enabled),
+        bridge_mode: torBridgeConfig.value.bridge_mode || 'snowflake',
+        socks_host: torBridgeConfig.value.socks_host || '127.0.0.1',
+        socks_port: Number(torBridgeConfig.value.socks_port || 9050),
+        bridge_lines: textToLines(torBridgeLinesText.value),
+        extra_torrc_lines: [],
+        tor_executable: '',
+        transport_executable: '',
+        data_directory: '',
+      }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyTorBridgeStatus(await response.json())
+    if (!silent) ElMessage.success('Tor 网桥配置已保存')
+    return true
+  } catch (error) {
+    ElMessage.error(error.message || '保存 Tor 网桥配置失败')
+    return false
+  } finally {
+    torBridgeSaveLoading.value = false
+  }
+}
+
+async function startTorBridge() {
+  torBridgeStartLoading.value = true
+  try {
+    const saved = await saveTorBridgeConfig({ silent: true })
+    if (!saved) return
+    const response = await fetch('/api/tor-bridge/start', { method: 'POST' })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyTorBridgeStatus(await response.json())
+    ElMessage.success('Tor 网桥已启动')
+  } catch (error) {
+    ElMessage.error(error.message || '启动 Tor 网桥失败')
+  } finally {
+    torBridgeStartLoading.value = false
+  }
+}
+
+async function stopTorBridge() {
+  torBridgeStopLoading.value = true
+  try {
+    const response = await fetch('/api/tor-bridge/stop', { method: 'POST' })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyTorBridgeStatus(await response.json())
+    ElMessage.success('Tor 网桥已停止')
+  } catch (error) {
+    ElMessage.error(error.message || '停止 Tor 网桥失败')
+  } finally {
+    torBridgeStopLoading.value = false
+  }
+}
+
+async function handleTorBridgeEnabledChange(enabled) {
+  if (!enabled && torBridgeConfig.value.process_running) {
+    await stopTorBridge()
+  }
+  await saveTorBridgeConfig({ silent: true })
+}
+
+function openBuiltinBridgeDialog() {
+  const current = builtinBridgeOptions.some((option) => option.value === torBridgeConfig.value.bridge_mode)
+    ? torBridgeConfig.value.bridge_mode
+    : 'snowflake'
+  builtinBridgeSelection.value = current
+  builtinBridgeDialogVisible.value = true
+}
+
+async function confirmBuiltinBridgeSelection() {
+  torBridgeConfig.value.enabled = true
+  torBridgeConfig.value.bridge_mode = builtinBridgeSelection.value || 'snowflake'
+  torBridgeLinesText.value = ''
+  builtinBridgeDialogVisible.value = false
+  await startTorBridge()
+}
+
+function openCustomBridgeDialog() {
+  customBridgeLinesDraft.value = torBridgeLinesText.value
+  customBridgeDialogVisible.value = true
+}
+
+function inferBridgeModeFromLines(lines) {
+  const first = String(lines?.[0] || '').replace(/^bridge\s+/i, '').trim().split(/\s+/)[0]?.toLowerCase()
+  if (first === 'meek') return 'meek_lite'
+  if (['snowflake', 'obfs4', 'webtunnel', 'meek_lite', 'vanilla'].includes(first)) return first
+  return 'custom'
+}
+
+async function confirmCustomBridgeSelection() {
+  const lines = textToLines(customBridgeLinesDraft.value)
+  if (!lines.length) {
+    ElMessage.error('请输入网桥地址')
+    return
+  }
+  torBridgeConfig.value.enabled = true
+  torBridgeConfig.value.bridge_mode = inferBridgeModeFromLines(lines)
+  torBridgeLinesText.value = lines.join('\n')
+  customBridgeDialogVisible.value = false
+  await startTorBridge()
+}
+
 async function refreshAllPanels() {
-  await Promise.all([refreshIntelligence(), refreshJobs(), refreshContinuous(), loadMonitoringKeywords(), loadRansomwareConfig(), loadBotConfig()])
+  await Promise.all([
+    refreshIntelligence(),
+    refreshJobs(),
+    refreshContinuous(),
+    loadMonitoringKeywords(),
+    loadRansomwareConfig(),
+    loadBotConfig(),
+    loadTorBridgeStatus(),
+  ])
 }
 
 async function loadBotConfig() {
@@ -911,6 +1222,11 @@ onMounted(async () => {
 </script>
 
 <style scoped lang="scss">
+.collector-control-page {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
 .control-hero {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
@@ -991,6 +1307,224 @@ onMounted(async () => {
   min-width: 220px;
 }
 
+.tor-bridge-panel {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  padding: 30px;
+  overflow: hidden;
+}
+
+.tor-bridge-panel__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+  min-width: 0;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--ti-border-soft);
+}
+
+.tor-bridge-panel__header h3 {
+  margin: 0;
+  color: var(--ti-text-primary);
+  font-size: 30px;
+  line-height: 1.18;
+}
+
+.tor-bridge-panel__header p {
+  max-width: 880px;
+  margin: 10px 0 0;
+  color: var(--ti-text-secondary);
+  line-height: 1.7;
+}
+
+.tor-bridge-panel__header .health-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.tor-bridge-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 280px);
+  gap: 28px;
+  min-width: 0;
+  padding-top: 24px;
+  align-items: start;
+}
+
+.tor-bridge-primary {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.tor-bridge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ti-text-primary);
+  min-height: 32px;
+}
+
+.tor-bridge-current {
+  width: 100%;
+  min-width: 0;
+  border-radius: 8px;
+  background: #f4f6fb;
+  padding: 24px 28px;
+}
+
+.tor-bridge-current__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+  color: var(--ti-text-primary);
+  min-width: 0;
+}
+
+.tor-bridge-current__head > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tor-bridge-current__menu {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--ti-text-primary);
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.tor-bridge-current__body {
+  padding-top: 16px;
+}
+
+.tor-bridge-current__body strong {
+  color: var(--ti-text-primary);
+  font-size: 18px;
+}
+
+.tor-bridge-current__body p {
+  margin: 12px 0 0;
+  color: var(--ti-text-primary);
+  line-height: 1.7;
+}
+
+.tor-bridge-change {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tor-bridge-change h4 {
+  margin: 0;
+  color: var(--ti-text-primary);
+  font-size: 22px;
+}
+
+.tor-bridge-change__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  min-width: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--ti-border-soft);
+}
+
+.tor-bridge-change__row span {
+  color: var(--ti-text-primary);
+  font-weight: 600;
+}
+
+.tor-bridge-change__row p {
+  margin: 4px 0 0;
+  color: var(--ti-text-muted);
+  font-size: 12px;
+}
+
+.tor-bridge-change__row .el-button {
+  width: 178px;
+  justify-self: end;
+}
+
+.tor-bridge-runtime {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--ti-border-soft);
+  border-radius: 12px;
+  background: rgba(248, 250, 253, 0.86);
+}
+
+.tor-bridge-runtime__item {
+  min-width: 0;
+}
+
+.tor-bridge-runtime__item span {
+  display: block;
+  color: var(--ti-text-secondary);
+  font-size: 12px;
+}
+
+.tor-bridge-runtime__item strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--ti-text-primary);
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.builtin-bridge-dialog__intro {
+  margin: 0 0 14px;
+  color: var(--ti-text-primary);
+  line-height: 1.7;
+}
+
+.builtin-bridge-list {
+  display: grid;
+  gap: 14px;
+}
+
+.builtin-bridge-option {
+  width: 100%;
+  height: auto;
+  margin-right: 0;
+  align-items: flex-start;
+  white-space: normal;
+}
+
+.builtin-bridge-option__title {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.builtin-bridge-option__title strong {
+  color: var(--ti-text-primary);
+  font-size: 17px;
+}
+
+.builtin-bridge-option__title span {
+  color: #1677ff;
+  font-size: 13px;
+}
+
+.builtin-bridge-option p {
+  margin: 8px 0 0;
+  color: var(--ti-text-primary);
+  line-height: 1.7;
+}
+
 .panel-note-block {
   display: grid;
   gap: 6px;
@@ -1062,6 +1596,25 @@ onMounted(async () => {
   }
 }
 
+@media (max-width: 1200px) {
+  .tor-bridge-panel__header,
+  .tor-bridge-body {
+    grid-template-columns: 1fr;
+  }
+
+  .tor-bridge-panel__header {
+    display: grid;
+  }
+
+  .tor-bridge-panel__header .health-actions {
+    justify-content: flex-start;
+  }
+
+  .tor-bridge-runtime {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 900px) {
   .control-hero {
     grid-template-columns: 1fr;
@@ -1072,6 +1625,20 @@ onMounted(async () => {
   .control-hero__stats,
   .status-grid {
     grid-template-columns: 1fr;
+  }
+
+  .tor-bridge-panel {
+    padding: 22px;
+  }
+
+  .tor-bridge-runtime,
+  .tor-bridge-change__row {
+    grid-template-columns: 1fr;
+  }
+
+  .tor-bridge-change__row .el-button {
+    width: 100%;
+    justify-self: stretch;
   }
 }
 </style>

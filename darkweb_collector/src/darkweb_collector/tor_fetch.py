@@ -33,7 +33,19 @@ def is_onion_url(url: str) -> bool:
 
 
 def get_tor_socks_settings() -> tuple[str, int]:
-    return os.environ.get("TOR_SOCKS_HOST", "127.0.0.1"), int(os.environ.get("TOR_SOCKS_PORT", "9150"))
+    env_host = os.environ.get("TOR_SOCKS_HOST")
+    env_port = os.environ.get("TOR_SOCKS_PORT")
+    if env_host or env_port:
+        return env_host or "127.0.0.1", int(env_port or "9150")
+    try:
+        from darkweb_collector.tor_bridge_control import active_socks_settings
+
+        configured = active_socks_settings()
+    except Exception:
+        configured = None
+    if configured:
+        return configured
+    return "127.0.0.1", 9150
 
 
 def get_http_proxy_settings() -> tuple[str | None, int | None]:

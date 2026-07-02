@@ -33,6 +33,8 @@ const shell = provideShellLayout()
 
 .main-content {
   flex: 1;
+  min-width: 0;
+  width: calc(100% - var(--ti-sidebar-width));
   display: flex;
   flex-direction: column;
   margin-left: var(--ti-sidebar-width);
@@ -41,6 +43,7 @@ const shell = provideShellLayout()
 }
 
 .app-container.sidebar-collapsed .main-content {
+  width: calc(100% - var(--ti-sidebar-collapsed));
   margin-left: var(--ti-sidebar-collapsed);
 }
 
@@ -72,6 +75,7 @@ const shell = provideShellLayout()
 
 @media (max-width: 767px) {
   .main-content {
+    width: calc(100% - var(--ti-sidebar-collapsed));
     margin-left: var(--ti-sidebar-collapsed);
   }
 
