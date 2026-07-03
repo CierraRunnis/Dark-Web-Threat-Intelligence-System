@@ -1,2 +1,0 @@
-
-0394cce92b025da0f7ccda23dbf9870f834f5518	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/xml/-/xml-1.0.1.tgz","integrity":null,"time":1780574244117,"size":"262","metadata":{"time":1780574244117,"url":"http://registry.npm.taobao.org/xml/-/xml-1.0.1.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/xml/-/xml-1.0.1.tgz"},"options":{"compress":true},"status":301}}

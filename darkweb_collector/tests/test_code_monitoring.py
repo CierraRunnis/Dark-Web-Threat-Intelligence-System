@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import ssl
 import sys
 import tempfile
@@ -15,26 +16,27 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import darkweb_collector.api_actions as api_actions
+import darkweb_collector.code_monitoring as code_monitoring
 from darkweb_collector.code_monitoring import (
     _candidate_signature,
     _classify_code_hit,
-    _gitee_blob_content,
-    _gitee_repo_candidates_to_code_results,
     _collect_gitee_repo_search_window,
     _collect_search_results_across_pages,
     _collect_search_results_incremental,
+    _commit_db_write,
     _evaluate_enterprise_match,
     _extract_code_lines,
     _gitee_repo_code_search_incremental,
-    _gitlab_repo_candidates_to_code_results,
+    _gitlab_project_blob_search,
     _gitlab_repo_fallback_code_search,
     _http_get_json,
-    _repo_seed_queries,
+    _is_access_limited_scan_error,
     build_code_monitoring_summary,
     delete_code_watchlist_payload,
     list_code_hits_payload,
     _payload_enterprise_profile,
     _search_page_url,
+    _write_snapshot_files,
     build_code_hit_detail,
     list_code_scan_runs_payload,
     save_code_watchlist_payload,
@@ -63,6 +65,155 @@ class CodeMonitoringTests(unittest.TestCase):
     def _write_empty_sites(self, path: Path) -> None:
         path.write_text(json.dumps({"sites": []}, ensure_ascii=False), encoding="utf-8")
 
+    def test_access_limited_scan_error_includes_search_platform_http_limits(self) -> None:
+        self.assertTrue(_is_access_limited_scan_error("gitee:catl:HTTP Error 403: Forbidden"))
+        self.assertTrue(_is_access_limited_scan_error("github:term:HTTP Error 429: Too Many Requests"))
+        self.assertTrue(_is_access_limited_scan_error("gitlab:repo:nested_search:ssl_transport_error"))
+        self.assertTrue(_is_access_limited_scan_error("gitlab:repo:nested_search:HTTP Error 404: Not Found"))
+        self.assertFalse(_is_access_limited_scan_error("github:term:unexpected parser failure"))
+
+    def test_commit_db_write_retries_locked_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            attempts = {"count": 0}
+
+            def write_row(connection):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                connection.execute("CREATE TABLE IF NOT EXISTS retry_probe (id INTEGER PRIMARY KEY)")
+                connection.execute("INSERT INTO retry_probe DEFAULT VALUES")
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False), patch(
+                "darkweb_collector.code_monitoring.time.sleep"
+            ) as sleep_mock:
+                _commit_db_write(write_row)
+                with get_db_connection() as connection:
+                    row_count = connection.execute("SELECT COUNT(*) FROM retry_probe").fetchone()[0]
+
+        self.assertEqual(2, attempts["count"])
+        self.assertEqual(1, row_count)
+        sleep_mock.assert_called_once()
+
+    def test_list_code_hits_payload_reuses_include_suppressed_cache(self) -> None:
+        code_monitoring._clear_code_hits_payload_cache()
+        rows = [
+            {"id": 1, "displayBucket": "primary"},
+            {"id": 2, "displayBucket": "suppressed"},
+            {"id": 3, "displayBucket": "suppressed"},
+        ]
+        try:
+            with (
+                patch("darkweb_collector.code_monitoring._code_hits_payload_cache_revision", return_value=("rev",)),
+                patch("darkweb_collector.code_monitoring._build_code_hits_payload", return_value=rows) as build_payload,
+            ):
+                first = list_code_hits_payload(limit=1, include_suppressed=True)
+                second = list_code_hits_payload(limit=2, include_suppressed=True)
+
+            self.assertEqual([1, 2], [item["id"] for item in first])
+            self.assertEqual([1, 2, 3], [item["id"] for item in second])
+            self.assertEqual(1, build_payload.call_count)
+        finally:
+            code_monitoring._clear_code_hits_payload_cache()
+
+    def test_list_code_hits_payload_uses_stored_classification_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_code_watchlist_payload(
+                    {
+                        "name": "Stored Metadata Watch",
+                        "organization_name": "Acme",
+                        "enabled": True,
+                        "notes": "",
+                        "platforms": ["github"],
+                        "file_extensions": ["py"],
+                        "detail_fetch": True,
+                        "enabled_rule_keys": ["token"],
+                        "terms": [{"term": "acme.com", "term_type": "domain", "enabled": True}],
+                        "enterprise_profile": {"root_domains": ["acme.com"]},
+                    }
+                )
+                with get_db_connection() as connection:
+                    upsert_code_hit(
+                        connection,
+                        {
+                            "watchlist_id": int(watchlist["id"]),
+                            "platform": "github",
+                            "repository_name": "repo",
+                            "repository_owner": "demo",
+                            "repository_url": "https://github.com/demo/repo",
+                            "file_path": "data.py",
+                            "branch": "main",
+                            "file_url": "https://github.com/demo/repo/blob/main/data.py",
+                            "visibility": "public",
+                            "language": "Python",
+                            "sensitive_type": "clue",
+                            "matched_rule": "keyword",
+                            "matched_term": "acme.com",
+                            "result_layer": "clue",
+                            "risk_score": 18,
+                            "severity": "low",
+                            "first_seen_at": "2026-06-15T00:00:00+00:00",
+                            "last_seen_at": "2026-06-15T00:00:00+00:00",
+                            "raw_json": json.dumps(
+                                {
+                                    "candidate": {"snippetText": "Acme public reference list"},
+                                    "result_layer": "clue",
+                                    "display_bucket": "suppressed",
+                                    "suppressed": True,
+                                    "suppression_reasons": ["public reference"],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    )
+                    connection.commit()
+
+                try:
+                    with patch("darkweb_collector.code_monitoring._classify_code_hit", side_effect=AssertionError("unexpected reclassify")):
+                        with_suppressed = list_code_hits_payload(watchlist_id=int(watchlist["id"]), include_suppressed=True, limit=20)
+                        primary = list_code_hits_payload(watchlist_id=int(watchlist["id"]), include_suppressed=False, limit=20)
+
+                    self.assertEqual(1, len(with_suppressed))
+                    self.assertTrue(with_suppressed[0]["suppressed"])
+                    self.assertEqual("suppressed", with_suppressed[0]["displayBucket"])
+                    self.assertEqual([], primary)
+                finally:
+                    code_monitoring._clear_code_hits_payload_cache()
+
+    def test_write_snapshot_files_caps_long_file_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+            repository_name = "repo-" + ("very-long-path-segment-" * 20)
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                html_path, artifact_path = _write_snapshot_files(
+                    "Watchlist",
+                    "github",
+                    "catl.com",
+                    repository_name,
+                    "<html>ok</html>",
+                    {"ok": True},
+                )
+
+            self.assertTrue(Path(html_path).exists())
+            self.assertTrue(Path(artifact_path).exists())
+            self.assertLessEqual(len(Path(html_path).stem), 80)
+
     def test_extract_code_lines_keeps_full_github_line(self) -> None:
         html = """
         <div id="LC31" class="react-code-text react-code-line-contents-no-virtualization react-file-line html-div ">
@@ -85,13 +236,13 @@ class CodeMonitoringTests(unittest.TestCase):
     def test_extract_code_lines_supports_embedded_raw_lines(self) -> None:
         html = """
         <script type="application/json" data-target="react-app.embeddedData">
-        {"payload":{"codeViewBlobLayoutRoute.StyledBlob":{"rawLines":["const admin = 'admin@dbs.com';","const password = 'Sup3rSecretValue123';"]}}}
+        {"payload":{"codeViewBlobLayoutRoute.StyledBlob":{"rawLines":["const admin = 'admin@dbs.com';","const password = 'TEST_PASSWORD_PLACEHOLDER';"]}}}
         </script>
         """
 
         rows = _extract_code_lines(html)
 
-        self.assertEqual([(1, "const admin = 'admin@dbs.com';"), (2, "const password = 'Sup3rSecretValue123';")], rows)
+        self.assertEqual([(1, "const admin = 'admin@dbs.com';"), (2, "const password = 'TEST_PASSWORD_PLACEHOLDER';")], rows)
 
     def test_search_page_url_builds_follow_up_pages(self) -> None:
         self.assertEqual(
@@ -102,24 +253,6 @@ class CodeMonitoringTests(unittest.TestCase):
             "https://gitlab.com/search?search=dbs&nav_source=navbar&type=blobs&page=2",
             _search_page_url("gitlab", "https://gitlab.com/search?search=dbs&nav_source=navbar&type=blobs", 2),
         )
-
-    def test_repo_seed_queries_include_domain_root_and_profile_aliases(self) -> None:
-        profile = {
-            "official_names": ["DBS Bank"],
-            "brand_aliases": [],
-            "english_aliases": ["dbs"],
-            "root_domains": ["dbs.com"],
-            "trusted_subdomain_patterns": ["*.dbs.com"],
-            "internal_system_keywords": [],
-            "negative_aliases": [],
-            "short_alias_guard": ["dbs"],
-        }
-
-        queries = _repo_seed_queries("dbs.com", "domain", profile)
-
-        self.assertEqual("dbs.com", queries[0])
-        self.assertIn("dbs", queries)
-        self.assertIn("DBS Bank", queries)
 
     def test_classify_code_hit_supports_clue_and_sensitive_layers(self) -> None:
         clue = _classify_code_hit(
@@ -135,7 +268,7 @@ class CodeMonitoringTests(unittest.TestCase):
         sensitive = _classify_code_hit(
             "DBS.com",
             "app.py",
-            "token = 'abcdefghijklmnop123456'\nPASSWORD = os.getenv('PASSWORD')",
+            "token = 'FAKE_TOKEN_FOR_TEST_ONLY'\nPASSWORD = os.getenv('PASSWORD')",
             ["password", "token"],
         )
         self.assertIsNotNone(sensitive)
@@ -233,7 +366,7 @@ class CodeMonitoringTests(unittest.TestCase):
         }
         code_text = (
             'ZABBIX_SERVER = "https://biz-eicc.catl.com"\n'
-            'API_TOKEN = "8b55d051c0b07beadbdf72c16482fe77350d93f0efcbdb6653b9bfe3b917ea23"\n'
+            'API_TOKEN = "FAKE_API_TOKEN_FOR_TEST_ONLY"\n'
             'zapi.login(api_token=API_TOKEN)'
         )
         enterprise_match = _evaluate_enterprise_match(profile, "catl.com", candidate, code_text)
@@ -256,7 +389,7 @@ class CodeMonitoringTests(unittest.TestCase):
         result = _classify_code_hit(
             "catl",
             "creds.txt",
-            "[default]\naws_secret_access_key=e7c19b6nXzRBeO1F5OtshpZLIL3bRuAA8hCti8HQ\naws_session_token=FwoGZXIvYXdzEEUaDBnB/jCATLI+W1vxCyLMAU3LHOf9uvcc66x2mVc",
+            "[default]\naws_secret_access_key=FAKE_AWS_SECRET_FOR_TEST_ONLY\naws_session_token=FAKE_AWS_SESSION_TOKEN_FOR_TEST_ONLY",
             ["token", "ak_sk"],
             term_type="custom",
             enterprise_match={"valid": False, "level": "none", "anchors": [], "system_keywords": []},
@@ -1005,6 +1138,13 @@ class CodeMonitoringTests(unittest.TestCase):
         self.assertEqual([], payload)
         self.assertEqual(2, urlopen_mock.call_count)
 
+    def test_gitlab_project_blob_search_skips_non_gitlab_repository_url(self) -> None:
+        with patch("darkweb_collector.code_monitoring._http_get_json") as api_mock:
+            rows = _gitlab_project_blob_search("https://github.com/shuup/shuup", "catl", None)
+
+        self.assertEqual([], rows)
+        api_mock.assert_not_called()
+
     def test_collect_gitee_repo_search_window_raises_on_first_page_captcha(self) -> None:
         with patch(
             "darkweb_collector.code_monitoring._http_get_json",
@@ -1012,123 +1152,6 @@ class CodeMonitoringTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "captcha_or_security_verification"):
                 _collect_gitee_repo_search_window("dbs.com", start_page=1, page_count=1)
-
-    def test_gitee_blob_content_prefers_raw_endpoint(self) -> None:
-        with patch(
-            "darkweb_collector.code_monitoring._http_get_text",
-            return_value='API_TOKEN = "abcdefghijklmnop123456"',
-        ) as text_mock, patch(
-            "darkweb_collector.code_monitoring._http_get_json",
-        ) as json_mock:
-            text = _gitee_blob_content("acme", "repo-a", "main", "src/app.py")
-
-        self.assertIn("API_TOKEN", text)
-        self.assertEqual(1, text_mock.call_count)
-        self.assertEqual(0, json_mock.call_count)
-
-    def test_gitee_repo_candidates_to_code_results_uses_branch_probe_and_raw_fetch(self) -> None:
-        repo_candidate = {
-            "repositoryOwner": "acme",
-            "repositoryName": "repo-a",
-            "repositoryUrl": "https://gitee.com/acme/repo-a",
-            "branch": "",
-        }
-        with patch(
-            "darkweb_collector.code_monitoring._gitee_repo_tree_with_branch",
-            return_value=(
-                "main",
-                [
-                    {"type": "blob", "path": "src/app.py"},
-                    {"type": "blob", "path": "README.md"},
-                ],
-            ),
-        ), patch(
-            "darkweb_collector.code_monitoring._gitee_blob_content",
-            side_effect=[
-                'API_TOKEN = "abcdefghijklmnop123456"\nBASE_URL = "https://biz-eicc.catl.com"',
-                "# readme",
-            ],
-        ):
-            rows = _gitee_repo_candidates_to_code_results(
-                [repo_candidate],
-                "catl.com",
-                ["py", "md"],
-                ["token"],
-            )
-
-        self.assertEqual(1, len(rows))
-        self.assertEqual("src/app.py", rows[0]["filePath"])
-        self.assertEqual("https://gitee.com/acme/repo-a/blob/main/src/app.py", rows[0]["fileUrl"])
-
-    def test_gitlab_repo_candidates_to_code_results_uses_public_tree_and_raw_api(self) -> None:
-        repo_candidate = {
-            "repositoryOwner": "acme",
-            "repositoryName": "repo-a",
-            "repositoryUrl": "https://gitlab.com/acme/repo-a",
-            "projectId": 101,
-            "branch": "main",
-        }
-        with patch(
-            "darkweb_collector.code_monitoring._gitlab_repo_tree",
-            return_value=[
-                {"type": "blob", "path": "src/app.py"},
-                {"type": "blob", "path": "README.md"},
-            ],
-        ), patch(
-            "darkweb_collector.code_monitoring._gitlab_blob_content",
-            side_effect=[
-                'API_TOKEN = "abcdefghijklmnop123456"\nBASE_URL = "https://biz-eicc.catl.com"',
-                "# readme",
-            ],
-        ):
-            rows = _gitlab_repo_candidates_to_code_results(
-                [repo_candidate],
-                "catl.com",
-                ["py", "md"],
-                ["token"],
-                10,
-            )
-
-        self.assertEqual(1, len(rows))
-        self.assertEqual("src/app.py", rows[0]["filePath"])
-        self.assertEqual("https://gitlab.com/acme/repo-a/-/blob/main/src/app.py", rows[0]["fileUrl"])
-
-    def test_gitlab_repo_fallback_code_search_uses_alias_query_candidates(self) -> None:
-        repo_candidate = {
-            "repositoryOwner": "acme",
-            "repositoryName": "repo-a",
-            "repositoryUrl": "https://gitlab.com/acme/repo-a",
-            "projectId": 101,
-            "branch": "main",
-        }
-        with patch(
-            "darkweb_collector.code_monitoring._gitlab_repo_search",
-            side_effect=lambda query, page_limit=1: [repo_candidate] if query == "catl" else [],
-        ) as repo_search_mock, patch(
-            "darkweb_collector.code_monitoring._gitlab_repo_candidates_to_code_results",
-            return_value=[
-                {
-                    "repositoryOwner": "acme",
-                    "repositoryName": "repo-a",
-                    "repositoryUrl": "https://gitlab.com/acme/repo-a",
-                    "branch": "main",
-                    "filePath": "src/app.py",
-                    "fileUrl": "https://gitlab.com/acme/repo-a/-/blob/main/src/app.py",
-                }
-            ],
-        ):
-            rows = _gitlab_repo_fallback_code_search(
-                "catl.com",
-                None,
-                ["py"],
-                ["token"],
-                10,
-                query_terms=["catl.com", "catl"],
-                page_limit=1,
-            )
-
-        self.assertEqual(1, len(rows))
-        self.assertEqual(["catl.com", "catl"], [call.args[0] for call in repo_search_mock.call_args_list])
 
     def test_gitlab_repo_fallback_code_search_raises_ssl_issue_when_no_results(self) -> None:
         with patch(
@@ -1141,9 +1164,6 @@ class CodeMonitoringTests(unittest.TestCase):
                 }
             ],
         ), patch(
-            "darkweb_collector.code_monitoring._gitlab_repo_candidates_to_code_results",
-            side_effect=RuntimeError("ssl_transport_error"),
-        ), patch(
             "darkweb_collector.code_monitoring._gitlab_project_blob_search",
             side_effect=RuntimeError("ssl_transport_error"),
         ):
@@ -1152,7 +1172,6 @@ class CodeMonitoringTests(unittest.TestCase):
                     "dbs.com",
                     None,
                     ["py"],
-                    ["token"],
                     10,
                     page_limit=1,
                 )
@@ -1204,6 +1223,145 @@ class CodeMonitoringTests(unittest.TestCase):
                 self.assertEqual(1, len(payloads))
                 self.assertEqual(3, payloads[0]["clueHitCount"])
                 self.assertEqual(2, payloads[0]["sensitiveHitCount"])
+
+    def test_running_code_scan_run_sorts_by_started_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_code_watchlist_payload(
+                    {
+                        "name": "Running Scan Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "notes": "",
+                        "platforms": ["github"],
+                        "file_extensions": ["py"],
+                        "detail_fetch": True,
+                        "enabled_rule_keys": ["password"],
+                        "terms": [{"term": "Acme", "term_type": "company_name", "enabled": True}],
+                    }
+                )
+                with get_db_connection() as connection:
+                    insert_code_scan_run(
+                        connection,
+                        {
+                            "watchlist_id": int(watchlist["id"]),
+                            "platforms_json": json.dumps(["github"], ensure_ascii=False),
+                            "requested_terms_json": json.dumps(["Acme"], ensure_ascii=False),
+                            "candidate_count": 12,
+                            "hit_count": 5,
+                            "clue_hit_count": 3,
+                            "sensitive_hit_count": 2,
+                            "error_count": 0,
+                            "status": "succeeded",
+                            "errors_json": json.dumps([], ensure_ascii=False),
+                            "started_at": "2026-06-10T00:00:00+00:00",
+                            "finished_at": "2026-06-10T00:10:00+00:00",
+                        },
+                    )
+                    insert_code_scan_run(
+                        connection,
+                        {
+                            "watchlist_id": int(watchlist["id"]),
+                            "platforms_json": json.dumps(["github"], ensure_ascii=False),
+                            "requested_terms_json": json.dumps(["Acme"], ensure_ascii=False),
+                            "candidate_count": 0,
+                            "hit_count": 0,
+                            "clue_hit_count": 0,
+                            "sensitive_hit_count": 0,
+                            "error_count": 0,
+                            "status": "running",
+                            "errors_json": json.dumps([], ensure_ascii=False),
+                            "started_at": "2026-06-10T00:20:00+00:00",
+                            "finished_at": "",
+                        },
+                    )
+                    connection.commit()
+
+                payloads = list_code_scan_runs_payload(int(watchlist["id"]), limit=5)
+                self.assertEqual("running", payloads[0]["status"])
+                self.assertEqual("", payloads[0]["finishedAt"])
+                self.assertEqual("succeeded", payloads[1]["status"])
+
+    def test_code_scan_records_running_history_before_unexpected_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_code_watchlist_payload(
+                    {
+                        "name": "Failing Scan Watch",
+                        "organization_name": "Acme Corp",
+                        "enabled": True,
+                        "notes": "",
+                        "platforms": ["github"],
+                        "file_extensions": ["py"],
+                        "search_page_limit": 1,
+                        "detail_fetch": False,
+                        "enabled_rule_keys": ["password"],
+                        "terms": [{"term": "Acme", "term_type": "company_name", "enabled": True}],
+                    }
+                )
+                with patch(
+                    "darkweb_collector.code_monitoring._collect_search_results_incremental",
+                    side_effect=RuntimeError("scan boom"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "scan boom"):
+                        code_monitoring.scan_code_watchlist_once(
+                            int(watchlist["id"]),
+                            platforms=["github"],
+                            search_page_limit=1,
+                            detail_fetch=False,
+                            browser_fallback=False,
+                        )
+
+                payloads = list_code_scan_runs_payload(int(watchlist["id"]), limit=5)
+                self.assertEqual(1, len(payloads))
+                self.assertEqual("running", payloads[0]["status"])
+                self.assertEqual("", payloads[0]["finishedAt"])
+
+    def test_save_code_watchlist_payload_dedupes_duplicate_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            output_root = tmp_path / "output"
+            config_path = tmp_path / "sites.json"
+            self._write_empty_sites(config_path)
+
+            with patch.dict(os.environ, self._env(db_path, output_root, config_path), clear=False):
+                watchlist = save_code_watchlist_payload(
+                    {
+                        "name": "Duplicate Terms",
+                        "organization_name": "Acme",
+                        "enabled": True,
+                        "notes": "",
+                        "platforms": ["github"],
+                        "file_extensions": ["py"],
+                        "detail_fetch": True,
+                        "enabled_rule_keys": ["token"],
+                        "terms": [
+                            {"term": " acme.com ", "term_type": "domain", "enabled": True},
+                            {"term": "ACME.COM", "term_type": "domain", "enabled": True},
+                            {"term": "acme.com", "term_type": "custom", "enabled": True},
+                        ],
+                    }
+                )
+
+                terms = watchlist["terms"]
+                self.assertEqual(2, len(terms))
+                self.assertEqual(
+                    [("acme.com", "custom"), ("acme.com", "domain")],
+                    sorted((item["term"].lower(), item["term_type"]) for item in terms),
+                )
 
     def test_delete_code_watchlist_payload_removes_related_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1262,7 +1420,7 @@ class CodeMonitoringTests(unittest.TestCase):
                             "page_url": "https://github.com/owner/repo/blob/main/main.py",
                             "html_path": "",
                             "screenshot_path": "",
-                            "code_fragment": "TOKEN='abc12345678901234567890'",
+                            "code_fragment": "TOKEN='FAKE_TOKEN_FOR_TEST_ONLY'",
                             "masked_fragment": "TOKEN='abc***7890'",
                             "raw_artifact_path": "",
                             "line_start": 1,
@@ -1477,7 +1635,7 @@ class CodeMonitoringTests(unittest.TestCase):
                                         "fileUrl": "https://github.com/demo/GPU_Monitor/blob/main/app_red.py",
                                         "title": "app_red.py",
                                     },
-                                    "code_text": 'ZABBIX_SERVER="https://biz-eicc.catl.com"\nAPI_TOKEN="secret-token-value"\nzapi.login(api_token=API_TOKEN)',
+                                    "code_text": 'ZABBIX_SERVER="https://biz-eicc.catl.com"\nAPI_TOKEN="FAKE_TOKEN_FOR_TEST_ONLY"\nzapi.login(api_token=API_TOKEN)',
                                     "term_type": "domain",
                                 },
                                 ensure_ascii=False,
@@ -1608,6 +1766,64 @@ class CodeMonitoringTests(unittest.TestCase):
         scan_mock.assert_called_once()
         self.assertEqual(2, scan_mock.call_args.args[0])
 
+    def test_code_monitoring_continuous_run_bounds_unlimited_watchlist(self) -> None:
+        with patch(
+            "darkweb_collector.api_actions.list_code_watchlists_payload",
+            return_value=[
+                {
+                    "id": 2,
+                    "name": "bounded",
+                    "enabled": True,
+                    "platforms": ["github"],
+                    "file_extensions": ["py"],
+                    "search_page_limit": 0,
+                    "max_results_per_term": 0,
+                    "detail_fetch": True,
+                    "enabled_rule_keys": ["token"],
+                },
+            ],
+        ), patch(
+            "darkweb_collector.api_actions.scan_code_watchlist_once",
+            return_value={"candidates": 0, "hits": 0, "clue_hits": 0, "sensitive_hits": 0, "errors": []},
+        ) as scan_mock:
+            result = api_actions._run_code_monitoring_once_for_watchlist(2)
+
+        self.assertEqual(1, result["watchlist_count"])
+        self.assertEqual(2, scan_mock.call_args.kwargs["search_page_limit"])
+        self.assertEqual(5, scan_mock.call_args.kwargs["max_results_per_term"])
+        self.assertFalse(scan_mock.call_args.kwargs["detail_fetch"])
+        self.assertFalse(scan_mock.call_args.kwargs["browser_fallback"])
+
+    def test_code_monitoring_continuous_run_surfaces_scan_exception(self) -> None:
+        with patch(
+            "darkweb_collector.api_actions.list_code_watchlists_payload",
+            return_value=[
+                {
+                    "id": 2,
+                    "name": "failing",
+                    "enabled": True,
+                    "platforms": ["github"],
+                    "file_extensions": ["py"],
+                    "search_page_limit": 1,
+                    "max_results_per_term": 1,
+                    "detail_fetch": True,
+                    "enabled_rule_keys": ["token"],
+                },
+            ],
+        ), patch("darkweb_collector.api_actions.scan_code_watchlist_once", side_effect=RuntimeError("scan boom")):
+            with self.assertRaisesRegex(RuntimeError, "watchlist:2:scan boom"):
+                api_actions._run_code_monitoring_once_for_watchlist(2)
+
+        status = api_actions.get_code_monitoring_continuous_status(watchlist_id=2)
+        self.assertFalse(status["running"])
+        self.assertIn("watchlist:2:scan boom", status["last_error"])
+
+    def test_continuous_interval_wait_subtracts_scan_runtime(self) -> None:
+        with patch("darkweb_collector.api_actions.time.monotonic", return_value=130.5):
+            self.assertAlmostEqual(29.5, api_actions._remaining_interval_seconds(60, 100.0))
+        with patch("darkweb_collector.api_actions.time.monotonic", return_value=170.0):
+            self.assertEqual(0.0, api_actions._remaining_interval_seconds(60, 100.0))
+
     def test_code_monitoring_continuous_dispatch_supports_multiple_watchlists(self) -> None:
         with patch(
             "darkweb_collector.api_actions.list_code_watchlists_payload",
@@ -1659,7 +1875,7 @@ class CodeMonitoringTests(unittest.TestCase):
                     }
                 )
 
-                snippet_text = "const admin = 'admin@dbs.com';\nconst password = 'Sup3rSecretValue123';"
+                snippet_text = "const admin = 'admin@dbs.com';\nconst password = 'TEST_PASSWORD_PLACEHOLDER';"
                 with get_db_connection() as connection:
                     hit_id = upsert_code_hit(
                         connection,

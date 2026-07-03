@@ -1,2 +1,0 @@
-
-42e951d93706502be9db982a372623d155c785c1	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/@parcel/watcher/-/watcher-2.5.6.tgz","integrity":null,"time":1780574244266,"size":"262","metadata":{"time":1780574244266,"url":"http://registry.npm.taobao.org/@parcel/watcher/-/watcher-2.5.6.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/@parcel/watcher/-/watcher-2.5.6.tgz"},"options":{"compress":true},"status":301}}

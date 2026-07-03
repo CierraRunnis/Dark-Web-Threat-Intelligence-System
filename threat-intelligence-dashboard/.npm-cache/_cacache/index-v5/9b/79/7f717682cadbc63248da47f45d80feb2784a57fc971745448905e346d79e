@@ -1,2 +1,0 @@
-
-2f13dbe7bf2ea3edf15050940d7c62b79cbc2bb8	{"key":"make-fetch-happen:request-cache:http://registry.npm.taobao.org/@vue/runtime-dom/-/runtime-dom-3.5.30.tgz","integrity":null,"time":1780574244212,"size":"262","metadata":{"time":1780574244211,"url":"http://registry.npm.taobao.org/@vue/runtime-dom/-/runtime-dom-3.5.30.tgz","reqHeaders":{},"resHeaders":{"content-type":"text/html","date":"Thu, 04 Jun 2026 11:57:24 GMT","location":"https://registry.npmmirror.com/@vue/runtime-dom/-/runtime-dom-3.5.30.tgz"},"options":{"compress":true},"status":301}}

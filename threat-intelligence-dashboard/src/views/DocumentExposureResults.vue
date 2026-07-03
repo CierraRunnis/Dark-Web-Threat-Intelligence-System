@@ -102,6 +102,7 @@ import { useRouter } from 'vue-router'
 import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import { useDocumentExposureApi } from '@/composables/useDocumentExposureApi'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
+import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
 
 const api = useDocumentExposureApi()
 const router = useRouter()
@@ -212,8 +213,7 @@ const activeFilters = computed(() => {
 })
 
 function formatDateTime(value) {
-  if (!value) return ''
-  return String(value).replace('T', ' ').replace('Z', '').slice(0, 16)
+  return formatShanghaiDateTime(value)
 }
 
 async function loadHits() {

@@ -4,6 +4,7 @@ import { BarChart, HeatmapChart, LineChart, PieChart, ScatterChart } from 'echar
 import {
   DatasetComponent,
   GridComponent,
+  GraphicComponent,
   LegendComponent,
   RadarComponent,
   TooltipComponent,
@@ -22,5 +23,6 @@ use([
   LegendComponent,
   VisualMapComponent,
   DatasetComponent,
+  GraphicComponent,
   RadarComponent
 ])

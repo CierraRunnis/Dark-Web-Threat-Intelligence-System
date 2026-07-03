@@ -10,7 +10,10 @@ import json
 import logging
 from pathlib import Path
 import re
+import sqlite3
 import ssl
+from threading import Lock
+import time
 from typing import Any
 from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -33,6 +36,7 @@ from darkweb_collector.db import (
     list_code_watchlists,
     replace_code_watch_terms,
     update_code_hit_last_snapshot,
+    update_code_scan_run,
     upsert_code_search_state,
     upsert_code_hit,
     upsert_code_watchlist,
@@ -46,6 +50,11 @@ from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
 logger = logging.getLogger("darkweb_collector.code_monitoring")
 SHANGHAI_TZ = timezone(timedelta(hours=8))
+_CODE_SCAN_LOCK = Lock()
+_CODE_HITS_PAYLOAD_CACHE_LOCK = Lock()
+_CODE_HITS_PAYLOAD_CACHE_TTL_SECONDS = 3600.0
+_CODE_HITS_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
+_SQLITE_LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0, 4.0)
 
 DEFAULT_CODE_PLATFORMS = ["github", "gitlab", "gitee"]
 DEFAULT_FILE_EXTENSIONS = ["env", "yaml", "yml", "json", "ini", "conf", "properties", "py", "js", "ts", "java"]
@@ -165,6 +174,63 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _is_sqlite_locked_error(exc: Exception) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
+
+def _commit_db_write(write_operation):
+    for attempt in range(len(_SQLITE_LOCK_RETRY_DELAYS) + 1):
+        try:
+            with get_db_connection() as connection:
+                result = write_operation(connection)
+                connection.commit()
+                return result
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_locked_error(exc) or attempt >= len(_SQLITE_LOCK_RETRY_DELAYS):
+                raise
+            time.sleep(_SQLITE_LOCK_RETRY_DELAYS[attempt])
+    return None
+
+
+def _persist_code_scan_run(
+    scan_run_id: int | None,
+    *,
+    watchlist_id: int,
+    selected_platforms: list[str],
+    terms: list[dict[str, Any]],
+    candidate_count: int,
+    hit_count: int,
+    clue_hit_count: int,
+    sensitive_hit_count: int,
+    errors: list[str],
+    status: str,
+    started_at: str,
+    finished_at: str,
+) -> int:
+    payload = {
+        "watchlist_id": int(watchlist_id),
+        "platforms_json": _json_dumps(selected_platforms),
+        "requested_terms_json": _json_dumps([_normalize_text(item.get("term")) for item in terms if _normalize_text(item.get("term"))]),
+        "candidate_count": candidate_count,
+        "hit_count": hit_count,
+        "clue_hit_count": clue_hit_count,
+        "sensitive_hit_count": sensitive_hit_count,
+        "error_count": len(errors),
+        "status": status,
+        "errors_json": _json_dumps(errors),
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+
+    def write_scan_run(connection):
+        if scan_run_id:
+            update_code_scan_run(connection, scan_run_id, payload)
+            return scan_run_id
+        return insert_code_scan_run(connection, payload)
+
+    return int(_commit_db_write(write_scan_run) or 0)
+
+
 def _parse_json(value: Any, default: Any) -> Any:
     if value is None or value == "":
         return default
@@ -184,6 +250,11 @@ def _is_access_limited_scan_error(message: str) -> bool:
         "login_or_challenge_required",
         "rate_limited",
         "http_search_fetch_failed",
+        "ssl_transport_error",
+        "http error 404",
+        "http error 403",
+        "http error 429",
+        "too many requests",
     )
     return any(marker in lowered for marker in markers)
 
@@ -360,6 +431,15 @@ def _query_output_dir(watchlist_name: str, platform_key: str, term: str) -> Path
     base = _watchlist_output_root(watchlist_name) / safe_stem(platform_key, "platform") / safe_stem(term, "term")
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _snapshot_file_stem(value: str | None) -> str:
+    stem = safe_stem(value, "code-hit")
+    if len(stem) <= 80:
+        return stem
+    digest = sha1(stem.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    prefix = stem[:69].rstrip("._-") or "code-hit"
+    return f"{prefix}-{digest}"
 
 
 def _public_output_url(path: Path) -> str:
@@ -665,47 +745,6 @@ def _query_priority_bonus(query: str, term: str) -> int:
     return bonus
 
 
-def _domain_search_label(value: str) -> str:
-    normalized = _normalize_domain_value(value)
-    parts = [part for part in normalized.split(".") if part]
-    return parts[0] if parts else ""
-
-
-def _repo_seed_queries(term: str, term_type: str, enterprise_profile: dict[str, Any] | None = None) -> list[str]:
-    normalized_term = _normalize_text(term)
-    normalized_term_type = _normalize_text(term_type)
-    profile = enterprise_profile if isinstance(enterprise_profile, dict) else {}
-    queries: list[str] = []
-    seen: set[str] = set()
-
-    def add_query(value: str) -> None:
-        text = _normalize_text(value)
-        key = text.lower()
-        if text and key not in seen:
-            seen.add(key)
-            queries.append(text)
-
-    add_query(normalized_term)
-    domain_like = "." in normalized_term and " " not in normalized_term
-    if normalized_term_type == "domain" or domain_like:
-        label = _domain_search_label(normalized_term)
-        if len(label) >= 2:
-            add_query(label)
-
-    for domain in profile.get("root_domains") or []:
-        add_query(str(domain))
-        label = _domain_search_label(str(domain))
-        if len(label) >= 2:
-            add_query(label)
-
-    for field_name in ("official_names", "brand_aliases", "english_aliases"):
-        for item in profile.get(field_name) or []:
-            add_query(str(item))
-            if len(queries) >= 8:
-                return queries[:8]
-    return queries[:8]
-
-
 def _effective_search_page_limit(search_page_limit: int) -> int:
     return UNLIMITED_SEARCH_PAGE_SAFETY_CAP if int(search_page_limit or 0) <= 0 else int(search_page_limit)
 
@@ -839,7 +878,7 @@ def _persist_search_state(
     if not next_search_state:
         return
     now = _now_utc_iso()
-    with get_db_connection() as connection:
+    def write_state(connection):
         upsert_code_search_state(
             connection,
             {
@@ -856,7 +895,8 @@ def _persist_search_state(
                 "updated_at": now,
             },
         )
-        connection.commit()
+
+    _commit_db_write(write_state)
 
 
 def _apply_incremental_hints(
@@ -1092,15 +1132,6 @@ def _http_get_html(
     return text
 
 
-def _is_repo_scan_blocker(message: str) -> bool:
-    lowered = str(message or "").lower()
-    return "captcha_or_security_verification" in lowered or "ssl_transport_error" in lowered
-
-
-def _gitee_cookie_header() -> str:
-    return _cookie_header_from_storage_state(_load_storage_state_path("gitee"), "gitee.com")
-
-
 def _search_request_headers(platform_key: str, storage_state_path: str | None) -> dict[str, str]:
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -1125,7 +1156,16 @@ def _search_request_headers(platform_key: str, storage_state_path: str | None) -
     return headers
 
 
+def _is_gitlab_repository_url(repository_url: Any) -> bool:
+    parsed = urlparse(str(repository_url or "").strip())
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "gitlab.com":
+        return False
+    return len([part for part in parsed.path.strip("/").split("/") if part]) >= 2
+
+
 def _gitlab_project_blob_search(repository_url: str, term: str, storage_state_path: str | None) -> list[dict[str, Any]]:
+    if not _is_gitlab_repository_url(repository_url):
+        return []
     parsed = urlparse(repository_url)
     repo_path = parsed.path.strip("/")
     parts = [part for part in repo_path.split("/") if part]
@@ -1178,7 +1218,7 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     for page in range(1, max(1, page_limit) + 1):
-        url = f"https://gitlab.com/api/v4/projects?search={quote_plus(term)}&simple=true&per_page=50&order_by=last_activity_at&sort=desc&page={page}"
+        url = f"https://gitlab.com/api/v4/projects?search={quote_plus(term)}&simple=true&per_page=10&order_by=last_activity_at&sort=desc&page={page}"
         rows = _http_get_json(
             url,
             headers={
@@ -1195,7 +1235,6 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
         for item in rows:
             repo_url = _normalize_text(item.get("web_url"))
             path_with_namespace = _normalize_text(item.get("path_with_namespace"))
-            default_branch = _normalize_text(item.get("default_branch")) or "main"
             if not repo_url or not path_with_namespace or "/" not in path_with_namespace or repo_url in seen:
                 continue
             seen.add(repo_url)
@@ -1207,9 +1246,6 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
                     "repositoryOwner": "/".join(parts[:-1]),
                     "repositoryName": parts[-1],
                     "repositoryUrl": repo_url,
-                    "projectId": item.get("id"),
-                    "pathWithNamespace": path_with_namespace,
-                    "branch": default_branch,
                 }
             )
             new_count += 1
@@ -1218,201 +1254,18 @@ def _gitlab_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
     return results
 
 
-def _gitlab_project_ref(repo_candidate: dict[str, Any]) -> str:
-    project_id = repo_candidate.get("projectId")
-    if project_id not in (None, ""):
-        return quote_plus(str(project_id))
-    path_with_namespace = _normalize_text(repo_candidate.get("pathWithNamespace"))
-    if path_with_namespace:
-        return quote_plus(path_with_namespace)
-    repository_url = _normalize_text(repo_candidate.get("repositoryUrl"))
-    if not repository_url:
-        return ""
-    parsed = urlparse(repository_url)
-    repo_path = parsed.path.strip("/")
-    return quote_plus(repo_path) if repo_path else ""
-
-
-def _gitlab_repo_tree(repo_candidate: dict[str, Any], *, page_limit: int = 8) -> list[dict[str, Any]]:
-    project_ref = _gitlab_project_ref(repo_candidate)
-    branch = _normalize_text(repo_candidate.get("branch")) or "main"
-    if not project_ref:
-        return []
-    results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    per_page = 100
-    for page in range(1, max(1, page_limit) + 1):
-        url = f"https://gitlab.com/api/v4/projects/{project_ref}/repository/tree?recursive=true&per_page={per_page}&page={page}"
-        if branch:
-            url = f"{url}&ref={quote_plus(branch)}"
-        rows = _http_get_json(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-            },
-            timeout=60,
-            platform_key="gitlab",
-            retries=1,
-        )
-        if not isinstance(rows, list) or not rows:
-            break
-        new_count = 0
-        for item in rows:
-            item_type = _normalize_text(item.get("type"))
-            file_path = _normalize_text(item.get("path"))
-            blob_id = _normalize_text(item.get("id"))
-            key = f"{item_type}|{file_path}|{blob_id}"
-            if not item_type or not file_path or key in seen:
-                continue
-            seen.add(key)
-            results.append(item)
-            new_count += 1
-        if len(rows) < per_page or new_count == 0:
-            break
-    return results
-
-
-def _gitlab_blob_content(repo_candidate: dict[str, Any], file_path: str) -> str:
-    project_ref = _gitlab_project_ref(repo_candidate)
-    branch = _normalize_text(repo_candidate.get("branch")) or "main"
-    if not project_ref or not file_path:
-        return ""
-    encoded_path = "/".join(quote_plus(part) for part in str(file_path or "").split("/"))
-    url = f"https://gitlab.com/api/v4/projects/{project_ref}/repository/files/{encoded_path}/raw"
-    if branch:
-        url = f"{url}?ref={quote_plus(branch)}"
-    try:
-        return _http_get_text(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "text/plain",
-            },
-            timeout=45,
-        )
-    except Exception:
-        return ""
-
-
-def _gitlab_repo_candidates_to_code_results(
-    repo_candidates: list[dict[str, Any]],
-    term: str,
-    extensions: list[str],
-    enabled_rule_keys: list[str],
-    max_results: int,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    first_issue = ""
-    effective_max = max_results if max_results > 0 else 60
-    for repo_candidate in repo_candidates[: min(16, max(8, effective_max))]:
-        owner = _normalize_text(repo_candidate.get("repositoryOwner"))
-        repo_name = _normalize_text(repo_candidate.get("repositoryName"))
-        repo_url = _normalize_text(repo_candidate.get("repositoryUrl"))
-        branch = _normalize_text(repo_candidate.get("branch")) or "main"
-        if not owner or not repo_name or not repo_url:
-            continue
-        try:
-            tree = _gitlab_repo_tree(repo_candidate, page_limit=8)
-        except Exception as exc:
-            if not first_issue:
-                first_issue = str(exc)
-            continue
-        candidate_paths = []
-        for item in tree:
-            file_path = _normalize_text(item.get("path"))
-            if item.get("type") != "blob" or not _matches_extension(file_path, extensions):
-                continue
-            candidate_paths.append((_file_path_priority(file_path), file_path))
-        candidate_paths.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        for _, file_path in candidate_paths[:40]:
-            dedupe_key = f"{repo_url}|{branch}|{file_path}"
-            if dedupe_key in seen:
-                continue
-            code_text = _gitlab_blob_content(repo_candidate, file_path)
-            if not code_text:
-                continue
-            classification = _classify_code_hit(term, file_path, code_text, enabled_rule_keys)
-            if not classification:
-                continue
-            seen.add(dedupe_key)
-            results.append(
-                {
-                    "platform": "gitlab",
-                    "platformLabel": "GitLab",
-                    "fileUrl": f"{repo_url}/-/blob/{branch}/{file_path}",
-                    "title": file_path,
-                    "repositoryOwner": owner,
-                    "repositoryName": repo_name,
-                    "repositoryUrl": repo_url,
-                    "branch": branch,
-                    "filePath": file_path,
-                    "lineStart": 0,
-                    "lineEnd": 0,
-                    "snippetText": code_text[:1200],
-                    "resultLayerHint": classification["result_layer"],
-                    "riskScoreHint": classification["risk_score"],
-                    "severityHint": classification["severity"],
-                }
-            )
-            if len(results) >= effective_max:
-                results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
-                return results
-    if not results and first_issue:
-        raise RuntimeError(first_issue)
-    results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
-    return results
-
-
 def _gitlab_repo_fallback_code_search(
     term: str,
     storage_state_path: str | None,
     extensions: list[str],
-    enabled_rule_keys: list[str],
     max_results: int,
-    query_terms: list[str] | None = None,
     page_limit: int = 1,
 ) -> list[dict[str, Any]]:
-    repos: list[dict[str, Any]] = []
-    repo_seen: set[str] = set()
-    first_issue = ""
-    effective_max = max_results if max_results > 0 else 60
-    for query in query_terms or [term]:
-        try:
-            repo_rows = _gitlab_repo_search(query, page_limit=page_limit)
-        except Exception as exc:
-            if not first_issue:
-                first_issue = str(exc)
-            continue
-        for item in repo_rows:
-            repo_url = _normalize_text(item.get("repositoryUrl"))
-            if not repo_url or repo_url in repo_seen:
-                continue
-            repo_seen.add(repo_url)
-            repos.append(item)
-            if len(repos) >= max(12, effective_max * 2):
-                break
-        if len(repos) >= max(12, effective_max * 2):
-            break
-
-    try:
-        public_results = _gitlab_repo_candidates_to_code_results(
-            repos,
-            term,
-            extensions,
-            enabled_rule_keys,
-            effective_max,
-        )
-    except Exception as exc:
-        public_results = []
-        if not first_issue:
-            first_issue = str(exc)
-    if public_results:
-        return public_results
-
+    repos = _gitlab_repo_search(term, page_limit=page_limit)
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
+    first_issue = ""
+    effective_max = max_results if max_results > 0 else 60
     for repo in repos[: min(10, effective_max)]:
         try:
             nested_candidates = _gitlab_project_blob_search(repo["repositoryUrl"], term, storage_state_path)
@@ -1668,103 +1521,25 @@ def _gitee_repo_search(term: str, page_limit: int = 1) -> list[dict[str, Any]]:
 
 def _gitee_repo_default_branch(owner: str, repo: str) -> str:
     url = f"https://gitee.com/api/v5/repos/{owner}/{repo}"
-    try:
-        payload = _http_get_json(
-            url,
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=60,
-            platform_key="gitee",
-            retries=1,
-        )
-    except Exception:
-        return ""
+    payload = _http_get_json(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60, platform_key="gitee", retries=1)
     if not isinstance(payload, dict):
-        return ""
-    return _normalize_text(payload.get("default_branch"))
+        return "master"
+    return _normalize_text(payload.get("default_branch")) or "master"
 
 
 def _gitee_repo_tree(owner: str, repo: str, branch: str) -> list[dict[str, Any]]:
     url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/git/trees/{quote_plus(branch)}?recursive=1"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "Referer": f"https://gitee.com/{owner}/{repo}",
-    }
-    cookie_header = _gitee_cookie_header()
-    if cookie_header:
-        headers["Cookie"] = cookie_header
-    payload = _http_get_json(url, headers=headers, timeout=60, platform_key="gitee", retries=1)
+    payload = _http_get_json(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60, platform_key="gitee", retries=1)
     if not isinstance(payload, dict):
         return []
     tree = payload.get("tree") or []
     return tree if isinstance(tree, list) else []
 
 
-def _gitee_repo_tree_with_branch(owner: str, repo: str, preferred_branch: str = "") -> tuple[str, list[dict[str, Any]]]:
-    first_issue = ""
-    branch_candidates: list[str] = []
-    seen: set[str] = set()
-
-    def add_branch(value: str) -> None:
-        branch = _normalize_text(value)
-        if branch and branch not in seen:
-            seen.add(branch)
-            branch_candidates.append(branch)
-
-    add_branch(preferred_branch)
-    add_branch(_gitee_repo_default_branch(owner, repo))
-    for branch in ("master", "main", "develop", "dev"):
-        add_branch(branch)
-
-    for branch in branch_candidates:
-        try:
-            tree = _gitee_repo_tree(owner, repo, branch)
-        except Exception as exc:
-            if not first_issue:
-                first_issue = str(exc)
-            continue
-        if tree:
-            return branch, tree
-    if first_issue:
-        raise RuntimeError(first_issue)
-    return branch_candidates[0] if branch_candidates else "master", []
-
-
 def _gitee_blob_content(owner: str, repo: str, branch: str, file_path: str) -> str:
     encoded_path = "/".join(quote_plus(part) for part in file_path.split("/"))
-    raw_url = f"https://gitee.com/{owner}/{repo}/raw/{quote_plus(branch)}/{encoded_path}"
-    referer = f"https://gitee.com/{owner}/{repo}/blob/{quote_plus(branch)}/{encoded_path}"
-    raw_headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/plain",
-        "Referer": referer,
-    }
-    cookie_header = _gitee_cookie_header()
-    if cookie_header:
-        raw_headers["Cookie"] = cookie_header
-    for headers in (raw_headers, {k: v for k, v in raw_headers.items() if k != "Cookie"}):
-        try:
-            text = _http_get_text(
-                raw_url,
-                headers=headers,
-                timeout=45,
-            )
-            if _normalize_text(text):
-                return text
-        except Exception:
-            continue
-    encoded_path = "/".join(quote_plus(part) for part in file_path.split("/"))
     url = f"https://gitee.com/api/v5/repos/{owner}/{repo}/contents/{encoded_path}?ref={quote_plus(branch)}"
-    try:
-        payload = _http_get_json(
-            url,
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=60,
-            platform_key="gitee",
-            retries=1,
-        )
-    except Exception:
-        return ""
+    payload = _http_get_json(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=60, platform_key="gitee", retries=1)
     if isinstance(payload, dict):
         if payload.get("type") == "file" and payload.get("encoding") == "base64" and payload.get("content"):
             try:
@@ -1779,33 +1554,27 @@ def _gitee_repo_candidates_to_code_results(
     term: str,
     extensions: list[str],
     enabled_rule_keys: list[str],
-    max_results: int = 24,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     first_issue = ""
-    effective_max = max_results if max_results > 0 else 24
-    repo_cap = min(len(repo_candidates), max(4, min(8, effective_max * 2)))
-    for repo_candidate in repo_candidates[:repo_cap]:
+    for repo_candidate in repo_candidates:
         owner = _normalize_text(repo_candidate.get("repositoryOwner"))
         repo = _normalize_text(repo_candidate.get("repositoryName"))
         repo_url = _normalize_text(repo_candidate.get("repositoryUrl"))
         if not owner or not repo or not repo_url:
             continue
         try:
-            branch, tree = _gitee_repo_tree_with_branch(owner, repo, _normalize_text(repo_candidate.get("branch")))
+            branch = _gitee_repo_default_branch(owner, repo)
+            tree = _gitee_repo_tree(owner, repo, branch)
         except Exception as exc:
             if not first_issue:
                 first_issue = str(exc)
             continue
-        candidate_paths = []
         for item in tree:
             file_path = _normalize_text(item.get("path"))
             if item.get("type") != "blob" or not _matches_extension(file_path, extensions):
                 continue
-            candidate_paths.append((_file_path_priority(file_path), file_path))
-        candidate_paths.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        for _, file_path in candidate_paths[:24]:
             dedupe_key = f"{repo_url}|{branch}|{file_path}"
             if dedupe_key in seen:
                 continue
@@ -1841,10 +1610,7 @@ def _gitee_repo_candidates_to_code_results(
                     "severityHint": classification["severity"],
                 }
             )
-            if len(results) >= effective_max:
-                results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
-                return results
-    if not results and _is_repo_scan_blocker(first_issue):
+    if not results and first_issue:
         raise RuntimeError(first_issue)
     results.sort(key=lambda item: _candidate_priority(item, enabled_rule_keys), reverse=True)
     return results
@@ -1888,13 +1654,7 @@ def _gitee_repo_code_search_incremental(
             page_count=effective_limit,
         )
 
-    results = _gitee_repo_candidates_to_code_results(
-        repo_candidates,
-        term,
-        extensions,
-        enabled_rule_keys,
-        max_results=max(12, min(24, effective_limit * 8)),
-    )
+    results = _gitee_repo_candidates_to_code_results(repo_candidates, term, extensions, enabled_rule_keys)
     current_candidate_keys = _candidate_keys(results)
     current_repository_urls = _repository_urls(results)
     if cursor_mode == "incremental" and not signature_changed:
@@ -3208,7 +2968,7 @@ def _write_snapshot_files(
     payload: dict[str, Any],
 ) -> tuple[str, str]:
     base_dir = _query_output_dir(watchlist_name, platform_key, term)
-    stem = safe_stem(repository_name, "code-hit")
+    stem = _snapshot_file_stem(repository_name)
     html_path = base_dir / f"{stem}.html"
     artifact_path = base_dir / f"{stem}.json"
     dump_text(html_path, html)
@@ -3393,6 +3153,7 @@ def _collect_search_results_incremental(
     *,
     page_limit: int,
     previous_state: dict[str, Any] | None = None,
+    browser_fallback: bool = True,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     effective_limit = max(1, _effective_search_page_limit(page_limit))
     state = previous_state or {}
@@ -3406,7 +3167,7 @@ def _collect_search_results_incremental(
             platform,
             first_page_url,
             storage_state_path,
-            allow_browser_fallback=True,
+            allow_browser_fallback=browser_fallback,
             http_timeout=45,
         )
     except Exception as exc:
@@ -3454,7 +3215,7 @@ def _collect_search_results_incremental(
                 platform,
                 paged_url,
                 storage_state_path,
-                allow_browser_fallback=(page == first_window_page),
+                allow_browser_fallback=(browser_fallback and page == first_window_page),
                 http_timeout=(45 if page == 1 else 12),
             )
         except Exception as exc:
@@ -3464,7 +3225,7 @@ def _collect_search_results_incremental(
                         platform,
                         paged_url,
                         storage_state_path,
-                        allow_browser_fallback=True,
+                        allow_browser_fallback=browser_fallback,
                         http_timeout=45,
                     )
                 except Exception:
@@ -3609,6 +3370,31 @@ def list_code_watchlists_payload() -> list[dict[str, Any]]:
         return payloads
 
 
+def _dedupe_code_watch_terms(rows: list[dict[str, Any]] | None, now: str) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows or []:
+        term = str(row.get("term") or "").strip()
+        if not term:
+            continue
+        term_type = str(row.get("term_type") or "").strip() or "custom"
+        key = (term.casefold(), term_type.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "term": term,
+                "term_type": term_type,
+                "weight": row.get("weight", 0),
+                "enabled": row.get("enabled", True),
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+    return deduped
+
+
 def save_code_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
     now = _now_utc_iso()
     enterprise_profile = _payload_enterprise_profile(payload)
@@ -3639,17 +3425,7 @@ def save_code_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
         replace_code_watch_terms(
             connection,
             watchlist_id,
-            [
-                {
-                    "term": row.get("term"),
-                    "term_type": row.get("term_type"),
-                    "weight": row.get("weight", 0),
-                    "enabled": row.get("enabled", True),
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                for row in (payload.get("terms") or [])
-            ],
+            _dedupe_code_watch_terms(payload.get("terms") or [], now),
         )
         connection.commit()
         watchlist = get_code_watchlist(connection, watchlist_id)
@@ -3706,6 +3482,31 @@ def scan_code_watchlist_once(
     max_results_per_term: int | None = None,
     detail_fetch: bool | None = None,
     enabled_rule_keys: list[str] | None = None,
+    browser_fallback: bool = True,
+) -> dict[str, Any]:
+    with _CODE_SCAN_LOCK:
+        return _scan_code_watchlist_once_unlocked(
+            watchlist_id,
+            platforms=platforms,
+            file_extensions=file_extensions,
+            search_page_limit=search_page_limit,
+            max_results_per_term=max_results_per_term,
+            detail_fetch=detail_fetch,
+            enabled_rule_keys=enabled_rule_keys,
+            browser_fallback=browser_fallback,
+        )
+
+
+def _scan_code_watchlist_once_unlocked(
+    watchlist_id: int,
+    *,
+    platforms: list[str] | None = None,
+    file_extensions: list[str] | None = None,
+    search_page_limit: int | None = None,
+    max_results_per_term: int | None = None,
+    detail_fetch: bool | None = None,
+    enabled_rule_keys: list[str] | None = None,
+    browser_fallback: bool = True,
 ) -> dict[str, Any]:
     ensure_default_code_watchlist()
     started_at = _now_utc_iso()
@@ -3734,6 +3535,20 @@ def scan_code_watchlist_once(
     errors: list[str] = []
     seen_urls: set[str] = set()
     now = _now_utc_iso()
+    scan_run_id = _persist_code_scan_run(
+        None,
+        watchlist_id=int(watchlist["id"]),
+        selected_platforms=selected_platforms,
+        terms=terms,
+        candidate_count=0,
+        hit_count=0,
+        clue_hit_count=0,
+        sensitive_hit_count=0,
+        errors=[],
+        status="running",
+        started_at=started_at,
+        finished_at="",
+    )
 
     for term_row in terms:
         term = _normalize_text(term_row.get("term"))
@@ -3766,44 +3581,26 @@ def scan_code_watchlist_once(
             known_candidate_keys = _state_string_union(search_states, "last_candidate_keys_json")
             known_repository_urls = _state_string_union(search_states, "last_repository_urls_json")
             if platform.key == "gitee":
-                candidates = []
-                gitee_seen: set[str] = set()
-                for query in _repo_seed_queries(term, term_type, enterprise_profile):
-                    query_key = _search_state_query_key(term, query)
-                    try:
-                        query_candidates, next_search_state = _gitee_repo_code_search_incremental(
-                            query,
-                            selected_extensions,
-                            selected_rule_keys,
-                            page_limit=selected_search_page_limit,
-                            previous_state=query_search_states.get(query_key),
-                        )
-                    except Exception as exc:
-                        if query_key == "base":
-                            errors.append(f"{platform.key}:{term}:{exc}")
-                        continue
-                    _persist_search_state(int(watchlist["id"]), platform.key, term, query_key, next_search_state, started_at)
-                    query_candidates = _apply_incremental_hints(
-                        query_candidates,
-                        previous_candidate_keys=known_candidate_keys,
-                        previous_repository_urls=known_repository_urls,
-                        new_page_bonus=60 if (next_search_state or {}).get("cursor_mode") == "incremental" else 0,
+                try:
+                    candidates, next_search_state = _gitee_repo_code_search_incremental(
+                        term,
+                        selected_extensions,
+                        selected_rule_keys,
+                        page_limit=selected_search_page_limit,
+                        previous_state=search_state,
                     )
-                    for item in query_candidates:
-                        key = _candidate_identity(item)
-                        if not key or key in gitee_seen:
-                            continue
-                        gitee_seen.add(key)
-                        candidates.append(
-                            {
-                                **item,
-                                "queryPriorityHint": int(item.get("queryPriorityHint") or 0) + _query_priority_bonus(query, term),
-                            }
-                        )
-                    known_candidate_keys = _merge_string_lists(_candidate_keys(query_candidates), known_candidate_keys)
-                    known_repository_urls = _merge_string_lists(_repository_urls(query_candidates), known_repository_urls)
-                if not candidates and errors and any(item.startswith(f"{platform.key}:{term}:") for item in errors):
+                except Exception as exc:
+                    errors.append(f"{platform.key}:{term}:{exc}")
                     continue
+                _persist_search_state(int(watchlist["id"]), platform.key, term, "base", next_search_state, started_at)
+                candidates = _apply_incremental_hints(
+                    candidates,
+                    previous_candidate_keys=known_candidate_keys,
+                    previous_repository_urls=known_repository_urls,
+                    new_page_bonus=60 if (next_search_state or {}).get("cursor_mode") == "incremental" else 0,
+                )
+                known_candidate_keys = _merge_string_lists(_candidate_keys(candidates), known_candidate_keys)
+                known_repository_urls = _merge_string_lists(_repository_urls(candidates), known_repository_urls)
                 candidates.sort(key=lambda item: _candidate_priority(item, selected_rule_keys), reverse=True)
                 evaluation_limit = _candidate_evaluation_limit(selected_max_results, selected_search_page_limit)
                 evaluation_candidates = candidates if evaluation_limit is None else candidates[:evaluation_limit]
@@ -3889,8 +3686,11 @@ def scan_code_watchlist_once(
                         "credential_literal_detected": bool(classification.get("credential_literal_detected")),
                         "system_access_detected": bool(classification.get("system_access_detected")),
                         "system_access_signals": classification.get("system_access_signals") or [],
+                        "suppressed": bool(classification.get("suppressed")),
+                        "suppression_reasons": classification.get("suppression_reasons") or [],
+                        "display_bucket": classification.get("display_bucket") or ("suppressed" if classification.get("suppressed") else "primary"),
                     }
-                    with get_db_connection() as connection:
+                    def write_preview_hit(connection):
                         hit_id = upsert_code_hit(
                             connection,
                             {
@@ -3935,7 +3735,8 @@ def scan_code_watchlist_once(
                             },
                         )
                         update_code_hit_last_snapshot(connection, hit_id, snapshot_id)
-                        connection.commit()
+
+                    _commit_db_write(write_preview_hit)
                     total_hits += 1
                     if classification["result_layer"] == "clue":
                         clue_hits += 1
@@ -3949,6 +3750,7 @@ def scan_code_watchlist_once(
                 storage_state,
                 page_limit=selected_search_page_limit,
                 previous_state=search_state,
+                browser_fallback=browser_fallback,
             )
             _persist_search_state(int(watchlist["id"]), platform.key, term, "base", next_search_state, started_at)
             if search_issue:
@@ -3980,6 +3782,7 @@ def scan_code_watchlist_once(
                         storage_state,
                         page_limit=max(1, min(_effective_search_page_limit(selected_search_page_limit), 2)),
                         previous_state=query_search_states.get(query_key),
+                        browser_fallback=browser_fallback,
                     )
                     _persist_search_state(
                         int(watchlist["id"]),
@@ -4011,7 +3814,7 @@ def scan_code_watchlist_once(
                         break
                 filtered_candidates.extend(expanded_candidates)
             if platform.key == "gitlab" and not filtered_candidates:
-                project_candidates = [item for item in candidates if item.get("repositoryUrl")]
+                project_candidates = [item for item in candidates if _is_gitlab_repository_url(item.get("repositoryUrl"))]
                 project_candidate_limit = selected_max_results if selected_max_results > 0 else 12
                 for project_candidate in project_candidates[:project_candidate_limit]:
                     try:
@@ -4041,9 +3844,7 @@ def scan_code_watchlist_once(
                         term,
                         storage_state,
                         _repo_fallback_extensions(selected_extensions),
-                        selected_rule_keys,
                         max(selected_max_results * 2, 12),
-                        query_terms=_repo_seed_queries(term, term_type, enterprise_profile),
                         page_limit=max(1, min(_effective_search_page_limit(selected_search_page_limit), 3)),
                     )
                 except Exception as exc:
@@ -4179,8 +3980,27 @@ def scan_code_watchlist_once(
                     "credential_literal_detected": bool(classification.get("credential_literal_detected")),
                     "system_access_detected": bool(classification.get("system_access_detected")),
                     "system_access_signals": classification.get("system_access_signals") or [],
+                    "suppressed": bool(classification.get("suppressed")),
+                    "suppression_reasons": classification.get("suppression_reasons") or [],
+                    "display_bucket": classification.get("display_bucket") or ("suppressed" if classification.get("suppressed") else "primary"),
                 }
-                with get_db_connection() as connection:
+                html_path = ""
+                artifact_path = ""
+                html_path, artifact_path = _write_snapshot_files(
+                    str(watchlist["name"]),
+                    platform.key,
+                    term,
+                    f"{candidate.get('repositoryName')}-{safe_stem(candidate.get('filePath') or '', 'file')}",
+                    str(detail.get("html") or ""),
+                    {
+                        **raw_payload,
+                        "findings": findings,
+                        "code_fragment": snippet,
+                        "masked_fragment": masked_snippet,
+                    },
+                )
+
+                def write_detail_hit(connection):
                     hit_id = upsert_code_hit(
                         connection,
                         {
@@ -4205,21 +4025,6 @@ def scan_code_watchlist_once(
                             "raw_json": _json_dumps(raw_payload),
                         },
                     )
-                    html_path = ""
-                    artifact_path = ""
-                    html_path, artifact_path = _write_snapshot_files(
-                        str(watchlist["name"]),
-                        platform.key,
-                        term,
-                        f"{candidate.get('repositoryName')}-{safe_stem(candidate.get('filePath') or '', 'file')}",
-                        str(detail.get("html") or ""),
-                        {
-                            **raw_payload,
-                            "findings": findings,
-                            "code_fragment": snippet,
-                            "masked_fragment": masked_snippet,
-                        },
-                    )
                     snapshot_id = insert_code_hit_snapshot(
                         connection,
                         {
@@ -4240,7 +4045,8 @@ def scan_code_watchlist_once(
                         },
                     )
                     update_code_hit_last_snapshot(connection, hit_id, snapshot_id)
-                    connection.commit()
+
+                _commit_db_write(write_detail_hit)
                 total_hits += 1
                 if classification["result_layer"] == "clue":
                     clue_hits += 1
@@ -4249,25 +4055,21 @@ def scan_code_watchlist_once(
 
     finished_at = _now_utc_iso()
     access_limited_only = bool(errors) and all(_is_access_limited_scan_error(item) for item in errors)
-    with get_db_connection() as connection:
-        insert_code_scan_run(
-            connection,
-            {
-                "watchlist_id": int(watchlist["id"]),
-                "platforms_json": _json_dumps(selected_platforms),
-                "requested_terms_json": _json_dumps([_normalize_text(item.get("term")) for item in terms if _normalize_text(item.get("term"))]),
-                "candidate_count": total_candidates,
-                "hit_count": total_hits,
-                "clue_hit_count": clue_hits,
-                "sensitive_hit_count": sensitive_hits,
-                "error_count": len(errors),
-                "status": "partial" if errors and (total_hits > 0 or access_limited_only) else "failed" if errors else "succeeded",
-                "errors_json": _json_dumps(errors),
-                "started_at": started_at,
-                "finished_at": finished_at,
-            },
-        )
-        connection.commit()
+    final_status = "partial" if errors and (total_hits > 0 or access_limited_only) else "failed" if errors else "succeeded"
+    _persist_code_scan_run(
+        scan_run_id or None,
+        watchlist_id=int(watchlist["id"]),
+        selected_platforms=selected_platforms,
+        terms=terms,
+        candidate_count=total_candidates,
+        hit_count=total_hits,
+        clue_hit_count=clue_hits,
+        sensitive_hit_count=sensitive_hits,
+        errors=errors,
+        status=final_status,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
     return {
         "watchlist_id": watchlist_id,
         "watchlist_name": watchlist["name"],
@@ -4288,7 +4090,7 @@ def scan_code_watchlist_once(
     }
 
 
-def list_code_hits_payload(
+def _build_code_hits_payload(
     *,
     watchlist_id: int | None = None,
     review_status: str | None = None,
@@ -4313,6 +4115,14 @@ def list_code_hits_payload(
         )
         for row in rows:
             raw_payload = _parse_json(row.get("raw_json"), {})
+            stored_payload = _build_stored_code_hit_payload(row, raw_payload)
+            if stored_payload is not None:
+                if stored_payload.get("__skip"):
+                    continue
+                if bool(stored_payload.get("suppressed")) and not include_suppressed:
+                    continue
+                payloads.append(stored_payload)
+                continue
             latest_snapshot = (list_code_hit_snapshots(connection, int(row["id"])) or [{}])[0]
             watchlist_key = int(row.get("watchlist_id") or 0)
             if watchlist_key not in watchlist_profile_cache:
@@ -4434,6 +4244,205 @@ def list_code_hits_payload(
     primary_hits = [item for item in payloads if item.get("displayBucket") != "suppressed"][: int(limit)]
     suppressed_hits = [item for item in payloads if item.get("displayBucket") == "suppressed"][: int(limit)]
     return primary_hits + suppressed_hits
+
+
+def _code_hits_payload_cache_revision() -> tuple[Any, ...]:
+    ensure_default_code_watchlist()
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM code_hits) AS hit_count,
+                (SELECT COALESCE(MAX(id), 0) FROM code_hits) AS max_hit_id,
+                (SELECT COALESCE(MAX(last_seen_at), '') FROM code_hits) AS max_hit_seen_at,
+                (SELECT COALESCE(MAX(last_snapshot_id), 0) FROM code_hits) AS max_snapshot_id,
+                (SELECT COUNT(*) FROM code_hit_reviews) AS review_count,
+                (SELECT COALESCE(MAX(id), 0) FROM code_hit_reviews) AS max_review_id,
+                (SELECT COALESCE(MAX(updated_at), '') FROM code_watchlists) AS watchlist_updated_at,
+                (SELECT COUNT(*) FROM code_watch_terms) AS term_count,
+                (SELECT COALESCE(MAX(updated_at), '') FROM code_watch_terms) AS term_updated_at
+            """
+        ).fetchone()
+    return tuple(row) if row is not None else ()
+
+
+def _slice_code_hits_payloads(payloads: list[dict[str, Any]], limit: int | None) -> list[dict[str, Any]]:
+    if not limit:
+        return [dict(item) for item in payloads]
+    primary_hits = [item for item in payloads if item.get("displayBucket") != "suppressed"][: int(limit)]
+    suppressed_hits = [item for item in payloads if item.get("displayBucket") == "suppressed"][: int(limit)]
+    return [dict(item) for item in [*primary_hits, *suppressed_hits]]
+
+
+def _prune_code_hits_payload_cache(active_key: tuple[Any, ...]) -> None:
+    if len(_CODE_HITS_PAYLOAD_CACHE) <= 8:
+        return
+    for key in list(_CODE_HITS_PAYLOAD_CACHE):
+        if key != active_key:
+            _CODE_HITS_PAYLOAD_CACHE.pop(key, None)
+
+
+def _clear_code_hits_payload_cache() -> None:
+    with _CODE_HITS_PAYLOAD_CACHE_LOCK:
+        _CODE_HITS_PAYLOAD_CACHE.clear()
+
+
+def _coerce_payload_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coerce_payload_int(value: Any, fallback: Any = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(fallback)
+        except (TypeError, ValueError):
+            return 0
+
+
+def _payload_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if _normalize_text(item)]
+
+
+def _payload_dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _stored_code_hit_summary(raw_payload: dict[str, Any]) -> str:
+    for value in (
+        raw_payload.get("masked_fragment"),
+        raw_payload.get("code_fragment"),
+        _payload_candidate_snippet(raw_payload),
+        str(raw_payload.get("code_text") or "")[:2000],
+    ):
+        text = _normalize_text(value)
+        if text:
+            return text[:220]
+    return ""
+
+
+def _build_stored_code_hit_payload(row: dict[str, Any], raw_payload: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_payload, dict):
+        return None
+    if _coerce_payload_bool(raw_payload.get("list_excluded")):
+        return {"__skip": True}
+    if "display_bucket" not in raw_payload:
+        return None
+    result_layer = _normalize_text(raw_payload.get("result_layer") or row.get("result_layer") or "")
+    if result_layer not in {"clue", "sensitive"}:
+        result_layer = _code_result_layer(str(row.get("sensitive_type") or ""), raw_payload, str(row.get("result_layer") or ""))
+    computed_sensitive_type = _normalize_text(raw_payload.get("sensitive_type") or row.get("sensitive_type") or "")
+    computed_matched_rule = _normalize_text(raw_payload.get("matched_rule") or row.get("matched_rule") or "")
+    computed_score = _coerce_payload_int(raw_payload.get("risk_score"), row.get("risk_score") or 0)
+    computed_severity = _normalize_text(raw_payload.get("severity") or row.get("severity") or "low")
+    display_bucket = _normalize_text(raw_payload.get("display_bucket"))
+    if display_bucket not in {"primary", "suppressed"}:
+        display_bucket = "suppressed" if _coerce_payload_bool(raw_payload.get("suppressed")) else "primary"
+    suppressed = display_bucket == "suppressed" or _coerce_payload_bool(raw_payload.get("suppressed"))
+    sensitive_label = (
+        CODE_CLUE_RULE_LABEL
+        if result_layer == "clue"
+        else SENSITIVE_RULE_MAP.get(computed_sensitive_type, SensitiveRule("", "", re.compile(""), 0)).label
+        or computed_sensitive_type
+    )
+    secret_like_rule = SENSITIVE_RULE_MAP.get(computed_sensitive_type)
+    return {
+        "id": int(row["id"]),
+        "watchlistId": int(row["watchlist_id"]),
+        "watchlistName": row.get("watchlist_name") or "",
+        "organizationName": row.get("organization_name") or "",
+        "platform": row.get("platform") or "",
+        "platformLabel": _platform_label(str(row.get("platform") or "")),
+        "repositoryName": row.get("repository_name") or "",
+        "repositoryOwner": row.get("repository_owner") or "",
+        "repositoryFullName": "/".join(
+            part for part in [row.get("repository_owner") or "", row.get("repository_name") or ""] if part
+        ),
+        "repositoryUrl": row.get("repository_url") or "",
+        "filePath": row.get("file_path") or "",
+        "branch": row.get("branch") or "",
+        "fileUrl": row.get("file_url") or "",
+        "visibility": row.get("visibility") or "public",
+        "language": row.get("language") or raw_payload.get("language") or "",
+        "sensitiveType": computed_sensitive_type,
+        "sensitiveLabel": sensitive_label,
+        "matchedRule": computed_matched_rule,
+        "matchedTerm": row.get("matched_term") or "",
+        "resultLayer": result_layer,
+        "resultLayerLabel": "敏感命中" if result_layer == "sensitive" else "线索命中",
+        "riskScore": computed_score,
+        "severity": computed_severity,
+        "enterpriseMatchLevel": _normalize_text(raw_payload.get("enterprise_match_level") or "none"),
+        "enterpriseAnchors": _payload_dict_list(raw_payload.get("enterprise_anchors")),
+        "riskPromotionReasons": _payload_string_list(raw_payload.get("risk_promotion_reasons")),
+        "credentialLiteralDetected": _coerce_payload_bool(raw_payload.get("credential_literal_detected")),
+        "systemAccessDetected": _coerce_payload_bool(raw_payload.get("system_access_detected")),
+        "suppressed": suppressed,
+        "suppressionReasons": _payload_string_list(raw_payload.get("suppression_reasons")),
+        "displayBucket": display_bucket,
+        "reviewStatus": row.get("review_status") or "new",
+        "evidenceCount": int(row.get("evidence_count") or 0),
+        "firstSeenAt": row.get("first_seen_at") or "",
+        "lastSeenAt": row.get("last_seen_at") or "",
+        "lastSnapshotId": row.get("last_snapshot_id"),
+        "summary": _stored_code_hit_summary(raw_payload),
+        "secretLike": bool((secret_like_rule and secret_like_rule.secret_like) or _coerce_payload_bool(raw_payload.get("credential_literal_detected"))),
+    }
+
+
+def list_code_hits_payload(
+    *,
+    watchlist_id: int | None = None,
+    review_status: str | None = None,
+    platform: str | None = None,
+    sensitive_type: str | None = None,
+    limit: int | None = 200,
+    include_suppressed: bool = False,
+) -> list[dict[str, Any]]:
+    if not include_suppressed:
+        return _build_code_hits_payload(
+            watchlist_id=watchlist_id,
+            review_status=review_status,
+            platform=platform,
+            sensitive_type=sensitive_type,
+            limit=limit,
+            include_suppressed=include_suppressed,
+        )
+
+    revision = _code_hits_payload_cache_revision()
+    cache_key = (
+        int(watchlist_id) if watchlist_id is not None else None,
+        str(review_status or ""),
+        str(platform or ""),
+        str(sensitive_type or ""),
+        bool(include_suppressed),
+        revision,
+    )
+    now = time.monotonic()
+    with _CODE_HITS_PAYLOAD_CACHE_LOCK:
+        cached = _CODE_HITS_PAYLOAD_CACHE.get(cache_key)
+        if cached and now - cached[0] <= _CODE_HITS_PAYLOAD_CACHE_TTL_SECONDS:
+            return _slice_code_hits_payloads(cached[1], limit)
+        payloads = _build_code_hits_payload(
+            watchlist_id=watchlist_id,
+            review_status=review_status,
+            platform=platform,
+            sensitive_type=sensitive_type,
+            limit=None,
+            include_suppressed=include_suppressed,
+        )
+        _CODE_HITS_PAYLOAD_CACHE[cache_key] = (time.monotonic(), payloads)
+        _prune_code_hits_payload_cache(cache_key)
+        return _slice_code_hits_payloads(payloads, limit)
 
 
 def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:

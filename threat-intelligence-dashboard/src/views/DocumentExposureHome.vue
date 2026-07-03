@@ -26,6 +26,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useDocumentExposureApi } from '@/composables/useDocumentExposureApi'
+import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
 
 const api = useDocumentExposureApi()
 const summary = ref(null)
@@ -73,7 +74,7 @@ const moduleCards = computed(() => {
 
 function formatLastScanAt(value) {
   if (!value) return '未执行'
-  return String(value).replace('T', ' ').replace('Z', '').slice(0, 16)
+  return formatShanghaiDateTime(value)
 }
 
 async function loadSummary() {
