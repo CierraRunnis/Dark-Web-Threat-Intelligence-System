@@ -102,7 +102,7 @@ from darkweb_collector.tor_bridge_control import (
 from darkweb_collector.version_check import build_version_status
 
 
-app = FastAPI(title="Darkweb Collector API", version="v.0.10.0")
+app = FastAPI(title="Darkweb Collector API", version="v.11.0")
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
 _warmup_started = False
