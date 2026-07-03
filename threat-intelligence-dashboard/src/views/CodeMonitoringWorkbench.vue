@@ -3,7 +3,7 @@
     <main class="page">
       <header class="page-header">
         <div>
-          <h1>代码监测亮色态势版</h1>
+          <h1>代码监测</h1>
         </div>
         <div class="header-actions">
           <el-button plain class="ghost-btn" @click="router.push('/document-exposure/code-monitoring/settings')">配置管理</el-button>
@@ -13,20 +13,18 @@
       </header>
 
       <section class="top-grid">
-        <div class="top-grid__metrics">
-          <article v-for="card in metricCards" :key="card.label" class="panel metric-card">
-            <div class="panel-title">
-              <h2>{{ card.label }}</h2>
-              <span class="info-dot">i</span>
+        <article v-for="card in metricCards" :key="card.label" class="panel metric-card">
+          <div class="panel-title">
+            <h2>{{ card.label }}</h2>
+            <span class="info-dot">i</span>
+          </div>
+          <div class="metric-main">
+            <div :class="['icon-box', `tone-${card.tone}`]" v-html="card.icon"></div>
+            <div>
+              <div class="metric-value">{{ formatNumber(card.value) }}</div>
             </div>
-            <div class="metric-main">
-              <div :class="['icon-box', `tone-${card.tone}`]" v-html="card.icon"></div>
-              <div>
-                <div class="metric-value">{{ formatNumber(card.value) }}</div>
-              </div>
-            </div>
-          </article>
-        </div>
+          </div>
+        </article>
 
         <article class="panel source-card">
           <div class="panel-title">
@@ -35,18 +33,13 @@
           </div>
           <div class="source-list">
             <article v-for="item in platformCards" :key="item.rawName" class="source-item">
-              <div class="source-item__main">
-                <div :class="['source-logo', item.brandKey]" v-html="item.logo"></div>
-                <div class="source-item__content">
-                  <div class="source-name">{{ item.label }}</div>
-                  <div class="source-metrics">
-                    <strong>{{ formatNumber(item.value) }}</strong>
-                    <span>{{ item.shareText }}</span>
-                  </div>
+              <div :class="['source-logo', item.brandKey]" v-html="item.logo"></div>
+              <div>
+                <div class="source-name">{{ item.label }}</div>
+                <div class="source-metrics">
+                  <strong>{{ formatNumber(item.value) }}</strong>
+                  <span>{{ item.shareText }}</span>
                 </div>
-              </div>
-              <div class="source-progress">
-                <span class="source-progress__fill" :style="{ width: item.progressWidth, background: item.progressColor }"></span>
               </div>
             </article>
           </div>
@@ -469,10 +462,7 @@ const platformCards = computed(() =>
         brandKey: brand.key,
         logo: brand.logo,
         value,
-        shareValue: share,
         shareText: `${share.toFixed(1)}%`,
-        progressWidth: `${Math.min(100, Math.max(0, share))}%`,
-        progressColor: brand.progressColor,
       })
     }
     for (const platformName of ['github', 'gitlab', 'gitee']) {
@@ -484,10 +474,7 @@ const platformCards = computed(() =>
         brandKey: brand.key,
         logo: brand.logo,
         value: 0,
-        shareValue: 0,
         shareText: '0.0%',
-        progressWidth: '0%',
-        progressColor: brand.progressColor,
       })
     }
     return [...mapped.values()].sort((left, right) => {
@@ -622,15 +609,14 @@ const typeBars = computed(() => {
 function resolvePlatformBrand(name = '') {
   const raw = String(name || '').trim()
   const normalized = raw.toLowerCase()
-  if (normalized.includes('github')) return { key: 'github', label: 'GitHub', logo: PLATFORM_LOGOS.github, progressColor: '#3b82f6' }
-  if (normalized.includes('gitee')) return { key: 'gitee', label: 'Gitee', logo: PLATFORM_LOGOS.gitee, progressColor: '#e67a36' }
-  if (normalized.includes('gitlab')) return { key: 'gitlab', label: 'GitLab', logo: PLATFORM_LOGOS.gitlab, progressColor: '#f08b43' }
+  if (normalized.includes('github')) return { key: 'github', label: 'GitHub', logo: PLATFORM_LOGOS.github }
+  if (normalized.includes('gitee')) return { key: 'gitee', label: 'Gitee', logo: PLATFORM_LOGOS.gitee }
+  if (normalized.includes('gitlab')) return { key: 'gitlab', label: 'GitLab', logo: PLATFORM_LOGOS.gitlab }
   const fallback = (raw || 'NA').slice(0, 2).toUpperCase()
   return {
     key: 'generic',
     label: raw || '未知平台',
     logo: `<span class="source-logo__fallback">${fallback}</span>`,
-    progressColor: '#7089a6',
   }
 }
 
@@ -873,24 +859,22 @@ onMounted(async () => {
 }
 
 .monitoring-workbench {
-  --bg: #f4f7fc;
-  --bg-deep: #ebf1fa;
-  --panel: rgba(255, 255, 255, 0.94);
-  --panel-soft: rgba(247, 250, 255, 0.92);
-  --panel-line: rgba(97, 135, 189, 0.18);
-  --text: #182538;
-  --text-soft: #56697f;
-  --text-faint: #8798ad;
-  --blue: #2e83ff;
-  --blue-soft: #4ea1ff;
-  --orange: #ff9b2f;
-  --red: #ff545d;
-  --green: #2fd597;
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel-line: #dfe7f2;
+  --panel-line-strong: #d3deed;
+  --text: #10223a;
+  --text-soft: #60728a;
+  --text-faint: #8a9ab0;
+  --blue: #256fe6;
+  --orange: #f49a2f;
+  --red: #ef4f5f;
+  --green: #20b979;
   --yellow: #f5bb45;
-  --shadow: 0 18px 42px rgba(34, 67, 113, 0.08);
-  --radius: 18px;
-  --font: 'Bahnschrift', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
-  --font-mono: 'DIN Alternate', 'Bahnschrift', 'Consolas', monospace;
+  --shadow: 0 8px 22px rgba(24, 45, 78, 0.06);
+  --radius: 6px;
+  --font: 'Segoe UI', 'Microsoft YaHei UI', Arial, sans-serif;
+  --font-mono: 'DIN Alternate', 'Segoe UI', sans-serif;
   position: relative;
   min-height: 100%;
   background: #ffffff;
@@ -905,25 +889,26 @@ onMounted(async () => {
 .page {
   position: relative;
   z-index: 1;
-  width: min(1480px, calc(100% - 48px));
-  margin: 0 auto;
-  padding: 26px 0 40px;
+  width: calc(100% - 8px);
+  margin: 0 4px;
+  padding: 4px 0 28px;
 }
 
 .page-header {
   display: flex;
   justify-content: space-between;
-  gap: 24px;
+  gap: 16px;
   align-items: center;
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
 
 h1 {
   margin: 0;
   font-family: var(--font);
-  font-size: clamp(30px, 3.6vw, 44px);
-  line-height: 1.1;
-  letter-spacing: 0.02em;
+  font-size: 32px;
+  line-height: 1.15;
+  font-weight: 900;
+  letter-spacing: 0;
 }
 
 .header-actions {
@@ -936,23 +921,17 @@ h1 {
 .ghost-btn,
 .primary-btn {
   min-width: 108px;
-  height: 42px;
+  height: 36px;
   padding: 0 18px;
-  border-radius: 999px;
+  border-radius: var(--radius);
   font-family: var(--font);
   font-weight: 700;
 }
 
 .top-grid {
   display: grid;
-  grid-template-columns: minmax(0, 2.1fr) minmax(460px, 1fr);
-  gap: 16px;
-}
-
-.top-grid__metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .panel {
@@ -960,7 +939,7 @@ h1 {
   overflow: hidden;
   border: 1px solid var(--panel-line);
   border-radius: var(--radius);
-  background: #ffffff;
+  background: var(--panel);
   box-shadow: var(--shadow);
 }
 
@@ -969,13 +948,21 @@ h1 {
 }
 
 .metric-card {
-  min-height: 132px;
-  padding: 18px 18px;
+  min-height: 96px;
+  padding: 13px 14px;
+}
+
+.metric-card:nth-child(1),
+.metric-card:nth-child(2),
+.metric-card:nth-child(3),
+.metric-card:nth-child(4) {
+  grid-column: span 2;
 }
 
 .source-card {
-  min-height: 136px;
-  padding: 18px 20px 16px;
+  grid-column: span 4;
+  min-height: 96px;
+  padding: 13px 16px;
 }
 
 .panel-title,
@@ -989,26 +976,27 @@ h1 {
 }
 
 .panel-title {
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 
 .panel-title h2,
 .chart-title h2 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1.2;
+  font-size: 18px;
+  font-weight: 900;
   letter-spacing: 0;
 }
 
 .metric-card .panel-title h2 {
+  font-size: 15px;
+  line-height: 1.2;
   white-space: nowrap;
 }
 
 .info-dot {
-  width: 18px;
-  height: 18px;
-  border: 1px solid rgba(140, 170, 214, 0.34);
+  width: 17px;
+  height: 17px;
+  border: 1px solid #cbd8e8;
   border-radius: 50%;
   color: var(--text-faint);
   display: inline-grid;
@@ -1019,54 +1007,51 @@ h1 {
 .metric-main {
   position: relative;
   z-index: 1;
-  display: flex;
+  display: grid;
+  grid-template-columns: 38px 1fr;
+  gap: 13px;
   align-items: center;
-  gap: 16px;
-  min-height: 52px;
 }
 
 .icon-box {
   display: grid;
   place-items: center;
-  flex: none;
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  border: 1px solid rgba(107, 144, 196, 0.16);
-  background: rgba(255, 255, 255, 0.98);
-  box-shadow:
-    inset 0 0 18px rgba(255, 255, 255, 0.6),
-    0 10px 20px rgba(40, 77, 128, 0.08);
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius);
+  border: 1px solid #e1e8f3;
+  background: #ffffff;
+  box-shadow: none;
 }
 
 .icon-box :deep(svg) {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   display: block;
 }
 
 .tone-blue {
-  color: #6aa9f5;
+  color: var(--blue);
 }
 
 .tone-violet {
-  color: #919cf2;
+  color: var(--blue);
 }
 
 .tone-orange {
-  color: #f0b55e;
+  color: var(--blue);
 }
 
 .tone-red {
-  color: #ee949a;
+  color: var(--blue);
 }
 
 .metric-value {
-  margin-top: 0;
   font-family: var(--font-mono);
-  font-size: 38px;
+  font-size: 34px;
   font-weight: 700;
   line-height: 1;
+  letter-spacing: 0;
 }
 
 .source-list {
@@ -1074,40 +1059,31 @@ h1 {
   z-index: 1;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
+  gap: 8px;
+  align-items: center;
 }
 
 .source-item {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.source-item__main {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.source-item__content {
+  gap: 10px;
   min-width: 0;
 }
 
 .source-logo {
   flex: none;
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(92, 130, 184, 0.12);
+  border: 0;
   color: white;
 }
 
 .source-logo :deep(svg) {
-  width: 25px;
-  height: 25px;
+  width: 22px;
+  height: 22px;
   display: block;
 }
 
@@ -1118,83 +1094,67 @@ h1 {
 }
 
 .source-logo.github {
-  background: linear-gradient(135deg, #365d90 0%, #173356 52%, #102241 100%);
+  background: #213a5d;
 }
 
 .source-logo.gitee {
-  background: linear-gradient(135deg, #f06366 0%, #c82f32 52%, #7d151d 100%);
+  background: #c93b42;
 }
 
 .source-logo.gitlab {
-  background: linear-gradient(135deg, #ffb05e 0%, #df5f24 52%, #822e23 100%);
+  background: #dc6c2f;
 }
 
 .source-logo.generic {
-  background: linear-gradient(135deg, #7089a6 0%, #536b89 100%);
+  background: #7089a6;
 }
 
 .source-name {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .source-metrics {
   display: flex;
-  gap: 10px;
-  margin-top: 2px;
+  gap: 8px;
+  margin-top: 4px;
   color: var(--text-soft);
   font-size: 12px;
-  align-items: baseline;
 }
 
 .source-metrics strong {
   color: var(--text);
-  font-size: 15px;
+  font-size: 17px;
   font-family: var(--font-mono);
-}
-
-.source-progress {
-  height: 4px;
-  margin-left: 58px;
-  border-radius: 999px;
-  background: rgba(202, 216, 236, 0.9);
-  overflow: hidden;
-}
-
-.source-progress__fill {
-  display: block;
-  height: 100%;
-  min-width: 6px;
-  border-radius: inherit;
 }
 
 .content-grid {
   display: grid;
-  grid-template-columns: 1.45fr 1.08fr 1.12fr;
-  gap: 16px;
-  margin-top: 16px;
+  grid-template-columns: minmax(420px, 1.32fr) minmax(300px, 1fr) minmax(330px, 1.05fr);
+  gap: 10px;
+  margin-top: 10px;
 }
 
 .chart-panel {
-  padding: 16px 18px 18px;
-  min-height: 330px;
+  padding: 13px 16px;
+  min-height: 278px;
 }
 
 .chart-title {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   align-items: baseline;
 }
 
 .chart-title span {
   color: var(--text-faint);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .trend-wrap {
   position: relative;
   z-index: 1;
-  height: 260px;
+  height: 214px;
 }
 
 .trend-wrap svg {
@@ -1208,15 +1168,15 @@ h1 {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(180px, 220px) 1fr;
-  gap: 10px;
+  grid-template-columns: 184px 1fr;
+  gap: 16px;
   align-items: center;
-  height: 252px;
+  height: 214px;
 }
 
 .donut-shell {
-  width: 196px;
-  height: 196px;
+  width: 176px;
+  height: 176px;
   margin: 0 auto;
   border-radius: 50%;
   display: grid;
@@ -1224,12 +1184,12 @@ h1 {
 }
 
 .donut-inner {
-  width: 116px;
-  height: 116px;
+  width: 98px;
+  height: 98px;
   border-radius: 50%;
-  border: 1px solid rgba(98, 143, 210, 0.2);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(238, 244, 252, 0.98));
-  box-shadow: inset 0 0 28px rgba(70, 111, 168, 0.08);
+  border: 1px solid #dfe7f2;
+  background: #ffffff;
+  box-shadow: none;
   display: grid;
   place-items: center;
   text-align: center;
@@ -1237,7 +1197,7 @@ h1 {
 
 .donut-total {
   font-family: var(--font-mono);
-  font-size: 34px;
+  font-size: 30px;
   line-height: 1;
 }
 
@@ -1282,14 +1242,14 @@ h1 {
   position: relative;
   z-index: 1;
   display: grid;
-  gap: 12px;
+  gap: 10px;
   padding-top: 4px;
 }
 
 .bar-row {
   display: grid;
-  grid-template-columns: 88px 1fr auto;
-  gap: 12px;
+  grid-template-columns: 90px 1fr 34px;
+  gap: 10px;
   align-items: center;
   color: var(--text-soft);
   font-size: 13px;
@@ -1297,34 +1257,36 @@ h1 {
 
 .bar-track {
   position: relative;
-  height: 9px;
-  border-radius: 999px;
+  height: 8px;
+  border-radius: 4px;
   overflow: hidden;
-  background: rgba(83, 123, 182, 0.12);
-  border: 1px solid rgba(83, 123, 182, 0.12);
+  background: #eef2f7;
+  border: 1px solid #dfe7f2;
 }
 
 .bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: inherit;
-  background: linear-gradient(90deg, #266ee8, #51a7ff);
-  box-shadow: 0 0 14px rgba(46, 131, 255, 0.2);
+  background: var(--blue);
+  box-shadow: none;
 }
 
 .bar-row strong {
   color: var(--text);
   font-family: var(--font-mono);
+  text-align: right;
 }
 
 .stack {
   display: grid;
-  gap: 16px;
+  gap: 0;
 }
 
 .table-panel {
-  margin-top: 16px;
-  padding: 18px 18px 12px;
+  margin-top: 10px;
+  margin-bottom: 16px;
+  padding: 13px 16px 10px;
 }
 
 .table-title {
@@ -1334,12 +1296,13 @@ h1 {
   align-items: baseline;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .table-title h2 {
   margin: 0;
   font-size: 18px;
+  font-weight: 900;
 }
 
 .table-toolbar {
@@ -1348,22 +1311,22 @@ h1 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 14px;
+  gap: 14px;
+  margin-bottom: 10px;
 }
 
 .table-toolbar-left {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .toolbar-control {
-  width: 148px;
+  width: 122px;
 }
 
 .toolbar-search {
-  min-width: 260px;
+  min-width: 306px;
   flex: 1;
   max-width: 360px;
 }
@@ -1382,22 +1345,23 @@ h1 {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 1100px;
 }
 
 th,
 td {
-  padding: 15px 12px;
+  padding: 10px 8px;
   text-align: left;
-  border-bottom: 1px solid rgba(80, 118, 170, 0.14);
+  border-bottom: 1px solid #edf1f7;
+  white-space: nowrap;
 }
 
 th {
   color: var(--text-faint);
   font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 td {
@@ -1413,7 +1377,7 @@ td strong {
 
 .cell-ellipsis {
   display: inline-block;
-  max-width: 240px;
+  max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1423,19 +1387,19 @@ td strong {
 .table-empty {
   text-align: center;
   color: var(--text-faint);
-  padding: 28px 12px;
+  padding: 24px 12px;
 }
 
 .badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 72px;
-  height: 28px;
-  padding: 0 12px;
+  min-width: 64px;
+  height: 24px;
+  padding: 0 9px;
   border-radius: 999px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .badge.hit {
@@ -1467,16 +1431,16 @@ td strong {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 58px;
-  height: 30px;
-  padding: 0 10px;
+  min-width: 50px;
+  height: 26px;
+  padding: 0 9px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius);
   color: white;
-  background: linear-gradient(135deg, rgba(24, 99, 212, 0.9), rgba(56, 128, 255, 0.9));
+  background: var(--blue);
   font-family: var(--font);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 800;
   cursor: pointer;
 }
 
@@ -1487,7 +1451,7 @@ td strong {
 }
 
 .footnote {
-  margin-top: 10px;
+  margin-top: 5px;
 }
 
 .table-footer {
@@ -1497,7 +1461,7 @@ td strong {
   justify-content: space-between;
   gap: 16px;
   align-items: center;
-  margin-top: 18px;
+  margin-top: 12px;
 }
 
 .panel-empty {
@@ -1514,32 +1478,31 @@ td strong {
 }
 
 :deep(.el-button--default) {
-  border: 1px solid rgba(113, 145, 195, 0.24);
+  border: 1px solid #d8e2f0;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow:
-    inset 0 0 0 1px rgba(37, 94, 161, 0.04),
-    0 10px 22px rgba(36, 78, 130, 0.06);
+  background: #ffffff;
+  box-shadow: none;
 }
 
 :deep(.el-button--primary) {
-  border-color: rgba(78, 161, 255, 0.36);
-  background: linear-gradient(135deg, rgba(24, 99, 212, 0.96), rgba(56, 128, 255, 0.96));
+  border-color: var(--blue);
+  background: var(--blue);
+  box-shadow: none;
 }
 
 :deep(.el-input__wrapper),
 :deep(.el-select__wrapper) {
-  min-height: 40px;
+  min-height: 34px;
   border-radius: 999px;
-  background: rgba(248, 251, 255, 0.92);
-  border: 1px solid rgba(100, 141, 198, 0.2);
+  background: #ffffff;
+  border: 1px solid #dce6f3;
   box-shadow: none !important;
 }
 
 :deep(.el-input__wrapper.is-focus),
 :deep(.el-select__wrapper.is-focused) {
-  border-color: rgba(78, 161, 255, 0.38);
-  box-shadow: 0 0 0 4px rgba(46, 131, 255, 0.08) !important;
+  border-color: #aac4eb;
+  box-shadow: none !important;
 }
 
 :deep(.el-input__inner),
@@ -1550,33 +1513,56 @@ td strong {
 }
 
 :deep(.el-pagination) {
-  --el-pagination-bg-color: rgba(255, 255, 255, 0.95);
-  --el-pagination-button-color: #61748b;
-  --el-pagination-hover-color: #2e83ff;
+  --el-pagination-bg-color: #ffffff;
+  --el-pagination-button-bg-color: #ffffff;
+  --el-pagination-button-color: #53657d;
+  --el-pagination-hover-color: var(--blue);
+  --el-pagination-border-radius: 4px;
+  font-weight: 700;
 }
 
-@media (max-width: 1100px) {
-  .top-grid {
-    grid-template-columns: 1fr;
+:deep(.el-pagination.is-background .btn-prev),
+:deep(.el-pagination.is-background .btn-next),
+:deep(.el-pagination.is-background .el-pager li) {
+  min-width: 32px;
+  height: 32px;
+  border: 1px solid #dce6f3;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+:deep(.el-pagination.is-background .el-pager li.is-active) {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+:deep(.el-pagination .el-select .el-select__wrapper) {
+  min-height: 32px;
+  border-radius: 999px;
+}
+
+@media (max-width: 1240px) {
+  .metric-card:nth-child(1),
+  .metric-card:nth-child(2),
+  .metric-card:nth-child(3),
+  .metric-card:nth-child(4) {
+    grid-column: span 3;
   }
 
-  .top-grid__metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .source-card {
+    grid-column: 1 / -1;
   }
 
   .content-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .content-grid .chart-panel:first-child {
-    grid-column: 1 / -1;
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 980px) {
   .page {
-    width: min(100% - 28px, 1480px);
-    padding-top: 20px;
+    width: calc(100% - 8px);
+    margin: 0 4px;
+    padding-top: 4px;
   }
 
   .page-header,
@@ -1587,7 +1573,17 @@ td strong {
     align-items: flex-start;
   }
 
-  .top-grid__metrics,
+  .metric-card:nth-child(1),
+  .metric-card:nth-child(2),
+  .metric-card:nth-child(3),
+  .metric-card:nth-child(4) {
+    grid-column: span 6;
+  }
+
+  .source-card {
+    grid-column: 1 / -1;
+  }
+
   .content-grid,
   .risk-layout {
     grid-template-columns: 1fr;
@@ -1609,8 +1605,12 @@ td strong {
 }
 
 @media (max-width: 720px) {
-  .top-grid__metrics {
-    grid-template-columns: 1fr;
+  .metric-card:nth-child(1),
+  .metric-card:nth-child(2),
+  .metric-card:nth-child(3),
+  .metric-card:nth-child(4),
+  .source-card {
+    grid-column: 1 / -1;
   }
 
   .bar-row {

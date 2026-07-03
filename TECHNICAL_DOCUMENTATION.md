@@ -2,7 +2,7 @@
 
 ## 1. 文档目的
 
-本文档用于系统化说明 `D:\bishe` 项目的整体实现方式，回答以下问题：
+本文档用于系统化说明 `<project-root>` 项目的整体实现方式，回答以下问题：
 
 - 项目整体架构是什么
 - 后端采集系统、标准化分析系统、API 服务、前端展示系统分别如何实现
@@ -40,7 +40,7 @@
 ## 3. 总体目录结构
 
 ```text
-D:\bishe
+<project-root>
 ├─ darkweb_collector                 # 后端采集与情报处理系统
 ├─ threat-intelligence-dashboard     # 前端仪表盘
 ├─ tor-downloads                     # Tor 相关资源目录
@@ -808,7 +808,7 @@ darkweb_collector
 
 ### 为什么它重要
 
-如果没有 `normalized_intelligence.py`，项目只能展示“原始站点数据”；  
+如果没有 `normalized_intelligence.py`，项目只能展示“原始站点数据”；
 有了它，项目才真正具备“统一威胁情报事件模型”的能力。
 
 ---
@@ -1005,7 +1005,7 @@ darkweb_collector
 
 ### 前端为什么只调少量接口却能拿到很多数据
 
-原因就在这里。  
+原因就在这里。
 `build_intelligence_payload()` 把：
 
 - 数据泄露事件
@@ -1566,4 +1566,3 @@ bash scripts/start_all_services_wsl.sh start
 14. `threat-intelligence-dashboard/src/views/*.vue`
 
 这样可以从“配置与采集”一路读到“展示与控制”。
-

@@ -20,7 +20,7 @@
 - `darkforums`
 - `chaos`
 
-站点配置在 [sites.yaml](/D:/bishe/darkweb_collector/sites.yaml)。
+站点配置在 [sites.yaml](./sites.yaml)。
 
 ## 抓取路由规则
 
@@ -54,7 +54,7 @@
 推荐先进入虚拟环境：
 
 ```bash
-cd /path/to/bishe/darkweb_collector
+cd /path/to/project/darkweb_collector
 source venv/bin/activate
 ```
 
@@ -95,7 +95,7 @@ export PROXY_PORT=7890
 先进入项目目录：
 
 ```bash
-cd /path/to/bishe/darkweb_collector
+cd /path/to/project/darkweb_collector
 ```
 
 ## 一键启动整套服务
@@ -259,10 +259,10 @@ python -m uvicorn darkweb_collector.api_app:app --host 127.0.0.1 --port 8000
 
 项目里还保留了一些兼容或辅助脚本：
 
-- [fetch_dragonforce.py](/D:/bishe/darkweb_collector/scripts/fetch_dragonforce.py)
-- [fetch_darkforums.py](/D:/bishe/darkweb_collector/scripts/fetch_darkforums.py)
-- [fetch_onion_playwright.py](/D:/bishe/darkweb_collector/scripts/fetch_onion_playwright.py)
-- [fetch_onion_playwright_windows.py](/D:/bishe/darkweb_collector/scripts/fetch_onion_playwright_windows.py)
+- [fetch_dragonforce.py](./scripts/fetch_dragonforce.py)
+- [fetch_darkforums.py](./scripts/fetch_darkforums.py)
+- [fetch_onion_playwright.py](./scripts/fetch_onion_playwright.py)
+- [fetch_onion_playwright_windows.py](./scripts/fetch_onion_playwright_windows.py)
 
 其中：
 
@@ -293,7 +293,7 @@ python scripts/crawl.py worker --queue browser_render
 python scripts/crawl.py enqueue-due
 ```
 
-详细说明可参考 [QUEUE_WORKFLOW.md](/D:/bishe/darkweb_collector/QUEUE_WORKFLOW.md)。
+详细说明可参考 [QUEUE_WORKFLOW.md](./QUEUE_WORKFLOW.md)。
 
 ## 输出与数据
 
@@ -355,8 +355,8 @@ SQLite 默认路径：
 
 1. 在 `src/darkweb_collector/sites/<site>.py` 中实现 parser
 2. 在 `src/darkweb_collector/adapters/<site>.py` 中实现 `SiteAdapter`
-3. 在 [registry.py](/D:/bishe/darkweb_collector/src/darkweb_collector/adapters/registry.py) 中注册
-4. 在 [sites.yaml](/D:/bishe/darkweb_collector/sites.yaml) 中新增站点配置
+3. 在 [registry.py](./src/darkweb_collector/adapters/registry.py) 中注册
+4. 在 [sites.yaml](./sites.yaml) 中新增站点配置
 5. 通过：
 
 ```bash
@@ -372,9 +372,9 @@ python scripts/crawl.py run-site --site <site_name> --once
 ```bash
 python scripts/import_html_sample.py \
   --site dragonforce \
-  --input /mnt/d/bishe/darkweb_collector/output/dragonforce/latest.html \
+  --input /mnt/d/project/darkweb_collector/output/dragonforce/latest.html \
   --source-url http://dragonforxxbp3awc7mzs5dkswrua3znqyx5roefmi4smjrsdi22xwqd.onion/ \
-  --output-json /mnt/d/bishe/darkweb_collector/output/imported/dragonforce_from_sample.json
+  --output-json /mnt/d/project/darkweb_collector/output/imported/dragonforce_from_sample.json
 ```
 
 这个模式适合：
