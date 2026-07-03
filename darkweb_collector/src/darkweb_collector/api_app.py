@@ -92,6 +92,13 @@ import darkweb_collector.normalized_intelligence as normalized_intelligence_modu
 from darkweb_collector.db import get_db_connection, list_monitoring_keyword_notifications
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
 from darkweb_collector.runtime import output_root
+from darkweb_collector.tor_bridge_control import (
+    get_tor_bridge_status,
+    save_tor_bridge_settings,
+    start_tor_bridge,
+    stop_tor_bridge,
+    write_torrc,
+)
 from darkweb_collector.version_check import build_version_status
 
 
@@ -436,6 +443,18 @@ class RansomwareConfigRequest(BaseModel):
     api_key: str
 
 
+class TorBridgeConfigRequest(BaseModel):
+    enabled: bool = False
+    bridge_mode: str = "snowflake"
+    tor_executable: str = ""
+    transport_executable: str = ""
+    socks_host: str = "127.0.0.1"
+    socks_port: int = Field(9050, ge=1, le=65535)
+    bridge_lines: list[str] = []
+    extra_torrc_lines: list[str] = []
+    data_directory: str = ""
+
+
 class MonitoringKeywordRow(BaseModel):
     keyword: str
     category: str
@@ -667,6 +686,34 @@ def ransomware_config() -> dict:
 @app.post("/api/ransomware/config")
 def ransomware_config_save(payload: RansomwareConfigRequest) -> dict:
     return set_ransomware_live_api_key(payload.api_key)
+
+
+@app.get("/api/tor-bridge/status")
+def tor_bridge_status() -> dict:
+    return get_tor_bridge_status()
+
+
+@app.post("/api/tor-bridge/config")
+def tor_bridge_config_save(payload: TorBridgeConfigRequest) -> dict:
+    try:
+        status = save_tor_bridge_settings(payload.model_dump())
+        write_torrc()
+        return status
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/tor-bridge/start")
+def tor_bridge_start() -> dict:
+    try:
+        return start_tor_bridge()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/tor-bridge/stop")
+def tor_bridge_stop() -> dict:
+    return stop_tor_bridge()
 
 
 @app.post("/api/sites/{site_name}/enabled")

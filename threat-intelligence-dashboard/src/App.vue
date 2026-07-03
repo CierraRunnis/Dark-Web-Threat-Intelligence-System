@@ -50,6 +50,8 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 
 .main-content {
   flex: 1;
+  min-width: 0;
+  width: calc(100% - var(--ti-sidebar-width));
   display: flex;
   flex-direction: column;
   margin-left: var(--ti-sidebar-width);
@@ -63,6 +65,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 }
 
 .app-container.sidebar-collapsed .main-content {
+  width: calc(100% - var(--ti-sidebar-collapsed));
   margin-left: var(--ti-sidebar-collapsed);
 }
 
@@ -108,6 +111,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 
 @media (max-width: 767px) {
   .main-content {
+    width: calc(100% - var(--ti-sidebar-collapsed));
     margin-left: var(--ti-sidebar-collapsed);
   }
 
