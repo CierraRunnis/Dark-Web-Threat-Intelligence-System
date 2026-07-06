@@ -1,6 +1,11 @@
 name: Windows Tor bridge live
 
 on:
+  push:
+    branches:
+      - 0.11.0-fix
+    paths:
+      - .github/workflows/windows-tor-bridge-live.yml
   workflow_dispatch:
     inputs:
       tor_executable:
