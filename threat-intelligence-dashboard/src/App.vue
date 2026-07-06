@@ -39,8 +39,10 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 @use '@/styles/global.scss';
 
 .app-container {
-  display: flex;
   min-height: 100vh;
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: hidden;
   background: #ffffff;
 }
 
@@ -49,9 +51,10 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 }
 
 .main-content {
-  flex: 1;
+  min-height: 100vh;
   min-width: 0;
-  width: calc(100% - var(--ti-sidebar-width));
+  width: auto;
+  max-width: calc(100vw - var(--ti-sidebar-width));
   display: flex;
   flex-direction: column;
   margin-left: var(--ti-sidebar-width);
@@ -65,7 +68,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 }
 
 .app-container.sidebar-collapsed .main-content {
-  width: calc(100% - var(--ti-sidebar-collapsed));
+  max-width: calc(100vw - var(--ti-sidebar-collapsed));
   margin-left: var(--ti-sidebar-collapsed);
 }
 
@@ -75,8 +78,10 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 
 .page-content {
   flex: 1;
+  min-width: 0;
   padding: 28px;
   overflow-y: auto;
+  overflow-x: hidden;
   background: #ffffff;
 }
 
@@ -111,7 +116,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 
 @media (max-width: 767px) {
   .main-content {
-    width: calc(100% - var(--ti-sidebar-collapsed));
+    max-width: calc(100vw - var(--ti-sidebar-collapsed));
     margin-left: var(--ti-sidebar-collapsed);
   }
 

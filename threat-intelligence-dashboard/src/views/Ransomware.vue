@@ -191,6 +191,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped lang="scss">
+.ransomware-page,
+.summary-grid,
+.content-grid {
+  min-width: 0;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -204,6 +210,9 @@ onBeforeUnmount(() => {
 }
 
 .table-shell {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   margin-top: 18px;
 }
 
