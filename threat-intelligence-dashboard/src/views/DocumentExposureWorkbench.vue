@@ -105,7 +105,7 @@
         <div class="netdisk-table-shell">
           <el-table :data="pagedHits" table-layout="fixed" :row-class-name="tableRowClassName">
             <el-table-column
-              v-for="column in currentConfig.columns"
+              v-for="column in compactTableColumns"
               :key="column.key"
               :label="column.label"
               :min-width="column.minWidth"
@@ -150,7 +150,7 @@
                 <span v-else>{{ column.value(row) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="62">
+            <el-table-column label="操作" width="78">
               <template #default="{ row }">
                 <div class="netdisk-row-actions">
                   <el-button text @click="viewDetail(row)">
@@ -338,7 +338,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
@@ -359,17 +359,19 @@ const FAMILY_CONFIG = {
     trendTitle: '新增命中文档趋势',
     distributionTitle: '搜索来源分布',
     tableTitle: '搜索引擎命中列表',
+    searchPlaceholder: '搜索标题、站点、文件名、关键词',
     footerHint: '详情页展示来源结果、证据快照、匹配词和处置记录。',
     columns: [
-      { key: 'title', label: '页面标题 / 链接', minWidth: 260, value: (row) => row.title || row.canonicalUrl || '-' },
-      { key: 'discoverySourceLabel', label: '来源', width: 140, value: (row) => row.discoverySourceLabel || '-' },
-      { key: 'primaryFileType', label: '文件类型', width: 120, value: (row) => (row.primaryFileType || '-').toUpperCase() },
-      { key: 'matchedTerms', label: '匹配关键词', minWidth: 200, value: () => '' },
-      { key: 'riskScore', label: '风险级别', width: 110, value: () => '' },
-      { key: 'lastSeenAt', label: '发现时间', minWidth: 160, value: () => '' },
-      { key: 'reviewStatus', label: '处理状态', width: 120, value: () => '' },
+      { key: 'title', label: '页面标题', minWidth: 220, value: (row) => row.title || row.canonicalUrl || '-' },
+      { key: 'platformLabel', label: '搜索引擎', minWidth: 96, value: (row) => platformDisplayLabel(row) },
+      { key: 'sourceDetail', label: '结果站点', minWidth: 130, value: (row) => resultHost(row) },
+      { key: 'primaryFileType', label: '文件类型', minWidth: 76, value: (row) => (row.primaryFileType || '-').toUpperCase() },
+      { key: 'matchedTerms', label: '命中关键词', minWidth: 118, value: () => '' },
+      { key: 'riskScore', label: '风险等级', minWidth: 76, value: () => '' },
+      { key: 'lastSeenAt', label: '发现时间', minWidth: 118, value: () => '' },
+      { key: 'reviewStatus', label: '处置状态', minWidth: 92, value: () => '' },
     ],
-    sourceLabel: (row) => row.discoverySourceLabel || row.discoverySource || '未知来源',
+    sourceLabel: (row) => row.platformLabel || row.discoverySourceLabel || row.discoverySource || '未知来源',
   },
   netdisk_aggregator: {
     eyebrow: 'Netdisk',
@@ -427,6 +429,7 @@ const riskFilter = ref('')
 const reviewFilter = ref('')
 const currentPage = ref(1)
 const pageSize = ref(10)
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const summary = reactive({
   totalHits: 0,
   highRiskCount: 0,
@@ -452,6 +455,9 @@ const PLATFORM_ICON_META = {
   baidupan_share: { text: '百', className: 'baidu', url: 'https://nd-static.bdstatic.com/m-static/wp-brand/favicon.ico' },
   aliyundrive_share: { text: '阿', className: 'aliyun', url: 'https://img.alicdn.com/imgextra/i1/O1CN01JDQCi21Dc8EfbRwvF_!!6000000000236-73-tps-64-64.ico' },
   quark_share: { text: '夸', className: 'quark', url: 'https://image.quark.cn/s/uae/g/3o/broccoli/resource/202602/f6439020-13b4-11f1-9342-3944993de2f6.png' },
+  baidu_search: { text: '百', className: 'baidu', url: 'https://www.baidu.com/favicon.ico' },
+  bing_search: { text: 'BI', className: 'bing', url: 'https://www.bing.com/favicon.ico' },
+  so360_search: { text: '360', className: 'so360', url: 'https://www.so.com/favicon.ico' },
   tianyi_share: { text: '天', className: 'tianyi' },
   pan123_share: { text: '123', className: 'pan123' },
   onedrive_share: { text: '1D', className: 'onedrive' },
@@ -464,7 +470,16 @@ const PLATFORM_ICON_META = {
 
 const sourceFamily = computed(() => route.meta.sourceFamily || 'search_engine')
 const currentConfig = computed(() => FAMILY_CONFIG[sourceFamily.value] || FAMILY_CONFIG.search_engine)
-const isCompactBoard = computed(() => ['netdisk_aggregator', 'document_library'].includes(sourceFamily.value))
+const isCompactBoard = computed(() => ['netdisk_aggregator', 'search_engine', 'document_library'].includes(sourceFamily.value))
+const compactColumnBreakpoints = {
+  search_engine: { sourceDetail: 1360, matchedTerms: 1240 },
+  document_library: { accessState: 1360, matchedTerms: 1240 },
+  netdisk_aggregator: { shareCode: 1500, primaryFileSize: 1360, matchedTerms: 1240 },
+}
+const compactTableColumns = computed(() => {
+  const breakpoints = compactColumnBreakpoints[sourceFamily.value] || {}
+  return currentConfig.value.columns.filter((column) => !breakpoints[column.key] || viewportWidth.value >= breakpoints[column.key])
+})
 
 const metricCards = computed(() => {
   const base = [
@@ -598,6 +613,38 @@ const trendDeltaText = computed(() => {
 })
 
 const netdiskMetricCards = computed(() => {
+  if (sourceFamily.value === 'search_engine') {
+    return [
+      {
+        label: '搜索结果数',
+        value: dateScopedHits.value.length || summary.totalHits,
+        delta: trendDeltaText.value,
+        deltaType: 'up',
+        icon: 'link',
+      },
+      {
+        label: '高风险结果',
+        value: highSeverityCount.value || summary.highRiskCount,
+        delta: '需复核',
+        deltaType: 'up',
+        icon: 'alert',
+      },
+      {
+        label: '公开可访问',
+        value: publicDocumentCount.value,
+        delta: '结果页可访问',
+        deltaType: 'up',
+        icon: 'lock',
+      },
+      {
+        label: '近24h新增',
+        value: recent24hCount.value || summary.recentCount,
+        delta: '持续监测',
+        deltaType: 'up',
+        icon: 'broken',
+      },
+    ]
+  }
   if (sourceFamily.value === 'document_library') {
     return [
       {
@@ -961,6 +1008,16 @@ function platformDisplayLabel(row) {
   return normalizePlatformLabel(row?.platformLabel || row?.platform)
 }
 
+function resultHost(row) {
+  const direct = String(row?.sourceDetail || '').trim()
+  if (direct) return direct
+  try {
+    return new URL(row?.canonicalUrl || '').hostname || '-'
+  } catch {
+    return '-'
+  }
+}
+
 function platformIconMeta(row) {
   return PLATFORM_ICON_META[row?.platform] || { text: platformDisplayLabel(row).slice(0, 2).toUpperCase(), className: 'generic' }
 }
@@ -1063,7 +1120,19 @@ watch(
   },
 )
 
-onMounted(loadData)
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
+onMounted(() => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
+  loadData()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewportWidth)
+})
 </script>
 
 <style scoped lang="scss">
@@ -1361,7 +1430,7 @@ onMounted(loadData)
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
   margin-top: 10px;
   border: 1px solid rgba(45, 93, 255, 0.14);
@@ -1377,7 +1446,7 @@ onMounted(loadData)
   --el-table-text-color: var(--ti-text-primary);
   font-size: 12px;
   width: 100%;
-  min-width: 918px;
+  min-width: 0;
 }
 
 .netdisk-table-shell :deep(.el-table__header-wrapper th.el-table__cell) {
@@ -1390,7 +1459,7 @@ onMounted(loadData)
 
 .netdisk-table-shell :deep(.el-table .cell) {
   overflow: hidden;
-  padding: 0 6px;
+  padding: 0 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1410,17 +1479,20 @@ onMounted(loadData)
 }
 
 .netdisk-row-actions {
-  gap: 0;
+  flex-wrap: nowrap;
+  justify-content: center;
+  gap: 4px;
 }
 
 .netdisk-row-actions :deep(.el-button) {
-  width: 23px;
-  height: 23px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   color: var(--ti-text-secondary);
 }
 
 .netdisk-pagination {
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   margin-top: 12px;
@@ -1943,6 +2015,17 @@ onMounted(loadData)
 
   .netdisk-toolbar__controls {
     width: 100%;
+    overflow-x: hidden;
+  }
+
+  .netdisk-search {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .netdisk-settings-btn {
+    margin-left: 0;
   }
 
   .monitor-shell__header,

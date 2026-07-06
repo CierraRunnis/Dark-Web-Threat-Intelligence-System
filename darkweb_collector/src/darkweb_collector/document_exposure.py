@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -205,6 +206,18 @@ NETDISK_SCAN_MODE_ENV = "NETDISK_SCAN_MODE"
 NETDISK_SCAN_MODE_LEGACY = "legacy"
 NETDISK_SCAN_MODE_INCREMENTAL = "incremental"
 DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_ENV = "DARKWEB_DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_SOURCES"
+SEARCH_ENGINE_RESULT_LIMIT = 20
+SEARCH_RESULT_SKIP_SUFFIXES = {
+    ".css",
+    ".js",
+    ".ico",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+}
 
 
 DEFAULT_TERMS = [
@@ -461,7 +474,7 @@ def _ordered_discovery_sources(source_families: list[str] | None = None) -> list
 
 
 def _netdisk_detail_fetch_default(source_families: list[str], configured_default: Any) -> bool:
-    if source_families == ["netdisk_aggregator"]:
+    if source_families in (["netdisk_aggregator"], ["search_engine"]):
         return False
     return bool(configured_default)
 
@@ -687,6 +700,34 @@ def _discovery_source_label(source_key: str | None) -> str:
     return key
 
 
+def _platform_label(platform_key: str | None, discovery_source_key: str | None = None) -> str:
+    key = _normalize_text(platform_key)
+    if key in PLATFORMS:
+        return get_exposure_platform(key).label
+    for item in SEARCH_ENGINES:
+        if item.key == key:
+            return item.label
+    return key or _discovery_source_label(discovery_source_key)
+
+
+def _search_result_resource_fingerprint(source_key: str, url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    normalized = urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path.rstrip("/") or "/",
+            "",
+            parsed.query,
+            "",
+        )
+    )
+    digest = hashlib.sha1(normalized.encode("utf-8", "ignore")).hexdigest()[:24]
+    return f"search_result:{_normalize_text(source_key)}:{digest}"
+
+
 def _extract_access_code(*texts: Any) -> str:
     for item in texts:
         text = _normalize_text(item)
@@ -821,10 +862,28 @@ def _candidate_url_variants(url: str) -> list[str]:
     query = parse_qs(parsed.query)
     for key in ("url", "u", "target", "link", "redirect", "to", "href"):
         for value in query.get(key, []):
-            candidate = _clean_candidate_url(unquote(value))
-            if candidate.startswith("http") and candidate not in variants:
-                variants.append(candidate)
+            for candidate in _redirect_value_variants(value):
+                if candidate.startswith("http") and candidate not in variants:
+                    variants.append(candidate)
     return variants
+
+
+def _redirect_value_variants(value: str) -> list[str]:
+    decoded = _clean_candidate_url(unquote(str(value or "")))
+    rows = [decoded] if decoded else []
+    base64_candidates = [decoded]
+    if decoded.startswith("a1") and len(decoded) > 2:
+        base64_candidates.append(decoded[2:])
+    for item in base64_candidates:
+        try:
+            padded = item + "=" * (-len(item) % 4)
+            text = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", "ignore")
+        except Exception:
+            continue
+        candidate = _clean_candidate_url(text)
+        if candidate.startswith("http") and candidate not in rows:
+            rows.append(candidate)
+    return rows
 
 
 def _netdisk_share_path_id(url: str, marker: str) -> str:
@@ -1965,6 +2024,112 @@ def _extract_file_names(text: str, anchors: list[dict[str, str]]) -> list[str]:
     return results[:30]
 
 
+def _search_engine_platform(source: DiscoverySource) -> ExposurePlatform | None:
+    return next((item for item in SEARCH_ENGINES if item.key == source.key), None)
+
+
+def _search_engine_source_hosts(source: DiscoverySource) -> set[str]:
+    hosts = {urlparse(source.search_url_template).netloc.lower()}
+    platform = _search_engine_platform(source)
+    if platform is not None:
+        hosts.update(domain.lower() for domain in platform.domains)
+    return {host for host in hosts if host}
+
+
+def _is_search_engine_redirect(source: DiscoverySource, url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    if source.key == "baidu_search":
+        return path.startswith("/link")
+    if source.key == "bing_search":
+        return path.startswith("/ck/")
+    if source.key == "so360_search":
+        return path.startswith(("/link", "/url"))
+    return False
+
+
+def _is_search_result_asset(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    return any(path.endswith(suffix) for suffix in SEARCH_RESULT_SKIP_SUFFIXES)
+
+
+def _search_result_target_url(source: DiscoverySource, href: str, requested_url: str) -> str:
+    absolute = urljoin(requested_url, href)
+    source_hosts = _search_engine_source_hosts(source)
+    for variant in _candidate_url_variants(absolute):
+        parsed = urlparse(variant)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        host = parsed.netloc.lower()
+        is_source_host = any(host == item or host.endswith(f".{item}") for item in source_hosts)
+        if is_source_host and not _is_search_engine_redirect(source, variant):
+            continue
+        if _is_search_result_asset(variant):
+            continue
+        return _clean_candidate_url(variant)
+    return ""
+
+
+def _is_search_navigation_text(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    if len(normalized) < 2:
+        return True
+    navigation_tokens = {
+        "百度首页",
+        "新闻",
+        "hao123",
+        "地图",
+        "视频",
+        "图片",
+        "知道",
+        "文库",
+        "贴吧",
+        "采购",
+        "学术",
+        "更多",
+        "下一页",
+        "上一页",
+        "翻页",
+        "bing",
+        "microsoft",
+        "隐私",
+        "设置",
+        "反馈",
+    }
+    return normalized in {item.lower() for item in navigation_tokens}
+
+
+def _parse_search_engine_candidates(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
+    parser = _AnchorParser(include_noscript=True)
+    parser.feed(html)
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in parser.anchors:
+        title = _normalize_text(item.get("text"))
+        if _is_search_navigation_text(title):
+            continue
+        target_url = _search_result_target_url(source, item.get("href") or "", requested_url)
+        if not target_url or target_url in seen:
+            continue
+        seen.add(target_url)
+        host = urlparse(target_url).netloc.lower()
+        preview_text = _normalize_text(" ".join([title, target_url]))
+        candidates.append(
+            {
+                "url": target_url,
+                "title": title or target_url,
+                "source": source.key,
+                "source_detail": host,
+                "preview_text": preview_text,
+                "file_names": _extract_file_names(preview_text, []),
+            }
+        )
+        if len(candidates) >= SEARCH_ENGINE_RESULT_LIMIT:
+            break
+    return candidates
+
+
 def _parse_pikasoo_candidates(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
     parser = _PikasooResultParser()
     parser.feed(html)
@@ -2084,6 +2249,8 @@ def _parse_lzpanx_candidates(source: DiscoverySource, html: str, requested_url: 
 
 
 def _parse_candidates_from_html(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
+    if source.category == "search_engine":
+        return _parse_search_engine_candidates(source, html, requested_url)
     if source.key == "pikasoo":
         pikasoo_candidates = _parse_pikasoo_candidates(source, html, requested_url)
         if pikasoo_candidates:
@@ -2284,7 +2451,7 @@ def _search_candidate_pages_for_source(
                 "_health": health_payload,
             }
         )
-    elif source_family == "document_library" and health_updates is not None:
+    elif source_family in {"document_library", "search_engine"} and health_updates is not None:
         health_updates.append(_source_health_payload(source, error_text, _now_utc_iso()))
     return rows
 
@@ -2693,8 +2860,9 @@ def scan_watchlist_once(
                 (str(row.get("source_key") or ""), str(row.get("term") or "")): row
                 for row in list_netdisk_source_states(connection, watchlist_id=int(watchlist["id"]))
             }
-    if "document_library" in selected_source_families:
-        ensure_source_health_defaults("document_library")
+    for source_family in ("document_library", "search_engine"):
+        if source_family in selected_source_families:
+            ensure_source_health_defaults(source_family)
 
     total_candidates = 0
     total_hits = 0
@@ -2733,11 +2901,15 @@ def scan_watchlist_once(
                 seen_candidate_urls.add(candidate_url)
                 candidate_source_url = _normalize_text(candidate.get("_source_url")) or url
                 detail_platform = platform_from_url(candidate["url"])
+                if detail_platform is None and source_family == "search_engine":
+                    detail_platform = _search_engine_platform(source)
                 if detail_platform is None:
                     continue
                 candidate_resource_fingerprint = (
                     _netdisk_url_resource_fingerprint(detail_platform.key, candidate_url)
                     if detail_platform.platform_type == "netdisk_share"
+                    else _search_result_resource_fingerprint(source.key, candidate_url)
+                    if detail_platform.platform_type == "search_engine"
                     else ""
                 )
                 if candidate_resource_fingerprint and candidate_resource_fingerprint in seen_resource_fingerprints:
@@ -2753,6 +2925,11 @@ def scan_watchlist_once(
                             )
                     else:
                         raw_candidate_preview = _normalize_text(candidate.get("preview_text") or candidate.get("title"))
+                        candidate_file_names = [
+                            _normalize_text(item)
+                            for item in (candidate.get("file_names") or [])
+                            if _normalize_text(item)
+                        ]
                         share_code = _normalize_text(candidate.get("share_code")) or _extract_access_code(
                             candidate.get("url"),
                             candidate.get("title"),
@@ -2810,6 +2987,8 @@ def scan_watchlist_once(
                         access_state = access_state_override or (
                             _probe_netdisk_link_access_state(candidate["url"])
                             if detail_platform.platform_type == "netdisk_share"
+                            else "public"
+                            if detail_platform.platform_type == "search_engine"
                             else "unknown"
                         )
                         detail = {
@@ -2826,7 +3005,7 @@ def scan_watchlist_once(
                                 else
                                 _extract_netdisk_preview_file_names(raw_candidate_preview)
                                 if detail_platform.platform_type == "netdisk_share" and access_state_override not in {"removed", "forbidden"}
-                                else _extract_file_names(candidate_preview, [])
+                                else candidate_file_names or _extract_file_names(candidate_preview, [])
                             ),
                             "file_sizes": (
                                 [item["size"] for item in (file_entries or preview_file_entries) if _normalize_text(item.get("size"))]
@@ -2885,6 +3064,8 @@ def scan_watchlist_once(
                         detail.get("file_entries") or [],
                     )
                     if detail_platform.platform_type == "netdisk_share"
+                    else _search_result_resource_fingerprint(source.key, detail["page_url"])
+                    if detail_platform.platform_type == "search_engine"
                     else ""
                 )
                 if resource_fingerprint and resource_fingerprint in seen_resource_fingerprints:
@@ -3139,7 +3320,7 @@ def list_document_exposures_payload(
             " ".join(file_names),
         )
         platform_key = row.get("platform") or ""
-        platform_label = get_exposure_platform(str(platform_key)).label if platform_key in PLATFORMS else str(platform_key)
+        platform_label = _platform_label(platform_key, row.get("discovery_source"))
         payload = {
             "id": int(row["id"]),
             "watchlistId": int(row["watchlist_id"]),
@@ -3150,6 +3331,7 @@ def list_document_exposures_payload(
             "platformType": row.get("platform_type") or "",
             "discoverySource": row.get("discovery_source") or "",
             "discoverySourceLabel": _discovery_source_label(row.get("discovery_source")),
+            "sourceDetail": _normalize_text((raw_payload or {}).get("source_detail")),
             "sourceFamily": _source_family_for_source(platform_type=row.get("platform_type"), source=next((item for item in DISCOVERY_SOURCES if item.key == row.get("discovery_source")), None)),
             "canonicalUrl": row.get("canonical_url") or "",
             "title": row.get("title") or "",
@@ -3370,7 +3552,7 @@ def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
         source=discovery_source,
     )
     source_family_label = SOURCE_FAMILY_LABELS.get(source_family, source_family)
-    platform_label = get_exposure_platform(str(platform_key)).label if platform_key in PLATFORMS else str(platform_key)
+    platform_label = _platform_label(platform_key, discovery_source_key)
     risk_reasons: list[str] = []
     if matched_terms:
         matched_names = [
@@ -3708,7 +3890,7 @@ def build_document_exposure_event_records(limit: int | None = None) -> list[dict
     rows = list_document_exposures_payload(limit=limit or 200)
     events: list[dict[str, Any]] = []
     for row in rows:
-        platform_label = get_exposure_platform(str(row.get("platform") or "")).label if row.get("platform") in PLATFORMS else str(row.get("platform") or "")
+        platform_label = _platform_label(row.get("platform"), row.get("discoverySource"))
         summary = _normalize_text(row.get("summary"))
         events.append(
             {
@@ -3768,7 +3950,7 @@ def build_document_exposure_event_detail(event_id: str) -> dict[str, Any] | None
     if detail is None:
         return None
     platform_key = str(detail.get("platform") or "")
-    platform_label = get_exposure_platform(platform_key).label if platform_key in PLATFORMS else platform_key
+    platform_label = _platform_label(platform_key, detail.get("discoverySource"))
     matched_terms = detail.get("matchedTerms") or []
     snapshot = detail["snapshots"][0] if detail.get("snapshots") else {}
     mirror_resources = []

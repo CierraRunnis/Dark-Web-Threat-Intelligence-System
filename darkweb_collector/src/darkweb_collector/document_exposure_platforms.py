@@ -498,6 +498,8 @@ def list_exposure_platforms(
     module: str | None = None,
 ) -> list[ExposurePlatform]:
     platforms: list[ExposurePlatform] = []
+    if module in {None, "document_exposure"}:
+        platforms.extend(SEARCH_ENGINES)
     for key in sorted(PLATFORMS):
         platform = PLATFORMS[key]
         if module and platform.module != str(module).strip():

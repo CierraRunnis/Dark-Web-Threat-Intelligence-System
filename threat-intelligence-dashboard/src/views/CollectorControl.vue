@@ -409,35 +409,35 @@
         </div>
       </div>
       <div class="ti-card-body">
-        <div class="ti-table-shell">
-          <el-table :data="siteHealth" style="width: 100%" table-layout="auto">
-            <el-table-column prop="site_name" label="站点" width="120" />
-            <el-table-column prop="overall_status" label="总体状态" width="92" />
-            <el-table-column prop="seed_status" label="种子页状态" width="100" />
-            <el-table-column prop="detail_status" label="详情页状态" width="100" />
-            <el-table-column prop="running_jobs" label="运行中" width="78" />
-            <el-table-column prop="failed_jobs_24h" label="24h 失败" width="88" />
-            <el-table-column label="连续失败" width="88">
+        <div class="ti-table-shell site-health-table-shell">
+          <el-table :data="siteHealth" style="width: 100%" table-layout="fixed">
+            <el-table-column prop="site_name" label="站点" min-width="116" show-overflow-tooltip />
+            <el-table-column prop="overall_status" label="总体状态" width="86" />
+            <el-table-column v-if="showSiteHealthWide" prop="seed_status" label="种子页状态" width="92" />
+            <el-table-column v-if="showSiteHealthWide" prop="detail_status" label="详情页状态" width="92" />
+            <el-table-column prop="running_jobs" label="运行中" width="66" />
+            <el-table-column prop="failed_jobs_24h" label="24h 失败" width="78" />
+            <el-table-column label="连续失败" width="78">
               <template #default="{ row }">
                 {{ row.consecutive_failures || 0 }}/{{ row.failure_threshold || 3 }}
               </template>
             </el-table-column>
-            <el-table-column label="熔断" width="82">
+            <el-table-column label="熔断" width="76">
               <template #default="{ row }">
                 <StatusBadge :label="circuitBreakerLabel(row)" :tone="circuitBreakerTone(row)" :dot="false" />
               </template>
             </el-table-column>
-            <el-table-column prop="failure_cooldown_until" label="冷却至" min-width="116" />
-            <el-table-column label="错误分类" width="96">
+            <el-table-column v-if="showSiteHealthWide" prop="failure_cooldown_until" label="冷却至" width="110" show-overflow-tooltip />
+            <el-table-column label="错误分类" width="86">
               <template #default="{ row }">
                 <StatusBadge :label="errorCategoryLabel(row.error_category)" :tone="errorCategoryTone(row.error_category)" :dot="false" />
               </template>
             </el-table-column>
-            <el-table-column prop="last_success_at" label="最近成功" min-width="132" />
-            <el-table-column prop="last_error" label="最近错误" min-width="180" show-overflow-tooltip />
-            <el-table-column label="操作" min-width="210">
+            <el-table-column prop="last_success_at" label="最近成功" min-width="118" show-overflow-tooltip />
+            <el-table-column v-if="showSiteHealthMedium" prop="last_error" label="最近错误" min-width="150" show-overflow-tooltip />
+            <el-table-column label="操作" width="178">
               <template #default="{ row }">
-                <div class="row-actions">
+                <div class="row-actions site-health-actions">
                   <el-button size="small" type="primary" :loading="!!runningSiteMap[row.site_name]" :disabled="isSiteRunBlocked(row) || !row.enabled" @click="runSiteOnce(row.site_name)">运行一次</el-button>
                   <el-button size="small" :type="row.enabled ? 'danger' : 'success'" plain :loading="!!togglingSiteMap[row.site_name]" @click="toggleSite(row.site_name, !row.enabled)">
                     {{ row.enabled ? '停用采集' : '启用采集' }}
@@ -475,7 +475,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
@@ -489,6 +489,9 @@ const { data: continuousState, refresh: refreshContinuous } = useContinuousJobs(
 const jobsData = computed(() => jobsState.value || {})
 const continuousStatus = computed(() => continuousState.value || {})
 const siteHealth = computed(() => jobsData.value.site_health || [])
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
+const showSiteHealthWide = computed(() => viewportWidth.value >= 1500)
+const showSiteHealthMedium = computed(() => viewportWidth.value >= 1280)
 const recentFailures = computed(() => jobsData.value.recent_failures || [])
 const vulnerabilitySync = computed(() => jobsData.value.vulnerability_sync || {})
 const ransomwareSync = computed(() => jobsData.value.ransomware_sync || {})
@@ -1216,8 +1219,18 @@ async function stopRansomwareSync() {
   }
 }
 
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
 onMounted(async () => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
   await refreshAllPanels()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewportWidth)
 })
 </script>
 
@@ -1553,6 +1566,34 @@ onMounted(async () => {
   gap: 12px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.site-health-table-shell {
+  overflow-x: hidden;
+}
+
+.site-health-table-shell :deep(.el-table .cell) {
+  overflow: hidden;
+  padding: 0 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-health-table-shell :deep(.el-table__header-wrapper th.el-table__cell) {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.site-health-actions {
+  gap: 6px;
+  justify-content: flex-start;
+}
+
+.site-health-actions :deep(.el-button) {
+  min-width: 74px;
+  height: 28px;
+  margin-left: 0 !important;
+  padding: 0 9px;
 }
 
 .alert-stream {
