@@ -1,0 +1,220 @@
+name: Windows Tor bridge live
+
+on:
+  workflow_dispatch:
+    inputs:
+      tor_executable:
+        description: "Optional full path to tor.exe on the self-hosted runner"
+        required: false
+        default: ""
+      transport_executable:
+        description: "Optional full path to snowflake-client.exe, lyrebird.exe, or obfs4proxy.exe"
+        required: false
+        default: ""
+      socks_port:
+        description: "Local SOCKS port to use; leave blank to choose a free port"
+        required: false
+        default: ""
+      bootstrap_wait_seconds:
+        description: "Maximum seconds to wait for Tor bootstrap"
+        required: false
+        default: "360"
+
+permissions:
+  contents: read
+
+jobs:
+  tor-bridge-live:
+    runs-on: [self-hosted, windows, tor-bridge]
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: PowerShell syntax check
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$pwd\darkweb_collector\scripts\start_all_services_windows.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { $_.Message }
+            exit 1
+          }
+
+      - name: Detect Windows Tor runtime
+        shell: powershell
+        env:
+          REQUESTED_TOR_EXECUTABLE: ${{ inputs.tor_executable }}
+          REQUESTED_TRANSPORT_EXECUTABLE: ${{ inputs.transport_executable }}
+        run: |
+          if ($env:REQUESTED_TOR_EXECUTABLE) {
+            if (-not (Test-Path -LiteralPath $env:REQUESTED_TOR_EXECUTABLE -PathType Leaf)) {
+              throw "Configured tor_executable does not exist: $env:REQUESTED_TOR_EXECUTABLE"
+            }
+            [Environment]::SetEnvironmentVariable("DARKWEB_TOR_EXECUTABLE", $env:REQUESTED_TOR_EXECUTABLE, "User")
+            $env:DARKWEB_TOR_EXECUTABLE = $env:REQUESTED_TOR_EXECUTABLE
+          }
+          if ($env:REQUESTED_TRANSPORT_EXECUTABLE) {
+            if (-not (Test-Path -LiteralPath $env:REQUESTED_TRANSPORT_EXECUTABLE -PathType Leaf)) {
+              throw "Configured transport_executable does not exist: $env:REQUESTED_TRANSPORT_EXECUTABLE"
+            }
+            [Environment]::SetEnvironmentVariable("DARKWEB_TOR_TRANSPORT_EXECUTABLE", $env:REQUESTED_TRANSPORT_EXECUTABLE, "User")
+            $env:DARKWEB_TOR_TRANSPORT_EXECUTABLE = $env:REQUESTED_TRANSPORT_EXECUTABLE
+          }
+
+          $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\darkweb_collector\scripts\start_all_services_windows.ps1 status 2>&1
+          $output | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $text = $output -join "`n"
+          if ($text -notmatch "tor-bridge-runtime: ready") {
+            throw "Windows startup script did not report a ready Tor bridge runtime."
+          }
+
+          $tor = [Environment]::GetEnvironmentVariable("DARKWEB_TOR_EXECUTABLE", "User")
+          $transport = [Environment]::GetEnvironmentVariable("DARKWEB_TOR_TRANSPORT_EXECUTABLE", "User")
+          if (-not $tor -or -not (Test-Path -LiteralPath $tor -PathType Leaf)) {
+            throw "DARKWEB_TOR_EXECUTABLE is not a valid file: $tor"
+          }
+          if (-not $transport -or -not (Test-Path -LiteralPath $transport -PathType Leaf)) {
+            throw "DARKWEB_TOR_TRANSPORT_EXECUTABLE is not a valid file: $transport"
+          }
+
+          "DARKWEB_TOR_EXECUTABLE=$tor" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DARKWEB_TOR_TRANSPORT_EXECUTABLE=$transport" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "DARKWEB_TOR_EXECUTABLE=$tor"
+          Write-Host "DARKWEB_TOR_TRANSPORT_EXECUTABLE=$transport"
+
+      - name: Test Tor bridge connectivity
+        shell: powershell
+        env:
+          REQUESTED_SOCKS_PORT: ${{ inputs.socks_port }}
+          BOOTSTRAP_WAIT_SECONDS: ${{ inputs.bootstrap_wait_seconds }}
+        run: |
+          $scriptPath = Join-Path $env:RUNNER_TEMP "test_windows_tor_bridge_live.py"
+          @'
+          import json
+          import os
+          import shutil
+          import socket
+          import subprocess
+          import time
+          from pathlib import Path
+
+          def choose_port() -> int:
+              requested = os.environ.get("REQUESTED_SOCKS_PORT", "").strip()
+              if requested:
+                  return int(requested)
+              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                  sock.bind(("127.0.0.1", 0))
+                  return int(sock.getsockname()[1])
+
+          run = Path(os.environ["RUNNER_TEMP"]) / "dwti-tor-bridge-live"
+          if run.exists():
+              shutil.rmtree(run)
+          run.mkdir(parents=True)
+
+          os.environ["DARKWEB_TOR_BRIDGE_SETTINGS_PATH"] = str(run / "settings.json")
+          os.environ["DARKWEB_TOR_BRIDGE_SOCKS_WAIT_SECONDS"] = "60"
+
+          from darkweb_collector.tor_bridge_control import (
+              get_tor_bridge_status,
+              save_tor_bridge_settings,
+              start_tor_bridge,
+              stop_tor_bridge,
+          )
+
+          socks_port = choose_port()
+          bootstrap_wait_seconds = int(os.environ.get("BOOTSTRAP_WAIT_SECONDS") or "360")
+          result = {"events": [], "socks_port": socks_port}
+          try:
+              result["saved"] = save_tor_bridge_settings({
+                  "enabled": True,
+                  "bridge_mode": "snowflake",
+                  "socks_host": "127.0.0.1",
+                  "socks_port": socks_port,
+                  "data_directory": str(run / "data"),
+              })
+              result["started"] = start_tor_bridge()
+
+              deadline = time.monotonic() + bootstrap_wait_seconds
+              while True:
+                  status = get_tor_bridge_status()
+                  event = {
+                      "runtime_ready": status.get("runtime_ready"),
+                      "runtime_errors": status.get("runtime_errors"),
+                      "process_running": status.get("process_running"),
+                      "socks_port_open": status.get("socks_port_open"),
+                      "bootstrap_status": status.get("bootstrap_status"),
+                      "last_error": status.get("last_error"),
+                  }
+                  result["events"].append(event)
+                  print(json.dumps(event, ensure_ascii=False))
+                  if not status.get("process_running"):
+                      raise RuntimeError("Tor process stopped before bootstrap completed")
+                  if status.get("bootstrap_status") == "done":
+                      break
+                  if time.monotonic() >= deadline:
+                      raise TimeoutError(f"Tor did not bootstrap within {bootstrap_wait_seconds}s")
+                  time.sleep(5)
+
+              curl = shutil.which("curl.exe") or shutil.which("curl")
+              if not curl:
+                  raise RuntimeError("curl was not found on the runner")
+              response = subprocess.run(
+                  [
+                      curl,
+                      "-sS",
+                      "-m",
+                      "120",
+                      "--socks5-hostname",
+                      f"127.0.0.1:{socks_port}",
+                      "https://check.torproject.org/api/ip",
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              result["curl"] = {
+                  "returncode": response.returncode,
+                  "stdout": response.stdout.strip(),
+                  "stderr": response.stderr.strip(),
+              }
+              print(json.dumps(result["curl"], ensure_ascii=False))
+              if response.returncode != 0:
+                  raise RuntimeError(response.stderr.strip() or "curl failed")
+              payload = json.loads(response.stdout)
+              if not payload.get("IsTor"):
+                  raise RuntimeError(f"Tor check failed: {response.stdout.strip()}")
+              result["final_status"] = get_tor_bridge_status()
+              result["success"] = True
+              print(json.dumps({"success": True, "tor_check": payload}, ensure_ascii=False))
+          finally:
+              try:
+                  result["stopped"] = stop_tor_bridge()
+              except Exception as exc:
+                  result["stop_error"] = repr(exc)
+              (run / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+          '@ | Set-Content -LiteralPath $scriptPath -Encoding UTF8
+
+          $env:PYTHONPATH = "$pwd\darkweb_collector\src"
+          python $scriptPath
+
+      - name: Upload Tor bridge logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tor-bridge-live-logs
+          path: ${{ runner.temp }}\dwti-tor-bridge-live
+          if-no-files-found: ignore
