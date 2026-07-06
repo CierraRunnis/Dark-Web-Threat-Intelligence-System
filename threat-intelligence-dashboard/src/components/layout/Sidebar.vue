@@ -78,7 +78,7 @@
           </el-icon>
         </div>
         <strong>{{ versionTitle }}</strong>
-        <p>{{ versionDescription }}</p>
+        <p v-if="versionDescription">{{ versionDescription }}</p>
         <a v-if="versionStatus?.update_available && versionStatus?.compare_url" :href="versionStatus.compare_url" target="_blank" rel="noreferrer">
           查看 main 更新
         </a>
@@ -169,18 +169,18 @@ const versionTitle = computed(() => {
   if (versionLoading.value && !versionStatus.value) return '检查中'
   if (versionError.value && !versionStatus.value) return '检查失败'
   if (versionStatus.value?.update_available) return '发现新版本'
-  return `当前 ${currentVersionLabel.value}`
+  return currentVersionLabel.value
 })
 
 const versionDescription = computed(() => {
   if (versionError.value && !versionStatus.value) return versionError.value
   if (!versionStatus.value) return '正在检查版本信息'
   const branch = versionStatus.value.branch || versionStatus.value.current?.branch || 'main'
-  const latest = versionStatus.value.latest?.short_commit || ''
+  const latest = versionStatus.value.latest?.version || versionStatus.value.latest?.short_commit || ''
   if (versionStatus.value.update_available) {
     return `本地 ${currentVersionLabel.value} / ${branch} ${latest || '-'}`
   }
-  return latest ? `${branch} 分支已同步 · ${latest}` : `${branch} 分支已同步`
+  return ''
 })
 
 const currentVersionLabel = computed(() => (

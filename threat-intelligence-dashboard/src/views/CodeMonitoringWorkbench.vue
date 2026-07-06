@@ -295,6 +295,7 @@
                   <th>当前层级</th>
                   <th>压制原因</th>
                   <th>风险级别</th>
+                  <th>发现时间</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -311,10 +312,11 @@
                   </td>
                   <td><span class="cell-ellipsis" :title="suppressionReasonLabel(row)">{{ suppressionReasonLabel(row) }}</span></td>
                   <td><span :class="['badge', severityBadgeClass(row.severity)]">{{ formatSeverity(row.severity) }}</span></td>
+                  <td>{{ formatDateTime(row.lastSeenAt || row.firstSeenAt) || '-' }}</td>
                   <td><button type="button" class="detail-link" @click="viewDetail(row)">详情</button></td>
                 </tr>
                 <tr v-if="!pagedSuppressedHits.length">
-                  <td colspan="8" class="table-empty">暂无被压制线索</td>
+                  <td colspan="9" class="table-empty">暂无被压制线索</td>
                 </tr>
               </tbody>
             </table>
