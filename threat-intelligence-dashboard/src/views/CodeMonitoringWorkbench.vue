@@ -859,6 +859,7 @@ onMounted(async () => {
 }
 
 .monitoring-workbench {
+  min-width: 0;
   --bg: #ffffff;
   --panel: #ffffff;
   --panel-line: #dfe7f2;
@@ -890,6 +891,8 @@ onMounted(async () => {
   position: relative;
   z-index: 1;
   width: calc(100% - 8px);
+  max-width: 100%;
+  min-width: 0;
   margin: 0 4px;
   padding: 4px 0 28px;
 }
@@ -936,6 +939,7 @@ h1 {
 
 .panel {
   position: relative;
+  min-width: 0;
   overflow: hidden;
   border: 1px solid var(--panel-line);
   border-radius: var(--radius);
@@ -1326,8 +1330,8 @@ h1 {
 }
 
 .toolbar-search {
-  min-width: 306px;
-  flex: 1;
+  min-width: 0;
+  flex: 1 1 240px;
   max-width: 360px;
 }
 
@@ -1339,6 +1343,8 @@ h1 {
 .table-shell {
   position: relative;
   z-index: 1;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
 }
 

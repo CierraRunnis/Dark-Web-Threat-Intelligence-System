@@ -1070,12 +1070,16 @@ onMounted(loadData)
 .netdisk-board {
   display: grid;
   gap: 10px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   color: var(--ti-text-primary);
 }
 
 .netdisk-toolbar {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .netdisk-title,
@@ -1089,6 +1093,7 @@ onMounted(loadData)
 
 .netdisk-title {
   gap: 6px;
+  min-width: 0;
 }
 
 .netdisk-title h2 {
@@ -1106,6 +1111,7 @@ onMounted(loadData)
 .netdisk-toolbar__controls {
   gap: 8px;
   min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   padding-bottom: 2px;
   scrollbar-width: thin;
@@ -1193,6 +1199,7 @@ onMounted(loadData)
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+  min-width: 0;
 }
 
 .netdisk-metric-card,
@@ -1207,6 +1214,7 @@ onMounted(loadData)
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-width: 0;
   min-height: 86px;
   padding: 14px 16px;
 }
@@ -1350,6 +1358,9 @@ onMounted(loadData)
 }
 
 .netdisk-table-shell {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   margin-top: 10px;
@@ -1420,6 +1431,9 @@ onMounted(loadData)
 .monitor-shell {
   display: grid;
   gap: 20px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 24px;
   border-radius: 28px;
   background: #ffffff;
@@ -1434,6 +1448,7 @@ onMounted(loadData)
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
+  min-width: 0;
 }
 
 .monitor-shell__eyebrow,
@@ -1461,12 +1476,14 @@ onMounted(loadData)
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  min-width: 0;
 }
 
 .metric-grid,
 .chart-grid {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .metric-grid {
@@ -1479,6 +1496,7 @@ onMounted(loadData)
 
 .metric-card,
 .monitor-panel {
+  min-width: 0;
   border: 1px solid rgba(116, 142, 184, 0.14);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.9);
@@ -1574,6 +1592,10 @@ onMounted(loadData)
 }
 
 .table-shell {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
   margin-top: 16px;
 }
 
@@ -1914,10 +1936,17 @@ onMounted(loadData)
 @media (max-width: 960px) {
   .metric-grid,
   .chart-grid,
+  .netdisk-metric-grid,
+  .netdisk-chart-grid,
+  .netdisk-distribution,
   .table-footer {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .netdisk-toolbar__controls {
+    width: 100%;
   }
 
   .monitor-shell__header,

@@ -120,9 +120,11 @@ select {
 }
 
 .ti-card-header {
+  min-width: 0;
   padding: 18px 22px;
   border-bottom: 1px solid var(--ti-border-soft);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
@@ -212,6 +214,12 @@ select {
   overflow-x: auto;
 }
 
+.table-footer,
+.el-pagination {
+  max-width: 100%;
+  min-width: 0;
+}
+
 .ti-card-list {
   display: grid;
   gap: 14px;
@@ -291,6 +299,8 @@ select {
 
 .el-pagination {
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
 }
 
 .el-radio-button__inner {
@@ -358,6 +368,10 @@ select {
 }
 
 @media (max-width: 767px) {
+  .el-pagination {
+    width: 100%;
+  }
+
   .ti-card {
     border-radius: 18px;
   }
