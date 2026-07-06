@@ -411,31 +411,31 @@
       <div class="ti-card-body">
         <div class="ti-table-shell">
           <el-table :data="siteHealth" style="width: 100%" table-layout="auto">
-            <el-table-column prop="site_name" label="站点" min-width="140" />
-            <el-table-column prop="overall_status" label="总体状态" width="110" />
-            <el-table-column prop="seed_status" label="种子页状态" width="120" />
-            <el-table-column prop="detail_status" label="详情页状态" width="120" />
-            <el-table-column prop="running_jobs" label="运行中" width="90" />
-            <el-table-column prop="failed_jobs_24h" label="24h 失败" width="100" />
-            <el-table-column label="连续失败" width="100">
+            <el-table-column prop="site_name" label="站点" width="120" />
+            <el-table-column prop="overall_status" label="总体状态" width="92" />
+            <el-table-column prop="seed_status" label="种子页状态" width="100" />
+            <el-table-column prop="detail_status" label="详情页状态" width="100" />
+            <el-table-column prop="running_jobs" label="运行中" width="78" />
+            <el-table-column prop="failed_jobs_24h" label="24h 失败" width="88" />
+            <el-table-column label="连续失败" width="88">
               <template #default="{ row }">
                 {{ row.consecutive_failures || 0 }}/{{ row.failure_threshold || 3 }}
               </template>
             </el-table-column>
-            <el-table-column label="熔断" width="100">
+            <el-table-column label="熔断" width="82">
               <template #default="{ row }">
                 <StatusBadge :label="circuitBreakerLabel(row)" :tone="circuitBreakerTone(row)" :dot="false" />
               </template>
             </el-table-column>
-            <el-table-column prop="failure_cooldown_until" label="冷却至" min-width="150" />
-            <el-table-column label="错误分类" width="130">
+            <el-table-column prop="failure_cooldown_until" label="冷却至" min-width="116" />
+            <el-table-column label="错误分类" width="96">
               <template #default="{ row }">
                 <StatusBadge :label="errorCategoryLabel(row.error_category)" :tone="errorCategoryTone(row.error_category)" :dot="false" />
               </template>
             </el-table-column>
-            <el-table-column prop="last_success_at" label="最近成功" min-width="170" />
-            <el-table-column prop="last_error" label="最近错误" min-width="260" show-overflow-tooltip />
-            <el-table-column label="操作" min-width="260">
+            <el-table-column prop="last_success_at" label="最近成功" min-width="132" />
+            <el-table-column prop="last_error" label="最近错误" min-width="180" show-overflow-tooltip />
+            <el-table-column label="操作" min-width="210">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button size="small" type="primary" :loading="!!runningSiteMap[row.site_name]" :disabled="isSiteRunBlocked(row) || !row.enabled" @click="runSiteOnce(row.site_name)">运行一次</el-button>
