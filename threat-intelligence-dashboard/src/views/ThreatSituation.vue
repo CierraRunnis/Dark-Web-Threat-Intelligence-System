@@ -166,7 +166,7 @@
                 <StatusBadge :label="row.hasSampleEvidence ? '有' : '无'" :tone="row.hasSampleEvidence ? 'danger' : 'muted'" />
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100" fixed="right">
+            <el-table-column label="操作" width="100">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button size="small" type="primary" @click="viewEventDetail(row)">详情</el-button>

@@ -166,7 +166,7 @@
                 </template>
               </el-table-column>
               <el-table-column prop="last_error" label="最近错误" min-width="240" show-overflow-tooltip />
-              <el-table-column label="操作" min-width="320" fixed="right">
+              <el-table-column label="操作" min-width="320">
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button

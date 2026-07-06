@@ -70,7 +70,7 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="查看" width="120" fixed="right">
+              <el-table-column label="查看" width="120">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" @click="viewEvent(row)">查看</el-button>
                 </template>

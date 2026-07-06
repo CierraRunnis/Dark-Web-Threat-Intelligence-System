@@ -42,7 +42,7 @@
               <el-table-column prop="attacker" label="攻击者" width="160" show-overflow-tooltip />
               <el-table-column prop="industry" label="行业" width="150" />
               <el-table-column prop="region" label="受害国家和地区" min-width="220" show-overflow-tooltip />
-              <el-table-column label="查看" width="120" fixed="right">
+              <el-table-column label="查看" width="120">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" @click="viewEventDetail(row)">查看</el-button>
                 </template>

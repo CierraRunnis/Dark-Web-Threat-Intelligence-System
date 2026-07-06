@@ -313,7 +313,7 @@
                 <span v-else>{{ column.value(row) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="104" fixed="right">
+            <el-table-column label="操作" width="104">
               <template #default="{ row }">
                 <el-button class="compact-action" type="primary" size="small" @click="viewDetail(row)">查看</el-button>
               </template>
@@ -1920,10 +1920,6 @@ onMounted(loadData)
 
 .table-shell--netdisk :deep(.el-table__inner-wrapper::before) {
   display: none;
-}
-
-.table-shell--netdisk :deep(.el-table__fixed-right) {
-  background: rgba(255, 255, 255, 0.94);
 }
 
 @media (max-width: 1280px) {

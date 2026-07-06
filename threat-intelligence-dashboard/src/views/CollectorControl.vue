@@ -435,7 +435,7 @@
             </el-table-column>
             <el-table-column prop="last_success_at" label="最近成功" min-width="170" />
             <el-table-column prop="last_error" label="最近错误" min-width="260" show-overflow-tooltip />
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" min-width="260">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button size="small" type="primary" :loading="!!runningSiteMap[row.site_name]" :disabled="isSiteRunBlocked(row) || !row.enabled" @click="runSiteOnce(row.site_name)">运行一次</el-button>
