@@ -71,6 +71,8 @@ $PackageLockStamp = Join-Path $DashboardRoot "node_modules\.package-lock.sha256"
 $RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { "redis://127.0.0.1:6379/0" }
 $CollectorDbPath = if ($env:DARKWEB_COLLECTOR_DB_PATH) { $env:DARKWEB_COLLECTOR_DB_PATH } else { Join-Path $DefaultUserDataDir "collector.db" }
 $CollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) { $env:DARKWEB_COLLECTOR_SITES_FILE } else { Join-Path $CollectorRoot "sites.yaml" }
+$TorBridgeTorExecutable = if ($env:DARKWEB_TOR_EXECUTABLE) { $env:DARKWEB_TOR_EXECUTABLE } else { "" }
+$TorBridgeTransportExecutable = if ($env:DARKWEB_TOR_TRANSPORT_EXECUTABLE) { $env:DARKWEB_TOR_TRANSPORT_EXECUTABLE } else { "" }
 $CollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
     $configuredOutputRoot = [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
     $resolvedLegacyOutputRoot = [System.IO.Path]::GetFullPath($LegacyCollectorOutputRoot)
@@ -339,6 +341,112 @@ function Resolve-WorkingCommand {
         }
     }
     return $null
+}
+
+function Resolve-ExistingFile {
+    param([string[]]$Candidates)
+    foreach ($candidate in @($Candidates | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)) {
+        try {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $candidate).Path
+            }
+        }
+        catch {
+        }
+    }
+    return $null
+}
+
+function Resolve-CommandOrFile {
+    param(
+        [string[]]$Names,
+        [string[]]$Candidates = @()
+    )
+    Update-ProcessPathFromRegistry
+    foreach ($name in $Names) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
+            return $command.Source
+        }
+    }
+    return Resolve-ExistingFile -Candidates $Candidates
+}
+
+function Get-TorBrowserTorCandidates {
+    $candidates = @()
+    $roots = @(
+        $LocalAppDataRoot,
+        $env:USERPROFILE,
+        ([Environment]::GetEnvironmentVariable("ProgramFiles")),
+        ([Environment]::GetEnvironmentVariable("ProgramFiles(x86)"))
+    )
+    foreach ($root in $roots | Where-Object { $_ }) {
+        $candidates += (Join-Path $root "Programs\Tor Browser\Browser\TorBrowser\Tor\tor.exe")
+        $candidates += (Join-Path $root "Tor Browser\Browser\TorBrowser\Tor\tor.exe")
+        $candidates += (Join-Path $root "Desktop\Tor Browser\Browser\TorBrowser\Tor\tor.exe")
+        $candidates += (Join-Path $root "Downloads\Tor Browser\Browser\TorBrowser\Tor\tor.exe")
+        $candidates += (Join-Path $root "Documents\Tor Browser\Browser\TorBrowser\Tor\tor.exe")
+        $candidates += (Join-Path $root "Tor\tor.exe")
+        $candidates += (Join-Path $root "Tor Expert Bundle\tor\tor.exe")
+    }
+    return $candidates
+}
+
+function Resolve-TorBridgeTorExecutable {
+    if ($script:TorBridgeTorExecutable -and (Test-Path -LiteralPath $script:TorBridgeTorExecutable -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $script:TorBridgeTorExecutable).Path
+    }
+    return Resolve-CommandOrFile -Names @("tor.exe", "tor") -Candidates (Get-TorBrowserTorCandidates)
+}
+
+function Resolve-TorBridgeTransportExecutable {
+    param([string]$TorExecutable)
+    if ($script:TorBridgeTransportExecutable -and (Test-Path -LiteralPath $script:TorBridgeTransportExecutable -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $script:TorBridgeTransportExecutable).Path
+    }
+
+    $candidates = @()
+    if ($TorExecutable) {
+        $torDir = Split-Path -Parent $TorExecutable
+        foreach ($name in @("snowflake-client.exe", "lyrebird.exe", "obfs4proxy.exe")) {
+            $candidates += (Join-Path $torDir "PluggableTransports\$name")
+            $candidates += (Join-Path (Split-Path -Parent $torDir) "PluggableTransports\$name")
+        }
+    }
+    return Resolve-CommandOrFile -Names @("snowflake-client.exe", "lyrebird.exe", "obfs4proxy.exe") -Candidates $candidates
+}
+
+function Ensure-TorBridgeRuntime {
+    if ($env:DARKWEB_TOR_BRIDGE_CHECK -eq "0") {
+        return
+    }
+
+    $torExecutable = Resolve-TorBridgeTorExecutable
+    if (-not $torExecutable) {
+        $script:TorBridgeTorExecutable = ""
+        $script:TorBridgeTransportExecutable = ""
+        Write-Warn "Tor bridge runtime not found. Install Tor Browser or Tor Expert Bundle before using built-in bridges on Windows."
+        return
+    }
+
+    $script:TorBridgeTorExecutable = $torExecutable
+    Set-Item -Path "Env:DARKWEB_TOR_EXECUTABLE" -Value $torExecutable
+    Set-UserEnv -Name "DARKWEB_TOR_EXECUTABLE" -Value $torExecutable
+    Add-ProcessPathEntry (Split-Path -Parent $torExecutable)
+
+    $transportExecutable = Resolve-TorBridgeTransportExecutable -TorExecutable $torExecutable
+    if (-not $transportExecutable) {
+        $script:TorBridgeTransportExecutable = ""
+        Write-Warn "Tor was found at $torExecutable, but no pluggable transport was found. Install Tor Browser with Snowflake or set DARKWEB_TOR_TRANSPORT_EXECUTABLE."
+        return
+    }
+
+    $script:TorBridgeTransportExecutable = $transportExecutable
+    Set-Item -Path "Env:DARKWEB_TOR_TRANSPORT_EXECUTABLE" -Value $transportExecutable
+    Set-UserEnv -Name "DARKWEB_TOR_TRANSPORT_EXECUTABLE" -Value $transportExecutable
+    Add-ProcessPathEntry (Split-Path -Parent $transportExecutable)
+    Write-Info "Tor bridge runtime detected: $torExecutable"
+    Write-Info "Tor bridge transport detected: $transportExecutable"
 }
 
 function Install-WingetPackage {
@@ -923,6 +1031,8 @@ Set-Location -LiteralPath $quotedWorkDir
 `$env:DARKWEB_COLLECTOR_SITES_FILE = $(Quote-PS $CollectorSitesFile)
 `$env:DARKWEB_COLLECTOR_OUTPUT_ROOT = $(Quote-PS $CollectorOutputRoot)
 `$env:DARKWEB_AUTH_PASSWORD_FILE = $(Quote-PS $AuthPasswordFile)
+`$env:DARKWEB_TOR_EXECUTABLE = $(Quote-PS $script:TorBridgeTorExecutable)
+`$env:DARKWEB_TOR_TRANSPORT_EXECUTABLE = $(Quote-PS $script:TorBridgeTransportExecutable)
 `$env:DARKWEB_BROWSER_CONCURRENCY = $(Quote-PS ([string]$BrowserConcurrency))
 `$env:PANSOU_API_BASE = $(Quote-PS $PansouApiBase)
 `$env:NPM_CONFIG_CACHE = $(Quote-PS (Join-Path $DefaultUserDataDir "npm-cache"))
@@ -1607,6 +1717,7 @@ function Ensure-Environment {
     Invoke-TimedStep "Ensure-NodeRuntime" { Ensure-NodeRuntime | Out-Null }
     Invoke-TimedStep "Ensure-RedisCanStart" { Ensure-RedisCanStart }
     Invoke-TimedStep "Ensure-AuthPasswordFile" { Ensure-AuthPasswordFile }
+    Invoke-TimedStep "Ensure-TorBridgeRuntime" { Ensure-TorBridgeRuntime }
     Invoke-TimedStep "Register-DarkwebCommand" { Register-DarkwebCommand }
     if (-not (Test-Path -LiteralPath (Join-Path $CollectorRoot "scripts\serve_api.py"))) {
         Stop-WithError "API launcher not found under collector scripts."
@@ -1767,6 +1878,17 @@ function Show-Status {
     }
     else {
         Write-Info "pansou: disabled"
+    }
+
+    Ensure-TorBridgeRuntime
+    if ($script:TorBridgeTorExecutable -and $script:TorBridgeTransportExecutable) {
+        Write-Info "tor-bridge-runtime: ready"
+    }
+    elseif ($script:TorBridgeTorExecutable) {
+        Write-Info "tor-bridge-runtime: missing transport plugin"
+    }
+    else {
+        Write-Info "tor-bridge-runtime: missing Tor Browser or Tor Expert Bundle"
     }
 
     if (Test-DarkwebApiReady) {

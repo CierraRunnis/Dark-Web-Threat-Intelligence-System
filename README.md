@@ -55,6 +55,7 @@ bash darkweb_collector/scripts/start_all_services_wsl.sh start
 - 在 Debian/Ubuntu/WSL 环境下，缺失时自动通过 `apt-get` 安装这些系统依赖
 - 自动创建后端虚拟环境并安装 `requirements.txt`
 - 自动安装 Playwright Chromium 运行时
+- 自动安装 Tor 网桥运行时组件 `tor`、`snowflake-client`、`obfs4proxy`，用于内置 Snowflake/obfs4 网桥连接
 - 自动检查前端依赖，缺失时执行 `npm install`
 - 自动准备 WSL 本地运行时数据库；如果没有历史数据库，会自动初始化一个空库
 - 一次性拉起 Redis、后端 API、前端、采集 worker、scheduler 和漏洞同步任务
@@ -103,7 +104,7 @@ darkweb stop
 %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File .\darkweb_collector\scripts\start_all_services_windows.ps1 install
 ```
 
-Windows 脚本会优先复用本机已有环境。Python 会依次查找 `python`、常见安装目录和 `py -3` 启动器；Node.js 会查找 PATH 和常见安装目录；Redis 会优先复用已运行的 `127.0.0.1:6379`、本机 Redis/Memurai 服务或可执行文件，也可在 Docker 可用时自动启动 `redis:7-alpine` 容器。缺少 Python、Node.js 或 Redis 兼容服务且本机有 `winget` 时，会自动安装 Python 3.12、Node.js LTS 和 Memurai Developer；没有 `winget` 时，需要按错误提示手动安装缺失组件。
+Windows 脚本会优先复用本机已有环境。Python 会依次查找 `python`、常见安装目录和 `py -3` 启动器；Node.js 会查找 PATH 和常见安装目录；Redis 会优先复用已运行的 `127.0.0.1:6379`、本机 Redis/Memurai 服务或可执行文件，也可在 Docker 可用时自动启动 `redis:7-alpine` 容器。缺少 Python、Node.js 或 Redis 兼容服务且本机有 `winget` 时，会自动安装 Python 3.12、Node.js LTS 和 Memurai Developer；没有 `winget` 时，需要按错误提示手动安装缺失组件。Tor 网桥功能会自动检测 Tor Browser / Tor Expert Bundle 中的 `tor.exe` 和 `snowflake-client.exe` / `lyrebird.exe` / `obfs4proxy.exe`，并写入 `DARKWEB_TOR_EXECUTABLE`、`DARKWEB_TOR_TRANSPORT_EXECUTABLE` 供后台 API 使用。Windows 不会静默安装 Tor Browser；如需使用网桥，请先安装 Tor Browser，或在页面/环境变量中填写 Tor 可执行文件路径。
 
 脚本会写入用户环境变量 `DARKWEB_HOME`、`DARKWEB_PROJECT_ROOT`、`DARKWEB_COLLECTOR_ROOT`、`DARKWEB_DASHBOARD_ROOT`、`DARKWEB_COLLECTOR_DB_PATH`、`DARKWEB_COLLECTOR_SITES_FILE`、`DARKWEB_COLLECTOR_OUTPUT_ROOT`、`REDIS_URL`，并把 `%LOCALAPPDATA%\DarkWebThreatIntel\bin` 加入用户 `Path`。
 

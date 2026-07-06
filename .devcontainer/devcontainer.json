@@ -1,0 +1,14 @@
+{
+  "name": "Dark Web Threat Intelligence System",
+  "image": "mcr.microsoft.com/devcontainers/universal:2-linux",
+  "postCreateCommand": "bash .devcontainer/install-tor-bridge-runtime.sh",
+  "forwardPorts": [5173, 8000],
+  "portsAttributes": {
+    "5173": {
+      "label": "Dashboard"
+    },
+    "8000": {
+      "label": "Collector API"
+    }
+  }
+}

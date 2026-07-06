@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -13,6 +15,8 @@ from darkweb_collector.runtime import default_db_path
 
 
 SETTINGS_PATH_ENV = "DARKWEB_TOR_BRIDGE_SETTINGS_PATH"
+TOR_EXECUTABLE_ENV = "DARKWEB_TOR_EXECUTABLE"
+TRANSPORT_EXECUTABLE_ENV = "DARKWEB_TOR_TRANSPORT_EXECUTABLE"
 SETTINGS_FILE = "tor_bridge_settings.json"
 RUNTIME_DIR_NAME = "tor_bridge_runtime"
 DEFAULT_SOCKS_HOST = "127.0.0.1"
@@ -65,13 +69,6 @@ DEFAULT_BUILTIN_BRIDGES = {
     "obfs4": DEFAULT_OBFS4_BRIDGES,
     "meek_lite": DEFAULT_MEEK_LITE_BRIDGES,
 }
-SNOWFLAKE_ARGS = [
-    "-url",
-    "https://snowflake-broker.torproject.net/",
-    "-fronts",
-    "www.google.com",
-]
-
 _process_lock = Lock()
 _process: subprocess.Popen | None = None
 _last_error = ""
@@ -101,6 +98,14 @@ def _int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _is_executable_file(value: str | Path) -> bool:
+    raw_value = _string(value)
+    if not raw_value:
+        return False
+    path = Path(raw_value).expanduser()
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 def _normalize_lines(value: Any) -> list[str]:
@@ -179,6 +184,12 @@ def load_tor_bridge_settings() -> dict[str, Any]:
         "last_started_at": "",
     }
     settings = _normalize_settings({**defaults, **_load_raw_settings()})
+    env_tor_executable = _string(os.environ.get(TOR_EXECUTABLE_ENV))
+    env_transport_executable = _string(os.environ.get(TRANSPORT_EXECUTABLE_ENV))
+    if env_tor_executable and not _is_executable_file(settings["tor_executable"]):
+        settings["tor_executable"] = env_tor_executable
+    if env_transport_executable and not _is_executable_file(settings["transport_executable"]):
+        settings["transport_executable"] = env_transport_executable
     if not settings["tor_executable"]:
         settings["tor_executable"] = detect_tor_executable()
     if not settings["transport_executable"]:
@@ -224,6 +235,10 @@ def _home_candidates() -> list[Path]:
 
 def detect_tor_executable() -> str:
     candidates = []
+    for command_name in ("tor.exe", "tor"):
+        command_path = shutil.which(command_name)
+        if command_path:
+            candidates.append(Path(command_path))
     local_app_data = os.environ.get("LOCALAPPDATA")
     user_profile = os.environ.get("USERPROFILE")
     if local_app_data:
@@ -239,7 +254,7 @@ def detect_tor_executable() -> str:
     )
     candidates.extend(_home_candidates())
     for candidate in candidates:
-        if candidate.exists():
+        if _is_executable_file(candidate):
             return str(candidate.resolve())
     return ""
 
@@ -252,13 +267,17 @@ def detect_transport_executable(tor_executable: str = "", bridge_mode: str = "sn
     )
     tor_path = Path(tor_executable).expanduser() if tor_executable else None
     candidates: list[Path] = []
+    for name in names:
+        command_path = shutil.which(name)
+        if command_path:
+            candidates.append(Path(command_path))
     if tor_path:
         transport_dir = tor_path.parent / "PluggableTransports"
         candidates.extend(transport_dir / name for name in names)
     candidates.extend(Path("/usr/bin") / name for name in names)
     candidates.extend(Path("/usr/local/bin") / name for name in names)
     for candidate in candidates:
-        if candidate.exists():
+        if _is_executable_file(candidate):
             return str(candidate.resolve())
     return ""
 
@@ -326,8 +345,7 @@ def _client_transport_plugin(settings: dict[str, Any], paths: dict[str, str]) ->
     if mode == "snowflake":
         if Path(transport).name.lower() in {"lyrebird.exe", "lyrebird"}:
             return base
-        args = " ".join(SNOWFLAKE_ARGS + ["-log", _torrc_token(paths["snowflake_log_path"])])
-        return f"{base} {args}"
+        return f"{base} -log {_torrc_token(paths['snowflake_log_path'])}"
     return base
 
 
@@ -338,6 +356,7 @@ def build_torrc(settings: dict[str, Any] | None = None) -> str:
         "ClientOnly 1",
         f"SocksPort {_string(current.get('socks_host')) or DEFAULT_SOCKS_HOST}:{_int(current.get('socks_port'), DEFAULT_SOCKS_PORT)}",
         f"DataDirectory {_torrc_token(paths['data_directory'])}",
+        f"Log notice file {_torrc_token(paths['log_path'])}",
         "AvoidDiskWrites 1",
     ]
     if current.get("enabled"):
@@ -362,21 +381,85 @@ def write_torrc(settings: dict[str, Any] | None = None) -> Path:
     return torrc_path
 
 
-def _validate_start_inputs(settings: dict[str, Any]) -> None:
-    tor_executable = Path(_string(settings.get("tor_executable"))).expanduser()
-    if not tor_executable.exists():
-        raise RuntimeError("未自动检测到 Tor 可执行文件，请先安装 Tor Browser 或 tor")
+def _runtime_errors(settings: dict[str, Any]) -> list[str]:
+    errors = []
+    tor_executable = _string(settings.get("tor_executable"))
+    if not _is_executable_file(tor_executable):
+        errors.append("Tor executable was not found. Install tor or Tor Browser, then refresh bridge status.")
+
     mode = _string(settings.get("bridge_mode"))
     if mode in TRANSPORT_MODES:
-        transport_executable = Path(_string(settings.get("transport_executable"))).expanduser()
-        if not transport_executable.exists():
-            raise RuntimeError("未自动检测到网桥传输插件，请确认 Tor Browser 的 lyrebird/snowflake-client 可用")
+        transport_executable = _string(settings.get("transport_executable"))
+        if not _is_executable_file(transport_executable):
+            errors.append(
+                "Tor bridge transport plugin was not found. Install snowflake-client, lyrebird, or obfs4proxy."
+            )
+
     if settings.get("enabled") and not _effective_bridge_lines(settings):
-        raise RuntimeError("当前网桥类型没有可用的内置网桥")
+        errors.append("No built-in bridge lines are available for the selected bridge mode.")
+    return errors
+
+
+def _validate_start_inputs(settings: dict[str, Any]) -> None:
+    errors = _runtime_errors(settings)
+    if errors:
+        raise RuntimeError(" ".join(errors))
 
 
 def _process_running() -> bool:
     return _process is not None and _process.poll() is None
+
+
+def _socks_listener_ready(settings: dict[str, Any]) -> bool:
+    host = _string(settings.get("socks_host")) or DEFAULT_SOCKS_HOST
+    port = _int(settings.get("socks_port"), DEFAULT_SOCKS_PORT)
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _read_log_tail(path: str, max_bytes: int = 65536) -> str:
+    log_path = Path(path)
+    if not log_path.exists():
+        return ""
+    try:
+        with log_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _bootstrap_status(settings: dict[str, Any], process_running: bool) -> str:
+    if not process_running:
+        return "not_running"
+    paths = _runtime_paths(settings)
+    log_tail = _read_log_tail(paths["log_path"])
+    if "Bootstrapped 100% (done): Done" in log_tail:
+        return "done"
+    for line in reversed(log_tail.splitlines()):
+        if "Bootstrapped " in line:
+            return line.strip()
+    return "starting"
+
+
+def _terminate_process_locked() -> None:
+    global _process
+    if not _process_running():
+        _process = None
+        return
+    assert _process is not None
+    _process.terminate()
+    try:
+        _process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _process.kill()
+        _process.wait(timeout=5)
+    _process = None
 
 
 def start_tor_bridge() -> dict[str, Any]:
@@ -393,20 +476,41 @@ def start_tor_bridge() -> dict[str, Any]:
         Path(paths["data_directory"]).mkdir(parents=True, exist_ok=True)
         log_handle = Path(paths["log_path"]).open("a", encoding="utf-8")
         try:
-            _process = subprocess.Popen(
-                [_string(settings["tor_executable"]), "-f", str(torrc_path)],
-                cwd=str(Path(_string(settings["tor_executable"])).expanduser().resolve().parent),
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                close_fds=True,
-            )
+            try:
+                _process = subprocess.Popen(
+                    [_string(settings["tor_executable"]), "-f", str(torrc_path)],
+                    cwd=str(Path(_string(settings["tor_executable"])).expanduser().resolve().parent),
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    close_fds=True,
+                )
+            except OSError as exc:
+                _process = None
+                _last_error = f"failed to start tor: {exc}"
+                raise RuntimeError(_last_error) from exc
         finally:
             log_handle.close()
-        time.sleep(0.4)
-        if _process.poll() is not None:
-            _last_error = f"tor exited early with code {_process.returncode}"
-            _process = None
+
+        wait_seconds = max(1, _int(os.environ.get("DARKWEB_TOR_BRIDGE_SOCKS_WAIT_SECONDS"), 30))
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            if _process is not None and _process.poll() is not None:
+                log_tail = _read_log_tail(paths["log_path"], max_bytes=8192).strip()
+                _last_error = f"tor exited early with code {_process.returncode}"
+                if log_tail:
+                    _last_error = f"{_last_error}: {log_tail[-1000:]}"
+                _process = None
+                raise RuntimeError(_last_error)
+            if _socks_listener_ready(settings):
+                break
+            time.sleep(0.5)
+        else:
+            _last_error = (
+                f"tor started but socks5h://{settings['socks_host']}:{settings['socks_port']} "
+                f"did not open within {wait_seconds}s"
+            )
+            _terminate_process_locked()
             raise RuntimeError(_last_error)
     save_tor_bridge_settings({"last_started_at": _now_iso()})
     return get_tor_bridge_status()
@@ -415,14 +519,7 @@ def start_tor_bridge() -> dict[str, Any]:
 def stop_tor_bridge() -> dict[str, Any]:
     global _last_error, _process
     with _process_lock:
-        if _process_running():
-            _process.terminate()
-            try:
-                _process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                _process.kill()
-                _process.wait(timeout=5)
-        _process = None
+        _terminate_process_locked()
         _last_error = ""
     return get_tor_bridge_status()
 
@@ -432,6 +529,8 @@ def get_tor_bridge_status() -> dict[str, Any]:
     paths = _runtime_paths(settings)
     process_running = _process_running()
     pid = _process.pid if process_running and _process is not None else None
+    runtime_errors = _runtime_errors(settings)
+    socks_port_open = _socks_listener_ready(settings) if process_running else False
     return {
         **settings,
         **paths,
@@ -439,6 +538,10 @@ def get_tor_bridge_status() -> dict[str, Any]:
         "bridge_count": len(_effective_bridge_lines(settings)),
         "process_running": process_running,
         "process_pid": pid,
+        "runtime_ready": not runtime_errors,
+        "runtime_errors": runtime_errors,
+        "socks_port_open": socks_port_open,
+        "bootstrap_status": _bootstrap_status(settings, process_running),
         "collector_proxy": f"socks5h://{settings['socks_host']}:{settings['socks_port']}",
         "last_error": _last_error,
     }

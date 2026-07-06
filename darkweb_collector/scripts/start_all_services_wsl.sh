@@ -16,6 +16,7 @@ VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
 VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-300}"
 BROWSER_CONCURRENCY="${DARKWEB_BROWSER_CONCURRENCY:-1}"
 DARKWEB_PANSOU_ENABLED="${DARKWEB_PANSOU_ENABLED:-1}"
+DARKWEB_TOR_BRIDGE_AUTO_INSTALL="${DARKWEB_TOR_BRIDGE_AUTO_INSTALL:-1}"
 PANSOU_PORT="${PANSOU_PORT:-8888}"
 PANSOU_API_BASE="${PANSOU_API_BASE:-http://127.0.0.1:${PANSOU_PORT}}"
 PANSOU_CONTAINER_NAME="${PANSOU_CONTAINER_NAME:-darkweb-pansou}"
@@ -211,6 +212,13 @@ install_system_dependencies() {
   command -v curl >/dev/null 2>&1 || missing_packages+=("curl")
   if redis_endpoint_is_local; then
     command -v redis-server >/dev/null 2>&1 || missing_packages+=("redis-server")
+  fi
+  if [[ "$DARKWEB_TOR_BRIDGE_AUTO_INSTALL" != "0" ]]; then
+    command -v tor >/dev/null 2>&1 || missing_packages+=("tor")
+    if ! command -v snowflake-client >/dev/null 2>&1 && ! command -v lyrebird >/dev/null 2>&1; then
+      missing_packages+=("snowflake-client")
+    fi
+    command -v obfs4proxy >/dev/null 2>&1 || missing_packages+=("obfs4proxy")
   fi
 
   if (( ${#missing_packages[@]} == 0 )); then
