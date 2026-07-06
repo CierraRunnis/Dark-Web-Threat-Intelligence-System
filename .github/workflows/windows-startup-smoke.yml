@@ -1,0 +1,74 @@
+name: Windows startup smoke
+
+on:
+  push:
+    branches:
+      - 0.11.0-fix
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-startup:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: PowerShell syntax check
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "$pwd\darkweb_collector\scripts\start_all_services_windows.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { $_.Message }
+            exit 1
+          }
+
+      - name: Mock Tor Browser runtime
+        shell: powershell
+        run: |
+          $torDir = "$env:USERPROFILE\Desktop\Tor Browser\Browser\TorBrowser\Tor"
+          $transportDir = "$torDir\PluggableTransports"
+          New-Item -ItemType Directory -Force -Path $transportDir | Out-Null
+          "mock tor executable" | Set-Content -LiteralPath "$torDir\tor.exe" -Encoding ASCII
+          "mock lyrebird executable" | Set-Content -LiteralPath "$transportDir\lyrebird.exe" -Encoding ASCII
+
+      - name: Windows script status smoke
+        shell: powershell
+        run: |
+          $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\darkweb_collector\scripts\start_all_services_windows.ps1 status 2>&1
+          $output | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $text = $output -join "`n"
+          if ($text -notmatch "tor-bridge-runtime: ready") {
+            throw "Windows startup script did not report a ready Tor bridge runtime."
+          }
+          $tor = [Environment]::GetEnvironmentVariable("DARKWEB_TOR_EXECUTABLE", "User")
+          $transport = [Environment]::GetEnvironmentVariable("DARKWEB_TOR_TRANSPORT_EXECUTABLE", "User")
+          if (-not $tor -or -not $transport) {
+            throw "Windows startup script did not persist Tor bridge runtime environment variables."
+          }
+          Write-Host "DARKWEB_TOR_EXECUTABLE=$tor"
+          Write-Host "DARKWEB_TOR_TRANSPORT_EXECUTABLE=$transport"
+
+      - name: Tor bridge unit tests
+        shell: powershell
+        run: |
+          $env:PYTHONPATH = "$pwd\darkweb_collector\src"
+          python darkweb_collector\tests\test_tor_bridge_control.py -v
