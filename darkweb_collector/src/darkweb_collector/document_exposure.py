@@ -2083,6 +2083,10 @@ def _is_search_navigation_text(text: str) -> bool:
     normalized = _normalize_text(text).lower()
     if len(normalized) < 2:
         return True
+    if ("http://" in normalized or "https://" in normalized) and "›" in normalized:
+        return True
+    if re.match(r"^[a-z0-9.-]+\.[a-z]{2,}\s+https?://", normalized):
+        return True
     navigation_tokens = {
         "百度首页",
         "新闻",

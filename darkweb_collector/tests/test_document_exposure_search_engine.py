@@ -50,6 +50,9 @@ class SearchEngineDocumentExposureTests(unittest.TestCase):
           <ol id="b_results">
             <li class="b_algo">
               <a href="https://www.bing.com/ck/a?!&&u=a1aHR0cHM6Ly93d3cuY2F0bC5jb20v">
+                catl.com https://www.catl.com › index.html
+              </a>
+              <a href="https://www.bing.com/ck/a?!&&u=a1aHR0cHM6Ly93d3cuY2F0bC5jb20v">
                 宁德时代 · CATL
               </a>
             </li>
@@ -61,6 +64,7 @@ class SearchEngineDocumentExposureTests(unittest.TestCase):
         self.assertEqual(_detect_search_block_reason(source, html, "https://www.bing.com/search?q=catl"), "")
         candidates = _parse_search_engine_candidates(source, html, "https://www.bing.com/search?q=catl")
         self.assertEqual(candidates[0]["url"], "https://www.catl.com/")
+        self.assertEqual(candidates[0]["title"], "宁德时代 · CATL")
         self.assertEqual(candidates[0]["source_detail"], "www.catl.com")
 
     def test_search_engine_scan_persists_generic_web_result(self):
