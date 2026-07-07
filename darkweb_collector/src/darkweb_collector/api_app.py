@@ -530,6 +530,9 @@ class RemoteBrowserActionRequest(BaseModel):
     key: str = ""
     url: str = ""
     ms: int | None = None
+    username: str = ""
+    password: str = ""
+    otp: str = ""
 
 
 class ExposureScanRequest(BaseModel):
@@ -837,6 +840,9 @@ def platform_session_remote_login_control(session_id: str, payload: RemoteBrowse
                 "key": payload.key,
                 "url": payload.url,
                 "ms": payload.ms,
+                "username": payload.username,
+                "password": payload.password,
+                "otp": payload.otp,
             },
         )
     except ValueError as exc:

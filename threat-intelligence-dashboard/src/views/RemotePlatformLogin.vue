@@ -24,18 +24,6 @@
           <el-tag v-if="sessionId" effect="plain">{{ sessionId.slice(0, 10) }}</el-tag>
         </div>
         <div class="ti-card-body">
-          <div class="remote-toolbar">
-            <el-input v-model="navigateUrl" placeholder="输入 URL 后跳转" clearable @keyup.enter="navigateRemote" />
-            <el-button plain :disabled="!navigateUrl.trim() || actionLoading" @click="navigateRemote">跳转</el-button>
-          </div>
-          <div class="remote-toolbar">
-            <el-input v-model="textToType" placeholder="输入要发送到远程浏览器的文本" clearable @keyup.enter="typeRemoteText" />
-            <el-button type="primary" plain :disabled="!textToType || actionLoading" @click="typeRemoteText">发送文本</el-button>
-            <el-button plain :disabled="actionLoading" @click="pressKey('Enter')">Enter</el-button>
-            <el-button plain :disabled="actionLoading" @click="pressKey('Tab')">Tab</el-button>
-            <el-button plain :disabled="actionLoading" @click="pressKey('Backspace')">退格</el-button>
-          </div>
-
           <div class="remote-screen-shell" :class="{ 'remote-screen-shell--empty': !state?.screenshot }">
             <img
               v-if="state?.screenshot"
@@ -47,37 +35,77 @@
             />
             <el-empty v-else description="等待远程浏览器画面" />
           </div>
+          <div class="screen-footer">
+            <span>{{ actionResultText }}</span>
+            <span>{{ viewportText }}</span>
+          </div>
         </div>
       </div>
 
-      <aside class="ti-card ti-reveal-up remote-side">
-        <div class="ti-card-header">
-          <div class="ti-card-title">会话状态</div>
+      <aside class="remote-side">
+        <div class="ti-card ti-reveal-up">
+          <div class="ti-card-header">
+            <div class="ti-card-title">登录凭据</div>
+          </div>
+          <div class="ti-card-body">
+            <el-form class="credential-form" label-position="top">
+              <el-form-item label="账号标签">
+                <el-input v-model="credentialForm.accountLabel" placeholder="例如 GitHub 主账号" clearable />
+              </el-form-item>
+              <el-form-item label="账号 / 邮箱 / 用户名">
+                <el-input v-model="credentialForm.username" autocomplete="username" clearable />
+              </el-form-item>
+              <el-form-item label="密码 / Token">
+                <el-input v-model="credentialForm.password" type="password" autocomplete="current-password" show-password clearable />
+              </el-form-item>
+              <el-form-item label="验证码 / 二次验证">
+                <el-input v-model="credentialForm.otp" autocomplete="one-time-code" clearable />
+              </el-form-item>
+            </el-form>
+            <div class="credential-actions">
+              <el-button type="primary" :loading="actionLoading" :disabled="!canFillLoginForm" @click="fillLoginForm">
+                自动填入登录表单
+              </el-button>
+              <el-button type="success" plain :loading="actionLoading" @click="submitLoginForm">提交登录</el-button>
+            </div>
+          </div>
         </div>
-        <div class="ti-card-body remote-side__body">
-          <div class="remote-state-row">
-            <span>平台</span>
-            <strong>{{ platformLabel }}</strong>
+
+        <div class="ti-card ti-reveal-up">
+          <div class="ti-card-header">
+            <div class="ti-card-title">手动控制</div>
           </div>
-          <div class="remote-state-row">
-            <span>页面标题</span>
-            <strong>{{ state?.title || '-' }}</strong>
+          <div class="ti-card-body remote-manual">
+            <el-input v-model="navigateUrl" placeholder="URL" clearable @keyup.enter="navigateRemote" />
+            <el-button plain :disabled="!navigateUrl.trim() || actionLoading" @click="navigateRemote">跳转</el-button>
+            <el-input v-model="manualText" placeholder="发送到当前焦点输入框" clearable @keyup.enter="typeRemoteText" />
+            <el-button type="primary" plain :disabled="!manualText || actionLoading" @click="typeRemoteText">发送当前焦点文本</el-button>
+            <div class="key-actions">
+              <el-button plain :disabled="actionLoading" @click="pressKey('Enter')">Enter</el-button>
+              <el-button plain :disabled="actionLoading" @click="pressKey('Tab')">Tab</el-button>
+              <el-button plain :disabled="actionLoading" @click="pressKey('Backspace')">退格</el-button>
+            </div>
           </div>
-          <div class="remote-state-row">
-            <span>画面尺寸</span>
-            <strong>{{ viewportText }}</strong>
+        </div>
+
+        <div class="ti-card ti-reveal-up">
+          <div class="ti-card-header">
+            <div class="ti-card-title">会话状态</div>
           </div>
-          <div class="remote-state-row">
-            <span>会话文件</span>
-            <strong>{{ state?.storage_state_path || '-' }}</strong>
+          <div class="ti-card-body remote-side__body">
+            <div class="remote-state-row">
+              <span>平台</span>
+              <strong>{{ platformLabel }}</strong>
+            </div>
+            <div class="remote-state-row">
+              <span>页面标题</span>
+              <strong>{{ state?.title || '-' }}</strong>
+            </div>
+            <div class="remote-state-row">
+              <span>会话文件</span>
+              <strong>{{ state?.storage_state_path || '-' }}</strong>
+            </div>
           </div>
-          <el-alert
-            type="info"
-            :closable="false"
-            show-icon
-            title="测试版说明"
-            description="点击画面发送鼠标点击，使用上方输入框发送文本。完成登录或安全验证后点击保存会话。"
-          />
         </div>
       </aside>
     </section>
@@ -85,7 +113,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
@@ -94,23 +122,49 @@ const api = useCodeMonitoringApi()
 const route = useRoute()
 const router = useRouter()
 
-const platform = computed(() => String(route.query.platform || state.value?.platform || '').trim())
-const platformLabel = computed(() => platform.value || '代码平台')
-const sessionId = ref(String(route.query.session_id || '').trim())
 const state = ref(null)
-const textToType = ref('')
+const sessionId = ref(String(route.query.session_id || '').trim())
+const credentialForm = reactive({
+  accountLabel: '',
+  username: '',
+  password: '',
+  otp: '',
+})
+const manualText = ref('')
 const navigateUrl = ref('')
 const loading = ref(false)
 const actionLoading = ref(false)
 const saving = ref(false)
 const closing = ref(false)
+const lastActionResult = ref('')
 let refreshTimer = null
+
+const platform = computed(() => String(route.query.platform || state.value?.platform || '').trim())
+const platformLabel = computed(() => state.value?.label || platform.value || '代码平台')
+const canFillLoginForm = computed(() => Boolean(credentialForm.username || credentialForm.password || credentialForm.otp))
 
 const viewportText = computed(() => {
   const viewport = state.value?.viewport || {}
-  if (!viewport.width || !viewport.height) return '-'
-  return `${viewport.width} x ${viewport.height}`
+  if (!viewport.width || !viewport.height) return '画面尺寸 -'
+  return `画面尺寸 ${viewport.width} x ${viewport.height}`
 })
+
+const actionResultText = computed(() => lastActionResult.value || '点击远程画面可发送鼠标点击')
+
+function applyState(payload) {
+  state.value = payload
+  const result = payload?.action_result
+  if (!result) return
+  if (result.username_filled !== undefined || result.password_filled !== undefined || result.otp_filled !== undefined) {
+    const filled = []
+    if (result.username_filled) filled.push('账号')
+    if (result.password_filled) filled.push('密码')
+    if (result.otp_filled) filled.push('验证码')
+    lastActionResult.value = filled.length ? `已填入：${filled.join('、')}` : '未找到可填入字段'
+  } else if (result.submitted) {
+    lastActionResult.value = result.method === 'button' ? '已点击登录按钮' : '已发送 Enter 提交'
+  }
+}
 
 async function ensureSession() {
   if (sessionId.value) {
@@ -125,7 +179,7 @@ async function ensureSession() {
   try {
     const payload = await api.startRemoteLogin(platform.value)
     sessionId.value = payload.session_id
-    state.value = payload
+    applyState(payload)
     router.replace({
       name: 'RemotePlatformLogin',
       query: { platform: platform.value, session_id: sessionId.value },
@@ -141,7 +195,7 @@ async function refreshState() {
   if (!sessionId.value || loading.value) return
   loading.value = true
   try {
-    state.value = await api.loadRemoteLoginState(sessionId.value)
+    applyState(await api.loadRemoteLoginState(sessionId.value))
   } catch (error) {
     ElMessage.error(error.message || '刷新远程画面失败')
   } finally {
@@ -153,12 +207,26 @@ async function sendAction(payload) {
   if (!sessionId.value || actionLoading.value) return
   actionLoading.value = true
   try {
-    state.value = await api.controlRemoteLogin(sessionId.value, payload)
+    applyState(await api.controlRemoteLogin(sessionId.value, payload))
   } catch (error) {
     ElMessage.error(error.message || '远程浏览器操作失败')
   } finally {
     actionLoading.value = false
   }
+}
+
+async function fillLoginForm() {
+  if (!canFillLoginForm.value) return
+  await sendAction({
+    action: 'fill_login_form',
+    username: credentialForm.username,
+    password: credentialForm.password,
+    otp: credentialForm.otp,
+  })
+}
+
+async function submitLoginForm() {
+  await sendAction({ action: 'submit_login_form' })
 }
 
 async function clickRemote(event) {
@@ -167,17 +235,20 @@ async function clickRemote(event) {
   const rect = event.currentTarget.getBoundingClientRect()
   const x = ((event.clientX - rect.left) / rect.width) * viewport.width
   const y = ((event.clientY - rect.top) / rect.height) * viewport.height
+  lastActionResult.value = `已点击 ${Math.round(x)}, ${Math.round(y)}`
   await sendAction({ action: 'click', x, y })
 }
 
 async function typeRemoteText() {
-  const text = textToType.value
+  const text = manualText.value
   if (!text) return
-  textToType.value = ''
+  manualText.value = ''
+  lastActionResult.value = '已发送当前焦点文本'
   await sendAction({ action: 'type', text })
 }
 
 async function pressKey(key) {
+  lastActionResult.value = `已发送 ${key}`
   await sendAction({ action: 'key', key })
 }
 
@@ -185,6 +256,7 @@ async function navigateRemote() {
   const raw = navigateUrl.value.trim()
   if (!raw) return
   const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+  lastActionResult.value = `正在跳转 ${url}`
   await sendAction({ action: 'navigate', url })
 }
 
@@ -192,7 +264,7 @@ async function finishSession() {
   if (!sessionId.value) return
   saving.value = true
   try {
-    await api.finishRemoteLogin(sessionId.value, platform.value)
+    await api.finishRemoteLogin(sessionId.value, credentialForm.accountLabel || platform.value)
     ElMessage.success('远程会话已保存')
     router.push('/document-exposure/code-monitoring/settings')
   } catch (error) {
@@ -259,7 +331,8 @@ onUnmounted(() => {
 }
 
 .remote-login-header__actions,
-.remote-toolbar {
+.credential-actions,
+.key-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -267,23 +340,15 @@ onUnmounted(() => {
 }
 
 .remote-login-layout {
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   align-items: start;
-}
-
-.remote-toolbar {
-  margin-bottom: 12px;
-}
-
-.remote-toolbar .el-input {
-  flex: 1 1 280px;
 }
 
 .remote-screen-shell {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 420px;
+  min-height: 560px;
   border-radius: 10px;
   border: 1px solid rgba(116, 142, 184, 0.18);
   background: #f8fafc;
@@ -297,10 +362,37 @@ onUnmounted(() => {
 .remote-screen {
   display: block;
   width: 100%;
-  max-height: calc(100vh - 280px);
+  max-height: calc(100vh - 230px);
   object-fit: contain;
   cursor: crosshair;
   user-select: none;
+}
+
+.screen-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  color: var(--ti-text-secondary);
+  font-size: 13px;
+}
+
+.remote-side {
+  display: grid;
+  gap: 18px;
+}
+
+.credential-form :deep(.el-form-item) {
+  margin-bottom: 14px;
+}
+
+.credential-actions .el-button {
+  flex: 1 1 150px;
+}
+
+.remote-manual {
+  display: grid;
+  gap: 10px;
 }
 
 .remote-side__body {

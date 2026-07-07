@@ -22,6 +22,52 @@ REMOTE_LOGIN_VIEWPORT = {"width": 1366, "height": 900}
 _REMOTE_SESSIONS: dict[str, "RemoteBrowserSession"] = {}
 _REMOTE_SESSIONS_LOCK = Lock()
 
+USERNAME_SELECTORS = [
+    "input#login_field",
+    "input#user_login",
+    "input[name='login']",
+    "input[name='username']",
+    "input[name='user[login]']",
+    "input[name='account']",
+    "input[name='email']",
+    "input[type='email']",
+    "input[autocomplete='username']",
+    "input[autocomplete='email']",
+    "input[placeholder*='账号']",
+    "input[placeholder*='用户名']",
+    "input[placeholder*='邮箱']",
+    "input[placeholder*='Email']",
+    "input[placeholder*='Username']",
+    "input[type='text']",
+]
+PASSWORD_SELECTORS = [
+    "input#password",
+    "input[name='password']",
+    "input[type='password']",
+    "input[autocomplete='current-password']",
+]
+OTP_SELECTORS = [
+    "input[name*='otp']",
+    "input[name*='code']",
+    "input[id*='otp']",
+    "input[id*='code']",
+    "input[autocomplete='one-time-code']",
+    "input[placeholder*='验证码']",
+    "input[placeholder*='验证']",
+    "input[placeholder*='code']",
+]
+SUBMIT_SELECTORS = [
+    "button[type='submit']",
+    "input[type='submit']",
+    "button:has-text('Sign in')",
+    "button:has-text('Log in')",
+    "button:has-text('登录')",
+    "button:has-text('登入')",
+    "button:has-text('下一步')",
+    "button:has-text('Continue')",
+    "button:has-text('Next')",
+]
+
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -196,10 +242,73 @@ def _apply_remote_action(session: RemoteBrowserSession, page: Any, payload: dict
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
     elif action == "wait":
         page.wait_for_timeout(int(payload.get("ms") or 1000))
+    elif action == "fill_login_form":
+        result = _fill_login_form(page, payload)
+        page.wait_for_timeout(500)
+        state = _state_payload(session, page)
+        state["action_result"] = result
+        return state
+    elif action == "submit_login_form":
+        result = _submit_login_form(page)
+        page.wait_for_timeout(1200)
+        state = _state_payload(session, page)
+        state["action_result"] = result
+        return state
     else:
         raise ValueError(f"unsupported remote browser action: {action}")
     page.wait_for_timeout(500)
     return _state_payload(session, page)
+
+
+def _first_editable_locator(page: Any, selectors: list[str]) -> Any | None:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = min(locator.count(), 6)
+        except Exception:
+            continue
+        for index in range(count):
+            item = locator.nth(index)
+            try:
+                if item.is_visible() and item.is_enabled():
+                    return item
+            except Exception:
+                continue
+    return None
+
+
+def _fill_first_available(page: Any, selectors: list[str], value: str) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    locator = _first_editable_locator(page, selectors)
+    if locator is None:
+        return False
+    locator.fill(text)
+    return True
+
+
+def _fill_login_form(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    username_filled = _fill_first_available(page, USERNAME_SELECTORS, str(payload.get("username") or ""))
+    password_filled = _fill_first_available(page, PASSWORD_SELECTORS, str(payload.get("password") or ""))
+    otp = str(payload.get("otp") or "")
+    otp_filled = _fill_first_available(page, OTP_SELECTORS, otp) if otp else False
+    if not username_filled and not password_filled and not otp_filled:
+        raise ValueError("no supported login input was found on the current page")
+    return {
+        "username_filled": username_filled,
+        "password_filled": password_filled,
+        "otp_filled": otp_filled,
+    }
+
+
+def _submit_login_form(page: Any) -> dict[str, Any]:
+    locator = _first_editable_locator(page, SUBMIT_SELECTORS)
+    if locator is not None:
+        locator.click()
+        return {"submitted": True, "method": "button"}
+    page.keyboard.press("Enter")
+    return {"submitted": True, "method": "enter"}
 
 
 def _get_remote_session(session_id: str) -> RemoteBrowserSession:
