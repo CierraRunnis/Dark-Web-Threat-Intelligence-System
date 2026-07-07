@@ -28,6 +28,33 @@ export function useCodeMonitoringApi() {
         method: 'POST',
       })
     },
+    startRemoteLogin(platform) {
+      return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/remote-login/start`, {
+        method: 'POST',
+      })
+    },
+    loadRemoteLoginState(sessionId) {
+      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}`)
+    },
+    controlRemoteLogin(sessionId, payload) {
+      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    },
+    finishRemoteLogin(sessionId, accountLabel) {
+      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}/finish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_label: accountLabel || '' }),
+      })
+    },
+    closeRemoteLogin(sessionId) {
+      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+      })
+    },
     saveSession(platform, accountLabel) {
       return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/save`, {
         method: 'POST',

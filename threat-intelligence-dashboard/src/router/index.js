@@ -17,6 +17,7 @@ import CodeMonitoringWorkbench from '@/views/CodeMonitoringWorkbench.vue'
 import CodeMonitoringSettings from '@/views/CodeMonitoringSettings.vue'
 import CodeMonitoringScans from '@/views/CodeMonitoringScans.vue'
 import CodeMonitoringDetail from '@/views/CodeMonitoringDetail.vue'
+import RemotePlatformLogin from '@/views/RemotePlatformLogin.vue'
 
 const routes = [
   {
@@ -256,6 +257,17 @@ const routes = [
       hidden: true,
       kicker: '文件监测',
       subtitle: '查看代码扫描记录、平台分布、命中数和错误信息。',
+    },
+  },
+  {
+    path: '/platform-sessions/remote-login',
+    name: 'RemotePlatformLogin',
+    component: RemotePlatformLogin,
+    meta: {
+      title: '平台远程验证',
+      hidden: true,
+      kicker: 'Remote Browser',
+      subtitle: '通过服务端浏览器完成平台登录或安全验证。',
     },
   },
   {

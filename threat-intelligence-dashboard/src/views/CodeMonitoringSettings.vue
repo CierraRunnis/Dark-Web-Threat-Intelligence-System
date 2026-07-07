@@ -44,6 +44,7 @@
                     >
                       {{ row.status === 'login_in_progress' ? '登录中' : '启动登录' }}
                     </el-button>
+                    <el-button size="small" type="warning" plain :loading="Boolean(remoteLoginStarting[row.platform])" @click="startRemoteLogin(row.platform)">远程验证</el-button>
                     <el-button size="small" type="primary" @click="saveSession(row.platform)">保存会话</el-button>
                     <el-button size="small" type="danger" plain @click="removeSession(row.platform)">删除</el-button>
                   </div>
@@ -218,10 +219,12 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
 import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
 
 const api = useCodeMonitoringApi()
+const router = useRouter()
 
 const loadingSessions = ref(false)
 const detectingSessions = ref(false)
@@ -235,6 +238,7 @@ const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWid
 const termImportInputRef = ref(null)
 const sessionDrafts = reactive({})
 const loginStarting = reactive({})
+const remoteLoginStarting = reactive({})
 
 const fileExtensionOptions = ['env', 'yaml', 'yml', 'json', 'ini', 'conf', 'properties', 'py', 'js', 'ts', 'java']
 const ruleOptions = [
@@ -282,7 +286,7 @@ const sessionStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 100
 const sessionAccountColumnWidth = computed(() => viewportWidth.value < 1500 ? 140 : 150)
 const sessionVerifiedColumnWidth = computed(() => 150)
 const sessionErrorMinWidth = computed(() => 180)
-const sessionActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 220 : 240)
+const sessionActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 260 : 300)
 
 const watchlistForm = reactive({
   id: null,
@@ -696,6 +700,25 @@ async function launchLogin(platform) {
     ElMessage.error(error.message || '启动登录失败')
   } finally {
     loginStarting[platform] = false
+  }
+}
+
+async function startRemoteLogin(platform) {
+  if (remoteLoginStarting[platform]) return
+  remoteLoginStarting[platform] = true
+  try {
+    const payload = await api.startRemoteLogin(platform)
+    router.push({
+      name: 'RemotePlatformLogin',
+      query: {
+        platform,
+        session_id: payload.session_id,
+      },
+    })
+  } catch (error) {
+    ElMessage.error(error.message || '启动远程验证失败')
+  } finally {
+    remoteLoginStarting[platform] = false
   }
 }
 

@@ -87,6 +87,13 @@ from darkweb_collector.document_exposure_sessions import (
     verify_platform_session,
 )
 from darkweb_collector.document_exposure_platforms import list_exposure_platforms
+from darkweb_collector.remote_browser_sessions import (
+    close_remote_browser_login,
+    control_remote_browser,
+    finish_remote_browser_login,
+    get_remote_browser_state,
+    start_remote_browser_login,
+)
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
 from darkweb_collector.db import get_db_connection, list_monitoring_keyword_notifications
@@ -515,6 +522,16 @@ class PlatformSessionSaveRequest(BaseModel):
     account_label: str = ""
 
 
+class RemoteBrowserActionRequest(BaseModel):
+    action: str
+    x: float | None = None
+    y: float | None = None
+    text: str = ""
+    key: str = ""
+    url: str = ""
+    ms: int | None = None
+
+
 class ExposureScanRequest(BaseModel):
     max_candidates_per_term: int = 6
     source_families: list[str] = []
@@ -785,6 +802,61 @@ def platform_sessions_auto_detect(module: str | None = None) -> list[dict]:
 def platform_session_launch(platform: str) -> dict:
     try:
         return launch_platform_login(platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/platform-sessions/{platform}/remote-login/start")
+def platform_session_remote_login_start(platform: str) -> dict:
+    try:
+        return start_remote_browser_login(platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/platform-sessions/remote-login/{session_id}")
+def platform_session_remote_login_state(session_id: str) -> dict:
+    try:
+        return get_remote_browser_state(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/platform-sessions/remote-login/{session_id}/control")
+def platform_session_remote_login_control(session_id: str, payload: RemoteBrowserActionRequest) -> dict:
+    try:
+        return control_remote_browser(
+            session_id,
+            payload.action,
+            {
+                "x": payload.x,
+                "y": payload.y,
+                "text": payload.text,
+                "key": payload.key,
+                "url": payload.url,
+                "ms": payload.ms,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/platform-sessions/remote-login/{session_id}/finish")
+def platform_session_remote_login_finish(session_id: str, payload: PlatformSessionSaveRequest) -> dict:
+    try:
+        return finish_remote_browser_login(session_id, account_label=payload.account_label)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/platform-sessions/remote-login/{session_id}")
+def platform_session_remote_login_close(session_id: str) -> dict:
+    try:
+        return close_remote_browser_login(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
