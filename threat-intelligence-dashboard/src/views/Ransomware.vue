@@ -34,15 +34,15 @@
           </EventTableToolbar>
 
           <div class="ti-table-shell table-shell">
-            <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="auto">
-              <el-table-column prop="disclosureDate" label="披露日期" width="140" />
-              <el-table-column prop="updatedTime" label="最近更新" width="170" />
-              <el-table-column prop="title" label="标题" min-width="420" show-overflow-tooltip />
-              <el-table-column prop="category" label="事件分类" width="150" />
-              <el-table-column prop="attacker" label="攻击者" width="160" show-overflow-tooltip />
-              <el-table-column prop="industry" label="行业" width="150" />
-              <el-table-column prop="region" label="受害国家和地区" min-width="220" show-overflow-tooltip />
-              <el-table-column label="查看" width="120">
+            <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="fixed">
+              <el-table-column prop="disclosureDate" label="披露日期" :width="dateColumnWidth" />
+              <el-table-column v-if="showUpdatedColumn" prop="updatedTime" label="最近更新" :width="updatedColumnWidth" />
+              <el-table-column prop="title" label="标题" :min-width="titleColumnMinWidth" show-overflow-tooltip />
+              <el-table-column v-if="showCategoryColumn" prop="category" label="事件分类" :width="categoryColumnWidth" />
+              <el-table-column prop="attacker" label="攻击者" :width="attackerColumnWidth" show-overflow-tooltip />
+              <el-table-column v-if="showIndustryColumn" prop="industry" label="行业" :width="industryColumnWidth" />
+              <el-table-column v-if="showRegionColumn" prop="region" label="受害国家和地区" :width="regionColumnWidth" show-overflow-tooltip />
+              <el-table-column label="查看" :width="actionColumnWidth">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" @click="viewEventDetail(row)">查看</el-button>
                 </template>
@@ -89,8 +89,24 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const categoryFilter = ref('')
 const searchValue = ref('')
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const listStateKey = computed(() => `list-state:${route.path}`)
 let refreshTimer = null
+
+const showRegionColumn = computed(() => viewportWidth.value >= 1880)
+const showUpdatedColumn = computed(() => viewportWidth.value >= 1400)
+const showCategoryColumn = computed(() => viewportWidth.value >= 1180)
+const showIndustryColumn = computed(() => viewportWidth.value >= 1180)
+const compactTable = computed(() => viewportWidth.value < 1400)
+const narrowTable = computed(() => viewportWidth.value < 1180)
+const dateColumnWidth = computed(() => (narrowTable.value ? 96 : compactTable.value ? 108 : 122))
+const updatedColumnWidth = computed(() => (compactTable.value ? 132 : 150))
+const titleColumnMinWidth = computed(() => (narrowTable.value ? 180 : compactTable.value ? 240 : showRegionColumn.value ? 360 : 300))
+const categoryColumnWidth = computed(() => (compactTable.value ? 104 : 120))
+const attackerColumnWidth = computed(() => (narrowTable.value ? 108 : compactTable.value ? 120 : 136))
+const industryColumnWidth = computed(() => (compactTable.value ? 88 : 104))
+const regionColumnWidth = computed(() => (showRegionColumn.value ? 180 : 0))
+const actionColumnWidth = computed(() => (narrowTable.value ? 76 : 82))
 
 const categoryOptions = computed(() => [...new Set(ransomwareEvents.value.map((item) => item.category))])
 
@@ -139,6 +155,10 @@ function viewEventDetail(row) {
   router.push({ name: 'EventDetail', params: { eventId: row.id } })
 }
 
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
 const activeFilters = computed(() => {
   const filters = []
 
@@ -165,6 +185,8 @@ watch([filteredEvents, pageSize], () => {
 
 onMounted(() => {
   refreshIntelligence()
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
   const raw = sessionStorage.getItem(listStateKey.value)
   if (raw) {
     try {
@@ -183,6 +205,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewportWidth)
   if (refreshTimer) {
     window.clearInterval(refreshTimer)
     refreshTimer = null
