@@ -37,7 +37,7 @@ COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_D
 COLLECTOR_SITES_FILE="${DARKWEB_COLLECTOR_SITES_FILE:-$COLLECTOR_ROOT/sites.yaml}"
 COLLECTOR_OUTPUT_ROOT="${DARKWEB_COLLECTOR_OUTPUT_ROOT:-$COLLECTOR_ROOT/output}"
 REQUIREMENTS_STAMP="$COLLECTOR_VENV/.requirements.sha256"
-PLAYWRIGHT_STAMP="$COLLECTOR_VENV/.playwright.chromium.ready"
+PLAYWRIGHT_STAMP="$COLLECTOR_VENV/.playwright.browsers.ready"
 PACKAGE_LOCK_STAMP="$DASHBOARD_ROOT/node_modules/.package-lock.sha256"
 NPM_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/darkweb-threat-intel/npm"
 USER_BIN_DIR="$HOME/.local/bin"
@@ -295,11 +295,11 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as playwright:
-    executables = (
-        Path(playwright.chromium.executable_path),
-        Path(playwright.firefox.executable_path),
-    )
-    raise SystemExit(0 if all(path.exists() for path in executables) else 1)
+    for browser_type in (playwright.chromium, playwright.firefox):
+        if not Path(browser_type.executable_path).exists():
+            raise SystemExit(1)
+        browser = browser_type.launch(headless=True)
+        browser.close()
 PY
   ) >/dev/null 2>&1
 }
@@ -313,8 +313,14 @@ ensure_playwright_runtime() {
   (
     cd "$COLLECTOR_ROOT"
     source "$COLLECTOR_VENV/bin/activate"
+    if command -v apt-get >/dev/null 2>&1; then
+      python -m playwright install-deps chromium firefox
+    else
+      warn "apt-get is unavailable; skipping Playwright Linux system dependency install"
+    fi
     python -m playwright install chromium firefox
   )
+  playwright_runtime_ready || die "Playwright browsers were installed but cannot launch; check Linux system dependencies"
   ensure_directory "$(dirname "$PLAYWRIGHT_STAMP")"
   : > "$PLAYWRIGHT_STAMP"
 }

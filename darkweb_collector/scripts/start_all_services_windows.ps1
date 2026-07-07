@@ -66,7 +66,7 @@ else {
 $NodeExePath = ""
 $NodeBinDir = ""
 $RequirementsStamp = Join-Path $VenvDir ".requirements.sha256"
-$PlaywrightStamp = Join-Path $VenvDir ".playwright.chromium.ready"
+$PlaywrightStamp = Join-Path $VenvDir ".playwright.browsers.ready"
 $PackageLockStamp = Join-Path $DashboardRoot "node_modules\.package-lock.sha256"
 $RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { "redis://127.0.0.1:6379/0" }
 $CollectorDbPath = if ($env:DARKWEB_COLLECTOR_DB_PATH) { $env:DARKWEB_COLLECTOR_DB_PATH } else { Join-Path $DefaultUserDataDir "collector.db" }
@@ -1438,7 +1438,17 @@ function Ensure-CollectorDependencies {
 
 function Test-PlaywrightBrowsers {
     try {
-        $code = "from pathlib import Path; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); paths = [Path(p.chromium.executable_path), Path(p.firefox.executable_path)]; p.stop(); raise SystemExit(0 if all(path.exists() for path in paths) else 1)"
+        $code = @"
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as playwright:
+    for browser_type in (playwright.chromium, playwright.firefox):
+        if not Path(browser_type.executable_path).exists():
+            raise SystemExit(1)
+        browser = browser_type.launch(headless=True)
+        browser.close()
+"@
         & $VenvPython -c $code *> $null
         return ($LASTEXITCODE -eq 0)
     }
@@ -1455,6 +1465,9 @@ function Ensure-PlaywrightRuntime {
     & $VenvPython -m playwright install chromium firefox
     if ($LASTEXITCODE -ne 0) {
         Stop-WithError "Failed to install Playwright browser runtimes."
+    }
+    if (-not (Test-PlaywrightBrowsers)) {
+        Stop-WithError "Playwright browsers were installed but cannot launch. Check the local browser runtime dependencies."
     }
     New-Item -ItemType File -Path $PlaywrightStamp -Force | Out-Null
 }

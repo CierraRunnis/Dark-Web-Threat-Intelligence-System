@@ -111,7 +111,7 @@ bash scripts/start_all_services_wsl.sh start
 - 校验 `tmux`、`python3`、`python3-venv`、`python3-pip`、`npm`、`redis-server`、`redis-cli`、`curl`
 - 在 Debian/Ubuntu/WSL 环境下，缺失时自动通过 `apt-get` 安装系统依赖
 - 自动创建后端虚拟环境并安装 `requirements.txt`
-- 自动安装 Playwright Chromium 运行时
+- 自动安装 Playwright Firefox/Chromium 运行时，并在 Debian/Ubuntu/WSL 环境下补齐浏览器系统依赖
 - 检查前端 `node_modules`，缺失时自动执行 `npm install`
 - 准备 WSL 本地运行时数据库；如果没有历史数据库，会自动初始化空库
 - 用 `tmux` 拉起整套服务并保留各窗口日志
