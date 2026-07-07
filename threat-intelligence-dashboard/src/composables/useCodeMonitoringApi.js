@@ -23,11 +23,6 @@ export function useCodeMonitoringApi() {
         method: 'POST',
       })
     },
-    launchLogin(platform) {
-      return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/launch-login`, {
-        method: 'POST',
-      })
-    },
     startRemoteLogin(platform) {
       return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/remote-login/start`, {
         method: 'POST',

@@ -8,8 +8,6 @@
       </div>
       <div class="embedded-browser-header__actions">
         <el-button plain @click="router.back()">返回</el-button>
-        <el-button plain :loading="loading" @click="refreshState">刷新状态</el-button>
-        <el-button plain :disabled="!state?.rfb_ws_path" @click="connectRfb">重新连接浏览器</el-button>
         <el-button type="primary" :loading="saving" :disabled="!sessionId" @click="finishSession">保存会话</el-button>
         <el-button type="danger" plain :loading="closing" :disabled="!sessionId" @click="closeSession">关闭会话</el-button>
       </div>
@@ -60,18 +58,6 @@
 
         <div class="ti-card ti-reveal-up">
           <div class="ti-card-header">
-            <div class="ti-card-title">浏览器辅助</div>
-          </div>
-          <div class="ti-card-body browser-tools">
-            <el-input v-model="navigateUrl" placeholder="URL" clearable @keyup.enter="navigateRemote" />
-            <el-button plain :loading="actionLoading" :disabled="!navigateUrl.trim() || !sessionId" @click="navigateRemote">
-              在内置浏览器中跳转
-            </el-button>
-          </div>
-        </div>
-
-        <div class="ti-card ti-reveal-up">
-          <div class="ti-card-header">
             <div class="ti-card-title">运行状态</div>
           </div>
           <div class="ti-card-body embedded-browser-state">
@@ -109,9 +95,7 @@ const browserDesktopRef = ref(null)
 const state = ref(null)
 const sessionId = ref(String(route.query.session_id || '').trim())
 const accountLabel = ref('')
-const navigateUrl = ref('')
 const loading = ref(false)
-const actionLoading = ref(false)
 const saving = ref(false)
 const closing = ref(false)
 const rfbStatus = ref('idle')
@@ -240,25 +224,6 @@ async function refreshState() {
   } finally {
     loading.value = false
   }
-}
-
-async function sendAction(payload) {
-  if (!sessionId.value || actionLoading.value) return
-  actionLoading.value = true
-  try {
-    applyState(await api.controlRemoteLogin(sessionId.value, payload))
-  } catch (error) {
-    ElMessage.error(error.message || '内置浏览器操作失败')
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-async function navigateRemote() {
-  const raw = navigateUrl.value.trim()
-  if (!raw) return
-  const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
-  await sendAction({ action: 'navigate', url })
 }
 
 async function finishSession() {
@@ -403,7 +368,6 @@ onUnmounted(() => {
   margin-bottom: 14px;
 }
 
-.browser-tools,
 .embedded-browser-state {
   display: grid;
   gap: 12px;
