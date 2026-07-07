@@ -34,15 +34,15 @@
           </EventTableToolbar>
 
           <div class="ti-table-shell table-shell">
-            <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="auto">
-              <el-table-column prop="disclosureDate" label="披露日期" width="140" />
-              <el-table-column prop="updatedTime" label="最近更新" width="170" />
-              <el-table-column prop="title" label="标题" min-width="420" show-overflow-tooltip />
-              <el-table-column prop="category" label="事件分类" width="150" />
-              <el-table-column prop="attacker" label="攻击者" width="160" show-overflow-tooltip />
-              <el-table-column prop="industry" label="行业" width="150" />
-              <el-table-column prop="region" label="受害国家和地区" min-width="220" show-overflow-tooltip />
-              <el-table-column label="查看" width="120">
+            <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="fixed">
+              <el-table-column prop="disclosureDate" label="披露日期" :width="dataLeakDateColumnWidth" />
+              <el-table-column v-if="showDataLeakUpdatedColumn" prop="updatedTime" label="最近更新" :width="dataLeakUpdatedColumnWidth" />
+              <el-table-column prop="title" label="标题" :min-width="dataLeakTitleMinWidth" show-overflow-tooltip />
+              <el-table-column v-if="showDataLeakCategoryColumn" prop="category" label="事件分类" :width="dataLeakCategoryColumnWidth" />
+              <el-table-column prop="attacker" label="攻击者" :width="dataLeakAttackerColumnWidth" show-overflow-tooltip />
+              <el-table-column v-if="showDataLeakIndustryColumn" prop="industry" label="行业" :width="dataLeakIndustryColumnWidth" />
+              <el-table-column v-if="showDataLeakRegionColumn" prop="region" label="受害国家和地区" :min-width="dataLeakRegionMinWidth" show-overflow-tooltip />
+              <el-table-column label="查看" :width="dataLeakActionColumnWidth">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" @click="viewEventDetail(row)">查看</el-button>
                 </template>
@@ -86,10 +86,23 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const categoryFilter = ref('')
 const searchValue = ref('')
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const listStateKey = computed(() => `list-state:${route.path}`)
 let refreshTimer = null
 
 const categoryOptions = computed(() => [...new Set(dataLeakEvents.value.map((item) => item.category))])
+const showDataLeakUpdatedColumn = computed(() => viewportWidth.value >= 1400)
+const showDataLeakCategoryColumn = computed(() => viewportWidth.value >= 1180)
+const showDataLeakIndustryColumn = computed(() => viewportWidth.value >= 1400)
+const showDataLeakRegionColumn = computed(() => viewportWidth.value >= 1680)
+const dataLeakDateColumnWidth = computed(() => viewportWidth.value < 1180 ? 104 : viewportWidth.value < 1500 ? 118 : 140)
+const dataLeakUpdatedColumnWidth = computed(() => viewportWidth.value < 1500 ? 128 : 150)
+const dataLeakTitleMinWidth = computed(() => viewportWidth.value < 1180 ? 180 : viewportWidth.value < 1500 ? 220 : 300)
+const dataLeakCategoryColumnWidth = computed(() => viewportWidth.value < 1500 ? 110 : 130)
+const dataLeakAttackerColumnWidth = computed(() => viewportWidth.value < 1500 ? 110 : 140)
+const dataLeakIndustryColumnWidth = computed(() => viewportWidth.value < 1500 ? 100 : 120)
+const dataLeakRegionMinWidth = computed(() => 180)
+const dataLeakActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 72 : 82)
 
 function parseSortTime(value) {
   if (!value) return Number.NEGATIVE_INFINITY
@@ -160,7 +173,13 @@ watch([filteredEvents, pageSize], () => {
   }
 })
 
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
 onMounted(() => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
   refreshIntelligence()
   const raw = sessionStorage.getItem(listStateKey.value)
   if (raw) {
@@ -180,6 +199,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewportWidth)
   if (refreshTimer) {
     window.clearInterval(refreshTimer)
     refreshTimer = null
