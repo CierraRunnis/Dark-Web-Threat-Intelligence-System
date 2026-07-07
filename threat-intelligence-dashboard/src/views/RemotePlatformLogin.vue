@@ -363,7 +363,24 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.browser-desktop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.browser-desktop :deep(.rfb_screen) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100% !important;
+  height: 100% !important;
+}
+
 .browser-desktop :deep(canvas) {
+  display: block;
+  max-width: 100%;
+  max-height: min(760px, calc(100vh - 230px));
   outline: none;
 }
 
