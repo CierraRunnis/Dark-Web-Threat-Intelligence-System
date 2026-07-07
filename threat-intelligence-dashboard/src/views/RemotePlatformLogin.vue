@@ -356,7 +356,8 @@ onUnmounted(() => {
 
 .browser-desktop,
 .browser-empty {
-  min-height: min(760px, calc(100vh - 230px));
+  height: min(760px, calc(100vh - 230px));
+  min-height: 520px;
   border: 1px solid rgba(116, 142, 184, 0.2);
   border-radius: 10px;
   background: #111827;
