@@ -12,9 +12,9 @@
         </div>
         <div class="ti-card-body">
           <div class="ti-table-shell">
-            <el-table :data="platformSessions" table-layout="auto">
-              <el-table-column prop="label" label="平台" min-width="180" />
-              <el-table-column label="状态" width="140">
+            <el-table :data="platformSessions" table-layout="fixed" style="width: 100%">
+              <el-table-column prop="label" label="平台" :min-width="sessionPlatformMinWidth" show-overflow-tooltip />
+              <el-table-column label="状态" :width="sessionStatusColumnWidth">
                 <template #default="{ row }">
                   <span class="session-status" :class="statusBadgeClass(row.status)">
                     <span class="session-status__dot" />
@@ -22,18 +22,18 @@
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column prop="account_label" label="账号标签" min-width="180">
+              <el-table-column v-if="showSessionAccountColumn" prop="account_label" label="账号标签" :width="sessionAccountColumnWidth">
                 <template #default="{ row }">
                   <el-input v-model="sessionDrafts[row.platform]" placeholder="账号标签" size="small" />
                 </template>
               </el-table-column>
-              <el-table-column prop="last_verified_at" label="最近校验" min-width="180">
+              <el-table-column v-if="showSessionVerifiedColumn" prop="last_verified_at" label="最近校验" :width="sessionVerifiedColumnWidth">
                 <template #default="{ row }">
                   {{ formatDateTime(row.last_verified_at) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column prop="last_error" label="最近错误" min-width="260" show-overflow-tooltip />
-              <el-table-column label="操作" min-width="260">
+              <el-table-column v-if="showSessionErrorColumn" prop="last_error" label="最近错误" :min-width="sessionErrorMinWidth" show-overflow-tooltip />
+              <el-table-column label="操作" :width="sessionActionColumnWidth">
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button
@@ -216,7 +216,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
 import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
@@ -231,6 +231,7 @@ const importingTerms = ref(false)
 const platformSessions = ref([])
 const watchlists = ref([])
 const selectedWatchlistId = ref(null)
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const termImportInputRef = ref(null)
 const sessionDrafts = reactive({})
 const loginStarting = reactive({})
@@ -272,6 +273,16 @@ const statusLabelMap = {
   login_in_progress: '登录中',
   not_configured: '未配置',
 }
+
+const showSessionAccountColumn = computed(() => viewportWidth.value >= 1180)
+const showSessionVerifiedColumn = computed(() => viewportWidth.value >= 1500)
+const showSessionErrorColumn = computed(() => viewportWidth.value >= 1680)
+const sessionPlatformMinWidth = computed(() => viewportWidth.value < 1500 ? 130 : 150)
+const sessionStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 100 : 110)
+const sessionAccountColumnWidth = computed(() => viewportWidth.value < 1500 ? 140 : 150)
+const sessionVerifiedColumnWidth = computed(() => 150)
+const sessionErrorMinWidth = computed(() => 180)
+const sessionActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 220 : 240)
 
 const watchlistForm = reactive({
   id: null,
@@ -708,9 +719,19 @@ async function removeSession(platform) {
   }
 }
 
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
 onMounted(async () => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
   await Promise.all([loadSessions(), loadWatchlists()])
   await autoDetectSessions({ silent: true })
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateViewportWidth)
 })
 </script>
 

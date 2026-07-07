@@ -37,31 +37,31 @@
           </EventTableToolbar>
 
           <div class="ti-table-shell table-shell">
-            <el-table :data="pagedHits" table-layout="auto" style="width: 100%">
-              <el-table-column prop="lastSeenAt" label="最近发现" min-width="180">
+            <el-table :data="pagedHits" table-layout="fixed" style="width: 100%">
+              <el-table-column prop="lastSeenAt" label="最近发现" :width="resultLastSeenColumnWidth">
                 <template #default="{ row }">
                   {{ formatDateTime(row.lastSeenAt) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="来源家族" width="140">
+              <el-table-column v-if="showResultSourceColumn" label="来源家族" :width="resultSourceColumnWidth">
                 <template #default="{ row }">
                   {{ sourceFamilyLabelMap[row.sourceFamily] || row.sourceFamily || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="平台" width="170">
+              <el-table-column v-if="showResultPlatformColumn" label="平台" :width="resultPlatformColumnWidth">
                 <template #default="{ row }">
                   {{ row.platformLabel || row.platform || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column prop="title" label="标题" min-width="320" show-overflow-tooltip />
-              <el-table-column prop="riskScore" label="风险分" width="100" />
-              <el-table-column prop="fileCount" label="文件数" width="100" />
-              <el-table-column label="核验状态" width="120">
+              <el-table-column prop="title" label="标题" :min-width="resultTitleMinWidth" show-overflow-tooltip />
+              <el-table-column prop="riskScore" label="风险分" :width="resultRiskColumnWidth" />
+              <el-table-column v-if="showResultFileCountColumn" prop="fileCount" label="文件数" :width="resultFileCountColumnWidth" />
+              <el-table-column v-if="showResultReviewStatusColumn" label="核验状态" :width="resultReviewStatusColumnWidth">
                 <template #default="{ row }">
                   {{ reviewLabelMap[row.reviewStatus] || row.reviewStatus || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="复核" min-width="220">
+              <el-table-column v-if="showResultReviewActionsColumn" label="复核" :width="resultReviewActionsColumnWidth">
                 <template #default="{ row }">
                   <div class="review-actions">
                     <el-button size="small" @click="reviewHit(row, 'confirmed')">确认</el-button>
@@ -70,7 +70,7 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="查看" width="120">
+              <el-table-column label="查看" :width="resultActionColumnWidth">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" @click="viewEvent(row)">查看</el-button>
                 </template>
@@ -96,7 +96,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
@@ -118,6 +118,7 @@ const platformFilter = ref('')
 const reviewFilter = ref('')
 const accessStateFilter = ref('')
 const matchedTermFilter = ref('')
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 
 const sourceFamilyLabelMap = {
   netdisk_aggregator: '网盘聚合',
@@ -141,6 +142,21 @@ const accessStateLabelMap = {
   forbidden: '禁止访问',
   unknown: '未知',
 }
+
+const showResultSourceColumn = computed(() => viewportWidth.value >= 1180)
+const showResultPlatformColumn = computed(() => viewportWidth.value >= 1500)
+const showResultFileCountColumn = computed(() => viewportWidth.value >= 1280)
+const showResultReviewStatusColumn = computed(() => viewportWidth.value >= 1180)
+const showResultReviewActionsColumn = computed(() => viewportWidth.value >= 1680)
+const resultLastSeenColumnWidth = computed(() => viewportWidth.value < 1500 ? 132 : 150)
+const resultSourceColumnWidth = computed(() => viewportWidth.value < 1500 ? 118 : 130)
+const resultPlatformColumnWidth = computed(() => 130)
+const resultTitleMinWidth = computed(() => viewportWidth.value < 1180 ? 190 : viewportWidth.value < 1500 ? 240 : 300)
+const resultRiskColumnWidth = computed(() => viewportWidth.value < 1500 ? 76 : 82)
+const resultFileCountColumnWidth = computed(() => viewportWidth.value < 1500 ? 80 : 84)
+const resultReviewStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 94 : 100)
+const resultReviewActionsColumnWidth = computed(() => 180)
+const resultActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 72 : 82)
 
 const reviewOptions = [
   { label: '待处理', value: 'new' },
@@ -248,7 +264,19 @@ watch([filteredHits, pageSize], () => {
   if (currentPage.value > maxPage) currentPage.value = maxPage
 })
 
-onMounted(loadHits)
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
+onMounted(() => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
+  loadHits()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', updateViewportWidth)
+})
 </script>
 
 <style scoped lang="scss">
