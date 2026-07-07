@@ -64,6 +64,8 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 
 .main-content--blank {
   min-height: 100vh;
+  width: 100%;
+  max-width: 100vw;
   margin-left: 0;
 }
 
@@ -73,6 +75,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 }
 
 .app-container.sidebar-collapsed .main-content--blank {
+  max-width: 100vw;
   margin-left: 0;
 }
 
@@ -91,6 +94,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 
 .page-content.page-content--blank {
   min-height: 100vh;
+  width: 100%;
   padding: 0;
   overflow: hidden;
 }
