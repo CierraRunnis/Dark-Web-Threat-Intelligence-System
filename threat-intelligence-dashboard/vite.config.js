@@ -15,6 +15,7 @@ export default defineConfig({
       '/api': {
         target: apiTarget,
         changeOrigin: true,
+        ws: true,
       },
       '/collector-output': {
         target: apiTarget,

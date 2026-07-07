@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import base64
 import json
+import os
 from queue import Queue
+import shutil
+import socket
+import subprocess
 from threading import Lock, Thread
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -73,6 +79,129 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _find_free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _find_free_display() -> str:
+    for display_number in range(90, 140):
+        socket_path = f"/tmp/.X11-unix/X{display_number}"
+        if not os.path.exists(socket_path):
+            return f":{display_number}"
+    raise RuntimeError("no free X display was found for embedded browser")
+
+
+def _require_linux_embedded_runtime() -> None:
+    missing = [name for name in ("Xvfb", "x11vnc") if shutil.which(name) is None]
+    if missing:
+        raise RuntimeError(
+            "embedded browser runtime is missing: "
+            + ", ".join(missing)
+            + ". Install xvfb and x11vnc on Linux."
+        )
+
+
+def _wait_for_x_display(display: str, process: subprocess.Popen) -> None:
+    display_number = display.lstrip(":").split(".", 1)[0]
+    socket_path = f"/tmp/.X11-unix/X{display_number}"
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("Xvfb exited before the embedded browser display became ready")
+        if os.path.exists(socket_path):
+            return
+        time.sleep(0.1)
+    raise RuntimeError("embedded browser display did not become ready")
+
+
+def _wait_for_tcp_port(port: int, process: subprocess.Popen) -> None:
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("x11vnc exited before the VNC port became ready")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise RuntimeError("embedded browser VNC port did not become ready")
+
+
+def _terminate_process(process: subprocess.Popen | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=4)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def _start_embedded_display(session: "RemoteBrowserSession") -> None:
+    _require_linux_embedded_runtime()
+    session.display = _find_free_display()
+    session.vnc_port = _find_free_tcp_port()
+    env = os.environ.copy()
+    env["DISPLAY"] = session.display
+
+    session.xvfb_process = subprocess.Popen(
+        [
+            "Xvfb",
+            session.display,
+            "-screen",
+            "0",
+            f"{REMOTE_LOGIN_VIEWPORT['width']}x{REMOTE_LOGIN_VIEWPORT['height']}x24",
+            "-nolisten",
+            "tcp",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    _wait_for_x_display(session.display, session.xvfb_process)
+
+    if shutil.which("openbox") is not None:
+        session.window_manager_process = subprocess.Popen(
+            ["openbox"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+
+    session.vnc_process = subprocess.Popen(
+        [
+            "x11vnc",
+            "-display",
+            session.display,
+            "-localhost",
+            "-nopw",
+            "-forever",
+            "-shared",
+            "-rfbport",
+            str(session.vnc_port),
+            "-quiet",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    _wait_for_tcp_port(session.vnc_port, session.vnc_process)
+
+
+def _stop_embedded_display(session: "RemoteBrowserSession") -> None:
+    _terminate_process(session.vnc_process)
+    _terminate_process(session.window_manager_process)
+    _terminate_process(session.xvfb_process)
+    session.vnc_process = None
+    session.window_manager_process = None
+    session.xvfb_process = None
+
+
 @dataclass
 class RemoteBrowserSession:
     session_id: str
@@ -86,6 +215,11 @@ class RemoteBrowserSession:
     created_at: str
     commands: Queue
     thread: Thread | None = None
+    display: str = ""
+    vnc_port: int = 0
+    xvfb_process: subprocess.Popen | None = None
+    window_manager_process: subprocess.Popen | None = None
+    vnc_process: subprocess.Popen | None = None
 
 
 def _state_payload(
@@ -112,9 +246,11 @@ def _state_payload(
         "session_id": session.session_id,
         "platform": session.platform,
         "label": session.label,
+        "mode": "embedded_browser" if session.vnc_port else "headless_control",
         "title": title,
         "url": url,
         "screenshot": screenshot,
+        "rfb_ws_path": f"/api/platform-sessions/remote-login/{session.session_id}/rfb" if session.vnc_port else "",
         "viewport": dict(REMOTE_LOGIN_VIEWPORT),
         "storage_state_path": session.storage_state_path,
         "user_data_dir": session.user_data_dir,
@@ -127,6 +263,7 @@ def _save_platform_session(session: RemoteBrowserSession, account_label: str) ->
     metadata = {
         "remote_browser_session": True,
         "remote_session_id": session.session_id,
+        "remote_browser_mode": "embedded_browser" if session.vnc_port else "headless_control",
         "user_data_dir": session.user_data_dir,
         "saved_at": updated_at,
     }
@@ -165,15 +302,22 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
         from playwright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
+        browser_env = os.environ.copy()
+        if session.display:
+            browser_env["DISPLAY"] = session.display
         context = playwright.chromium.launch_persistent_context(
             session.user_data_dir,
-            headless=True,
+            headless=not bool(session.display),
             viewport=dict(REMOTE_LOGIN_VIEWPORT),
+            screen=dict(REMOTE_LOGIN_VIEWPORT),
+            env=browser_env,
             ignore_https_errors=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
+                "--window-position=0,0",
+                f"--window-size={REMOTE_LOGIN_VIEWPORT['width']},{REMOTE_LOGIN_VIEWPORT['height']}",
             ],
         )
         page = context.pages[0] if context.pages else context.new_page()
@@ -222,6 +366,7 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
                 playwright.stop()
             except Exception:
                 pass
+        _stop_embedded_display(session)
 
 
 def _apply_remote_action(session: RemoteBrowserSession, page: Any, payload: dict[str, Any]) -> dict[str, Any]:
@@ -368,6 +513,13 @@ def start_remote_browser_login(platform_name: str) -> dict[str, Any]:
         created_at=_now_utc_iso(),
         commands=Queue(),
     )
+    if os.name != "nt":
+        try:
+            _start_embedded_display(session)
+        except Exception:
+            _stop_embedded_display(session)
+            raise
+
     thread = Thread(target=_remote_browser_worker, args=(session, startup_queue), daemon=True)
     session.thread = thread
     thread.start()
@@ -404,3 +556,65 @@ def close_remote_browser_login(session_id: str) -> dict[str, Any]:
         return _call_session(session, "close")
     finally:
         _remove_session_keys(session)
+
+
+async def proxy_remote_browser_rfb(session_id: str, websocket: Any) -> None:
+    try:
+        session = _get_remote_session(session_id)
+    except ValueError:
+        await websocket.close(code=1008)
+        return
+    if not session.vnc_port:
+        await websocket.close(code=1008)
+        return
+
+    protocol_header = str(websocket.headers.get("sec-websocket-protocol") or "")
+    subprotocol = "binary" if "binary" in protocol_header else None
+    await websocket.accept(subprotocol=subprotocol)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", session.vnc_port)
+    except OSError:
+        await websocket.close(code=1011)
+        return
+
+    async def websocket_to_vnc() -> None:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is None and message.get("text") is not None:
+                data = str(message["text"]).encode("latin-1")
+            if data:
+                writer.write(data)
+                await writer.drain()
+
+    async def vnc_to_websocket() -> None:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            await websocket.send_bytes(data)
+
+    tasks = [
+        asyncio.create_task(websocket_to_vnc()),
+        asyncio.create_task(vnc_to_websocket()),
+    ]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    except Exception:
+        pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass

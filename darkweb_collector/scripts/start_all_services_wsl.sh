@@ -210,6 +210,9 @@ install_system_dependencies() {
   command -v npm >/dev/null 2>&1 || missing_packages+=("npm")
   command -v redis-cli >/dev/null 2>&1 || missing_packages+=("redis-tools")
   command -v curl >/dev/null 2>&1 || missing_packages+=("curl")
+  command -v Xvfb >/dev/null 2>&1 || missing_packages+=("xvfb")
+  command -v x11vnc >/dev/null 2>&1 || missing_packages+=("x11vnc")
+  command -v openbox >/dev/null 2>&1 || missing_packages+=("openbox")
   if redis_endpoint_is_local; then
     command -v redis-server >/dev/null 2>&1 || missing_packages+=("redis-server")
   fi

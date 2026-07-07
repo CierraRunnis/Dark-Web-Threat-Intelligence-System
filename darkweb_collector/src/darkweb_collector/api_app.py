@@ -11,6 +11,7 @@ from threading import Lock, Thread
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
+from fastapi import WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -92,6 +93,7 @@ from darkweb_collector.remote_browser_sessions import (
     control_remote_browser,
     finish_remote_browser_login,
     get_remote_browser_state,
+    proxy_remote_browser_rfb,
     start_remote_browser_login,
 )
 import darkweb_collector.monitoring_rules as monitoring_rules_module
@@ -825,6 +827,11 @@ def platform_session_remote_login_state(session_id: str) -> dict:
         return get_remote_browser_state(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.websocket("/api/platform-sessions/remote-login/{session_id}/rfb")
+async def platform_session_remote_login_rfb(websocket: WebSocket, session_id: str) -> None:
+    await proxy_remote_browser_rfb(session_id, websocket)
 
 
 @app.post("/api/platform-sessions/remote-login/{session_id}/control")

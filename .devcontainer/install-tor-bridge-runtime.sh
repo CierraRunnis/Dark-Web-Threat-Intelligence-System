@@ -7,7 +7,7 @@ if ! command -v apt-get >/dev/null 2>&1; then
 fi
 
 sudo apt-get update
-sudo apt-get install -y tor snowflake-client obfs4proxy python3-venv
+sudo apt-get install -y tor snowflake-client obfs4proxy python3-venv xvfb x11vnc openbox
 
 tor --version | head -1
 command -v snowflake-client
