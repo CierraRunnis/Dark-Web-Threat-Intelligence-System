@@ -413,9 +413,5 @@ onUnmounted(() => {
   .embedded-browser-layout {
     grid-template-columns: 1fr;
   }
-
-  .embedded-browser-side {
-    order: -1;
-  }
 }
 </style>
