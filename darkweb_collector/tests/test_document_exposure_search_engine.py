@@ -7,6 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from darkweb_collector.document_exposure import (
+    DiscoverySource,
+    _detect_search_block_reason,
+    _parse_search_engine_candidates,
     build_document_exposure_summary,
     list_document_exposures_payload,
     save_watchlist_payload,
@@ -39,6 +42,26 @@ class SearchEngineDocumentExposureTests(unittest.TestCase):
         search_engines = {row.key for row in rows if row.platform_type == "search_engine"}
 
         self.assertGreaterEqual({"baidu_search", "bing_search", "so360_search"}, search_engines)
+
+    def test_bing_result_page_is_not_misclassified_as_captcha(self):
+        source = DiscoverySource("bing_search", "Bing", "https://www.bing.com/search?q={query}", "search_engine")
+        html = """
+        <html><body>
+          <ol id="b_results">
+            <li class="b_algo">
+              <a href="https://www.bing.com/ck/a?!&&u=a1aHR0cHM6Ly93d3cuY2F0bC5jb20v">
+                宁德时代 · CATL
+              </a>
+            </li>
+          </ol>
+          <script>var captchaTelemetry = true;</script>
+        </body></html>
+        """
+
+        self.assertEqual(_detect_search_block_reason(source, html, "https://www.bing.com/search?q=catl"), "")
+        candidates = _parse_search_engine_candidates(source, html, "https://www.bing.com/search?q=catl")
+        self.assertEqual(candidates[0]["url"], "https://www.catl.com/")
+        self.assertEqual(candidates[0]["source_detail"], "www.catl.com")
 
     def test_search_engine_scan_persists_generic_web_result(self):
         watchlist = save_watchlist_payload(

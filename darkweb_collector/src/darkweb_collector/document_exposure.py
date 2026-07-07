@@ -112,7 +112,13 @@ HTTP_HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
 }
 
 
@@ -1659,6 +1665,8 @@ def _fetch_netdisk_api_candidates(source: DiscoverySource, term: str) -> list[di
 
 def _detect_search_block_reason(source: DiscoverySource, html: str, url: str) -> str:
     lowered = f"{html}\n{url}".lower()
+    if source.key == "bing_search" and ("class=\"b_algo\"" in html or "id=\"b_results\"" in html):
+        return ""
     if "安全验证" in html or "captcha" in lowered or "verify you are human" in lowered:
         return f"{source.key}:captcha_or_security_verification"
     if "登录" in html or "sign in" in lowered or "passport.baidu.com" in lowered:
@@ -2063,7 +2071,7 @@ def _search_result_target_url(source: DiscoverySource, href: str, requested_url:
             continue
         host = parsed.netloc.lower()
         is_source_host = any(host == item or host.endswith(f".{item}") for item in source_hosts)
-        if is_source_host and not _is_search_engine_redirect(source, variant):
+        if is_source_host:
             continue
         if _is_search_result_asset(variant):
             continue
