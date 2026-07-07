@@ -148,25 +148,25 @@
       </div>
       <div class="ti-card-body">
         <div class="ti-table-shell">
-          <el-table :data="focusEvents" table-layout="auto" style="width: 100%">
-            <el-table-column prop="disclosureDate" label="披露日期" width="140" />
-            <el-table-column prop="title" label="事件标题" min-width="360" show-overflow-tooltip />
-            <el-table-column prop="sourceSite" label="来源站点" width="140" />
-            <el-table-column prop="country" label="国家" width="120" />
-            <el-table-column prop="industry" label="行业" width="120" />
-            <el-table-column prop="riskScore" label="风险分" width="100" />
-            <el-table-column prop="monitoringWeight" label="监测权重" width="100" />
-            <el-table-column label="命中关键词" min-width="220">
+          <el-table :data="focusEvents" table-layout="fixed" style="width: 100%">
+            <el-table-column prop="disclosureDate" label="披露日期" :width="focusDateColumnWidth" />
+            <el-table-column prop="title" label="事件标题" :min-width="focusTitleMinWidth" show-overflow-tooltip />
+            <el-table-column v-if="showFocusSourceColumn" prop="sourceSite" label="来源站点" :width="focusSourceColumnWidth" show-overflow-tooltip />
+            <el-table-column v-if="showFocusCountryColumn" prop="country" label="国家" :width="focusCountryColumnWidth" show-overflow-tooltip />
+            <el-table-column v-if="showFocusIndustryColumn" prop="industry" label="行业" :width="focusIndustryColumnWidth" show-overflow-tooltip />
+            <el-table-column prop="riskScore" label="风险分" :width="focusRiskColumnWidth" />
+            <el-table-column v-if="showFocusWeightColumn" prop="monitoringWeight" label="监测权重" :width="focusWeightColumnWidth" />
+            <el-table-column label="命中关键词" :min-width="focusMatchesMinWidth">
               <template #default="{ row }">
                 <span>{{ formatMatches(row.monitoringMatches) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="样本证据" width="100">
+            <el-table-column v-if="showFocusEvidenceColumn" label="样本证据" :width="focusEvidenceColumnWidth">
               <template #default="{ row }">
                 <StatusBadge :label="row.hasSampleEvidence ? '有' : '无'" :tone="row.hasSampleEvidence ? 'danger' : 'muted'" />
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100">
+            <el-table-column label="操作" :width="focusActionColumnWidth">
               <template #default="{ row }">
                 <div class="row-actions">
                   <el-button size="small" type="primary" @click="viewEventDetail(row)">详情</el-button>
@@ -181,7 +181,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { init as initECharts } from 'echarts/core'
 import { useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
@@ -199,8 +199,25 @@ const countriesChartRef = ref(null)
 const industryChartRef = ref(null)
 const activeActorsChartRef = ref(null)
 const keywordStatsChartRef = ref(null)
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const REPORT_CHART_RENDER_WIDTH = 605
 const REPORT_CHART_RENDER_HEIGHT = 376
+
+const showFocusSourceColumn = computed(() => viewportWidth.value >= 1500)
+const showFocusCountryColumn = computed(() => viewportWidth.value >= 1880)
+const showFocusIndustryColumn = computed(() => viewportWidth.value >= 1180)
+const showFocusWeightColumn = computed(() => viewportWidth.value >= 1680)
+const showFocusEvidenceColumn = computed(() => viewportWidth.value >= 1680)
+const focusDateColumnWidth = computed(() => viewportWidth.value < 1180 ? 104 : viewportWidth.value < 1500 ? 110 : 140)
+const focusTitleMinWidth = computed(() => viewportWidth.value < 1180 ? 190 : viewportWidth.value < 1500 ? 240 : 360)
+const focusSourceColumnWidth = computed(() => viewportWidth.value < 1680 ? 110 : 130)
+const focusCountryColumnWidth = computed(() => 100)
+const focusIndustryColumnWidth = computed(() => viewportWidth.value < 1500 ? 96 : 100)
+const focusRiskColumnWidth = computed(() => viewportWidth.value < 1500 ? 76 : 86)
+const focusWeightColumnWidth = computed(() => 92)
+const focusMatchesMinWidth = computed(() => viewportWidth.value < 1180 ? 140 : viewportWidth.value < 1500 ? 160 : 200)
+const focusEvidenceColumnWidth = computed(() => 88)
+const focusActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 70 : 80)
 
 const chartPalette = ['#2d5dff', '#43a06e', '#e88030', '#cf4432', '#5d74d6', '#7e8ca3', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444']
 const industryLabelOverrides = {
@@ -1429,6 +1446,19 @@ function truncateLink(value, max = 60) {
   if (text.length <= max) return text
   return `${text.slice(0, max - 1)}…`
 }
+
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
+onMounted(() => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', updateViewportWidth)
+})
 </script>
 
 <style scoped lang="scss">

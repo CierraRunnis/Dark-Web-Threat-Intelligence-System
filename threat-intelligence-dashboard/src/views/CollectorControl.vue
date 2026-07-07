@@ -354,13 +354,13 @@
         </div>
         <p class="panel-note">英文完整词建议使用词边界匹配，中文关键词建议使用包含匹配。</p>
         <div class="ti-table-shell">
-          <el-table :data="monitoringKeywords" table-layout="auto" style="width: 100%">
-            <el-table-column label="关键词" min-width="180">
+          <el-table :data="monitoringKeywords" table-layout="fixed" style="width: 100%">
+            <el-table-column label="关键词" :min-width="monitoringKeywordMinWidth">
               <template #default="{ row }">
                 <el-input v-model="row.keyword" placeholder="例如 中国 / 政府 / 能源 / 企业名" />
               </template>
             </el-table-column>
-            <el-table-column label="类别" width="160">
+            <el-table-column label="类别" :width="monitoringKeywordCategoryWidth">
               <template #default="{ row }">
                 <el-select v-model="row.category">
                   <el-option label="地理关键词" value="geo_keywords" />
@@ -369,12 +369,12 @@
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column label="权重" width="120">
+            <el-table-column label="权重" :width="monitoringKeywordWeightWidth">
               <template #default="{ row }">
                 <el-input-number v-model="row.weight" :min="1" :max="25" />
               </template>
             </el-table-column>
-            <el-table-column label="匹配方式" width="160">
+            <el-table-column v-if="showMonitoringMatchModeColumn" label="匹配方式" :width="monitoringKeywordMatchWidth">
               <template #default="{ row }">
                 <el-select v-model="row.match_mode">
                   <el-option label="包含匹配" value="contains" />
@@ -382,12 +382,12 @@
                 </el-select>
               </template>
             </el-table-column>
-            <el-table-column label="启用" width="90">
+            <el-table-column label="启用" :width="monitoringKeywordEnabledWidth">
               <template #default="{ row }">
                 <el-switch v-model="row.enabled" />
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="90">
+            <el-table-column label="操作" :width="monitoringKeywordActionWidth">
               <template #default="{ row }">
                 <el-button text type="danger" @click="removeMonitoringKeyword(row.id)">删除</el-button>
               </template>
@@ -411,31 +411,31 @@
       <div class="ti-card-body">
         <div class="ti-table-shell site-health-table-shell">
           <el-table :data="siteHealth" style="width: 100%" table-layout="fixed">
-            <el-table-column prop="site_name" label="站点" min-width="116" show-overflow-tooltip />
-            <el-table-column prop="overall_status" label="总体状态" width="86" />
-            <el-table-column v-if="showSiteHealthWide" prop="seed_status" label="种子页状态" width="92" />
-            <el-table-column v-if="showSiteHealthWide" prop="detail_status" label="详情页状态" width="92" />
-            <el-table-column prop="running_jobs" label="运行中" width="66" />
-            <el-table-column prop="failed_jobs_24h" label="24h 失败" width="78" />
-            <el-table-column label="连续失败" width="78">
+            <el-table-column prop="site_name" label="站点" :min-width="siteHealthSiteMinWidth" show-overflow-tooltip />
+            <el-table-column prop="overall_status" label="总体状态" :width="siteHealthStatusWidth" />
+            <el-table-column v-if="showSiteHealthWide" prop="seed_status" label="种子页状态" :width="siteHealthWideStatusWidth" />
+            <el-table-column v-if="showSiteHealthWide" prop="detail_status" label="详情页状态" :width="siteHealthWideStatusWidth" />
+            <el-table-column prop="running_jobs" label="运行中" :width="siteHealthSmallMetricWidth" />
+            <el-table-column prop="failed_jobs_24h" label="24h 失败" :width="siteHealthMetricWidth" />
+            <el-table-column label="连续失败" :width="siteHealthMetricWidth">
               <template #default="{ row }">
                 {{ row.consecutive_failures || 0 }}/{{ row.failure_threshold || 3 }}
               </template>
             </el-table-column>
-            <el-table-column label="熔断" width="76">
+            <el-table-column label="熔断" :width="siteHealthCircuitWidth">
               <template #default="{ row }">
                 <StatusBadge :label="circuitBreakerLabel(row)" :tone="circuitBreakerTone(row)" :dot="false" />
               </template>
             </el-table-column>
-            <el-table-column v-if="showSiteHealthWide" prop="failure_cooldown_until" label="冷却至" width="110" show-overflow-tooltip />
-            <el-table-column label="错误分类" width="86">
+            <el-table-column v-if="showSiteHealthWide" prop="failure_cooldown_until" label="冷却至" :width="siteHealthCooldownWidth" show-overflow-tooltip />
+            <el-table-column v-if="showSiteHealthErrorColumn" label="错误分类" :width="siteHealthErrorCategoryWidth">
               <template #default="{ row }">
                 <StatusBadge :label="errorCategoryLabel(row.error_category)" :tone="errorCategoryTone(row.error_category)" :dot="false" />
               </template>
             </el-table-column>
-            <el-table-column prop="last_success_at" label="最近成功" min-width="118" show-overflow-tooltip />
-            <el-table-column v-if="showSiteHealthMedium" prop="last_error" label="最近错误" min-width="150" show-overflow-tooltip />
-            <el-table-column label="操作" width="178">
+            <el-table-column prop="last_success_at" label="最近成功" :min-width="siteHealthLastSuccessMinWidth" show-overflow-tooltip />
+            <el-table-column v-if="showSiteHealthMedium" prop="last_error" label="最近错误" :min-width="siteHealthLastErrorMinWidth" show-overflow-tooltip />
+            <el-table-column label="操作" :width="siteHealthActionWidth">
               <template #default="{ row }">
                 <div class="row-actions site-health-actions">
                   <el-button size="small" type="primary" :loading="!!runningSiteMap[row.site_name]" :disabled="isSiteRunBlocked(row) || !row.enabled" @click="runSiteOnce(row.site_name)">运行一次</el-button>
@@ -490,8 +490,27 @@ const jobsData = computed(() => jobsState.value || {})
 const continuousStatus = computed(() => continuousState.value || {})
 const siteHealth = computed(() => jobsData.value.site_health || [])
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
-const showSiteHealthWide = computed(() => viewportWidth.value >= 1500)
-const showSiteHealthMedium = computed(() => viewportWidth.value >= 1280)
+const showMonitoringMatchModeColumn = computed(() => viewportWidth.value >= 1180)
+const monitoringKeywordMinWidth = computed(() => viewportWidth.value < 1180 ? 180 : 200)
+const monitoringKeywordCategoryWidth = computed(() => viewportWidth.value < 1180 ? 132 : 140)
+const monitoringKeywordWeightWidth = computed(() => viewportWidth.value < 1180 ? 100 : 110)
+const monitoringKeywordMatchWidth = computed(() => 140)
+const monitoringKeywordEnabledWidth = computed(() => viewportWidth.value < 1180 ? 72 : 76)
+const monitoringKeywordActionWidth = computed(() => viewportWidth.value < 1180 ? 76 : 78)
+const showSiteHealthWide = computed(() => viewportWidth.value >= 1680)
+const showSiteHealthMedium = computed(() => viewportWidth.value >= 1500)
+const showSiteHealthErrorColumn = computed(() => viewportWidth.value >= 1500)
+const siteHealthSiteMinWidth = computed(() => viewportWidth.value < 1500 ? 104 : 116)
+const siteHealthStatusWidth = computed(() => viewportWidth.value < 1500 ? 76 : 82)
+const siteHealthWideStatusWidth = computed(() => 88)
+const siteHealthSmallMetricWidth = computed(() => viewportWidth.value < 1500 ? 62 : 66)
+const siteHealthMetricWidth = computed(() => viewportWidth.value < 1500 ? 72 : 76)
+const siteHealthCircuitWidth = computed(() => viewportWidth.value < 1500 ? 68 : 72)
+const siteHealthCooldownWidth = computed(() => 104)
+const siteHealthErrorCategoryWidth = computed(() => 82)
+const siteHealthLastSuccessMinWidth = computed(() => viewportWidth.value < 1500 ? 106 : 112)
+const siteHealthLastErrorMinWidth = computed(() => 140)
+const siteHealthActionWidth = computed(() => viewportWidth.value < 1500 ? 150 : 168)
 const recentFailures = computed(() => jobsData.value.recent_failures || [])
 const vulnerabilitySync = computed(() => jobsData.value.vulnerability_sync || {})
 const ransomwareSync = computed(() => jobsData.value.ransomware_sync || {})

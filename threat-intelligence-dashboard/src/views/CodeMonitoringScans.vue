@@ -83,24 +83,24 @@
         </div>
         <div class="ti-card-body">
           <div class="ti-table-shell">
-            <el-table :data="scanRuns" table-layout="auto">
-              <el-table-column prop="finishedAt" label="完成时间" min-width="180">
+            <el-table :data="scanRuns" table-layout="fixed" style="width: 100%">
+              <el-table-column prop="finishedAt" label="完成时间" :width="scanFinishedColumnWidth">
                 <template #default="{ row }">
                   {{ formatDateTime(row.finishedAt) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column prop="watchlistName" label="监测对象" min-width="180" />
-              <el-table-column label="扫描平台" min-width="220">
+              <el-table-column v-if="showScanWatchlistColumn" prop="watchlistName" label="监测对象" :width="scanWatchlistColumnWidth" show-overflow-tooltip />
+              <el-table-column v-if="showScanPlatformsColumn" label="扫描平台" :min-width="scanPlatformsMinWidth">
                 <template #default="{ row }">
                   {{ Array.isArray(row.platforms) ? row.platforms.join(' / ') : '-' }}
                 </template>
               </el-table-column>
-              <el-table-column prop="candidateCount" label="候选数" width="100" />
-              <el-table-column prop="hitCount" label="命中数" width="100" />
-              <el-table-column prop="sensitiveHitCount" label="敏感命中" width="110" />
-              <el-table-column prop="clueHitCount" label="线索命中" width="110" />
-              <el-table-column prop="errorCount" label="错误数" width="100" />
-              <el-table-column prop="status" label="状态" width="120" />
+              <el-table-column v-if="showScanCandidateColumn" prop="candidateCount" label="候选数" :width="scanMetricColumnWidth" />
+              <el-table-column prop="hitCount" label="命中数" :width="scanMetricColumnWidth" />
+              <el-table-column v-if="showScanSensitiveColumn" prop="sensitiveHitCount" label="敏感命中" :width="scanSensitiveColumnWidth" />
+              <el-table-column v-if="showScanSensitiveColumn" prop="clueHitCount" label="线索命中" :width="scanSensitiveColumnWidth" />
+              <el-table-column v-if="showScanErrorColumn" prop="errorCount" label="错误数" :width="scanMetricColumnWidth" />
+              <el-table-column prop="status" label="状态" :width="scanStatusColumnWidth" />
             </el-table>
           </div>
         </div>
@@ -123,6 +123,7 @@ const scanLoading = ref(false)
 const continuousLoading = ref(false)
 const watchlists = ref([])
 const scanRuns = ref([])
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const lastRunMessage = ref('')
 const lastRunErrors = ref([])
 const continuousIntervalHours = ref(1)
@@ -174,6 +175,17 @@ const continuousStartDisabled = computed(() => {
 })
 
 const continuousStopDisabled = computed(() => !continuousStatus.value.enabled)
+const showScanWatchlistColumn = computed(() => viewportWidth.value >= 1180)
+const showScanPlatformsColumn = computed(() => viewportWidth.value >= 1500)
+const showScanCandidateColumn = computed(() => viewportWidth.value >= 1280)
+const showScanSensitiveColumn = computed(() => viewportWidth.value >= 1680)
+const showScanErrorColumn = computed(() => viewportWidth.value >= 1180)
+const scanFinishedColumnWidth = computed(() => viewportWidth.value < 1180 ? 128 : viewportWidth.value < 1500 ? 142 : 160)
+const scanWatchlistColumnWidth = computed(() => viewportWidth.value < 1500 ? 136 : 150)
+const scanPlatformsMinWidth = computed(() => 190)
+const scanMetricColumnWidth = computed(() => viewportWidth.value < 1500 ? 84 : 90)
+const scanSensitiveColumnWidth = computed(() => 96)
+const scanStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 88 : 94)
 
 function formatDateTime(value) {
   return formatShanghaiDateTime(value)
@@ -306,7 +318,13 @@ watch(
   },
 )
 
+function updateViewportWidth() {
+  viewportWidth.value = window.innerWidth
+}
+
 onMounted(async () => {
+  updateViewportWidth()
+  window.addEventListener('resize', updateViewportWidth)
   await loadWatchlists()
   await loadScans()
   await loadContinuousStatus()
@@ -317,6 +335,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', updateViewportWidth)
   if (continuousTimer) {
     window.clearInterval(continuousTimer)
     continuousTimer = null
