@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import socket
 import sys
 
 
@@ -44,6 +46,12 @@ def queue_concurrency(queue_name: str) -> int:
     return QUEUE_CONCURRENCY[queue_name]
 
 
+def worker_hostname(queue_name: str) -> str:
+    safe_queue = re.sub(r"[^A-Za-z0-9_-]+", "-", queue_name).strip("-") or "worker"
+    host = re.sub(r"[^A-Za-z0-9_.-]+", "-", socket.gethostname()).strip(".-") or "host"
+    return f"{safe_queue}-{os.getpid()}@{host}"
+
+
 def queue_for_seed(fetch_mode: str) -> str:
     if fetch_mode == "browser":
         return BROWSER_RENDER_QUEUE
@@ -77,6 +85,8 @@ def build_worker_command(queue_name: str) -> list[str]:
         str(queue_concurrency(queue_name)),
         "--prefetch-multiplier",
         "1",
+        "--hostname",
+        worker_hostname(queue_name),
     ]
     max_tasks = QUEUE_MAX_TASKS_PER_CHILD.get(queue_name)
     if max_tasks is not None:

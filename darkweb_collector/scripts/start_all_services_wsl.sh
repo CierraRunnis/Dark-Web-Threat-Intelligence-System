@@ -28,6 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$COLLECTOR_ROOT/.." && pwd)"
 DASHBOARD_ROOT="$(cd "$PROJECT_ROOT/threat-intelligence-dashboard" && pwd)"
+TOR_BRIDGE_INSTALLER="$SCRIPT_DIR/install_tor_bridge_runtime.sh"
 COLLECTOR_VENV="$COLLECTOR_ROOT/venv"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 DEFAULT_PROJECT_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
@@ -50,6 +51,11 @@ RUNTIME_DIR="$COLLECTOR_ROOT/.runtime/wsl"
 LOG_DIR="$RUNTIME_DIR/logs"
 RUNTIME_PORTS_FILE="$RUNTIME_DIR/ports.env"
 SERVICE_STATE_FILE="$RUNTIME_DIR/services.state"
+
+if [[ -f "$TOR_BRIDGE_INSTALLER" ]]; then
+  # shellcheck disable=SC1090
+  . "$TOR_BRIDGE_INSTALLER"
+fi
 
 die() {
   echo "[ERROR] $*" >&2
@@ -199,6 +205,14 @@ print(digest)
 PY
 }
 
+apt_get_update() {
+  if declare -F bridge_apt_get_update >/dev/null 2>&1; then
+    bridge_apt_get_update
+    return
+  fi
+  run_as_root apt-get update
+}
+
 install_system_dependencies() {
   local missing_packages=()
   command -v tmux >/dev/null 2>&1 || missing_packages+=("tmux")
@@ -216,25 +230,24 @@ install_system_dependencies() {
   if redis_endpoint_is_local; then
     command -v redis-server >/dev/null 2>&1 || missing_packages+=("redis-server")
   fi
-  if [[ "$DARKWEB_TOR_BRIDGE_AUTO_INSTALL" != "0" ]]; then
-    command -v tor >/dev/null 2>&1 || missing_packages+=("tor")
-    if ! command -v snowflake-client >/dev/null 2>&1 && ! command -v lyrebird >/dev/null 2>&1; then
-      missing_packages+=("snowflake-client")
-    fi
-    command -v obfs4proxy >/dev/null 2>&1 || missing_packages+=("obfs4proxy")
-  fi
 
-  if (( ${#missing_packages[@]} == 0 )); then
-    return 0
-  fi
-
-  if ! command -v apt-get >/dev/null 2>&1; then
+  if (( ${#missing_packages[@]} > 0 )) && ! command -v apt-get >/dev/null 2>&1; then
     die "missing required system packages (${missing_packages[*]}), and apt-get is unavailable for automatic install"
   fi
 
-  info "installing missing system packages: ${missing_packages[*]}"
-  run_as_root apt-get update
-  run_as_root apt-get install -y "${missing_packages[@]}"
+  if (( ${#missing_packages[@]} > 0 )); then
+    info "installing missing system packages: ${missing_packages[*]}"
+    apt_get_update
+    run_as_root apt-get install -y "${missing_packages[@]}"
+  fi
+
+  if [[ "$DARKWEB_TOR_BRIDGE_AUTO_INSTALL" != "0" ]]; then
+    if declare -F install_tor_bridge_runtime >/dev/null 2>&1; then
+      install_tor_bridge_runtime || warn "Tor bridge runtime auto-install failed; bridge status will report missing components until tor and a transport plugin are installed"
+    else
+      warn "Tor bridge installer script not found: $TOR_BRIDGE_INSTALLER"
+    fi
+  fi
 }
 
 collector_venv_ready() {
@@ -835,7 +848,7 @@ if [[ \$status -ne 0 ]]; then
 fi
 exec bash
 "
-  tmux new-window -t "${SESSION_NAME}:" -n "$window_name" "bash -lc $(printf '%q' "$wrapped_command")"
+  tmux new-window -t "${SESSION_NAME}:" -n "$window_name" "bash -c $(printf '%q' "$wrapped_command")"
 }
 
 wait_for_condition() {
@@ -844,7 +857,7 @@ wait_for_condition() {
   local started_at
   started_at="$(date +%s)"
   while true; do
-    if bash -lc "$command_body" >/dev/null 2>&1; then
+    if bash -c "$command_body" >/dev/null 2>&1; then
       return 0
     fi
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
@@ -1127,7 +1140,7 @@ while true; do
 done
 "
 
-  tmux new-session -d -s "$SESSION_NAME" -n "redis" "bash -lc $(printf '%q' "$redis_command")"
+  tmux new-session -d -s "$SESSION_NAME" -n "redis" "bash -c $(printf '%q' "$redis_command")"
   tmux setw -t "$SESSION_NAME" remain-on-exit on
 
   tmux_new_window "api" "$api_log" "$api_command"

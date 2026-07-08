@@ -1801,10 +1801,10 @@ function Start-Services {
     }
 
     $records += Start-ManagedProcess -Name "frontend" -WorkingDirectory $DashboardRoot -Body "& $node $viteCli --host 0.0.0.0 --port $FrontendPort --strictPort"
-    $records += Start-ManagedProcess -Name "worker-seed" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q seed_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info"
-    $records += Start-ManagedProcess -Name "worker-detail" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q detail_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info"
+    $records += Start-ManagedProcess -Name "worker-seed" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q seed_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"seed-http-$PID@%h`""
+    $records += Start-ManagedProcess -Name "worker-detail" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q detail_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"detail-http-$PID@%h`""
     for ($index = 1; $index -le $BrowserConcurrency; $index++) {
-        $records += Start-ManagedProcess -Name "worker-browser-$index" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q browser_render --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info"
+        $records += Start-ManagedProcess -Name "worker-browser-$index" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q browser_render --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"browser-render-$index-$PID@%h`""
     }
     $records += Start-ManagedProcess -Name "scheduler" -WorkingDirectory $CollectorRoot -Body "while (`$true) { Write-Host `"[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] enqueue-due`"; & $python $crawler enqueue-due; Start-Sleep -Seconds $SchedulerIntervalSeconds }"
     $records += Start-ManagedProcess -Name "vuln-sync" -WorkingDirectory $CollectorRoot -Body "while (`$true) { Write-Host `"[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] sync-public-vulns --limit $VulnSyncLimit`"; & $python $crawler sync-public-vulns --limit $VulnSyncLimit; Start-Sleep -Seconds $VulnSyncIntervalSeconds }"

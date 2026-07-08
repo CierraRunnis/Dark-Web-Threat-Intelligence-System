@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v apt-get >/dev/null 2>&1; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TOR_INSTALLER="$PROJECT_ROOT/darkweb_collector/scripts/install_tor_bridge_runtime.sh"
+
+if [[ -x "$TOR_INSTALLER" || -f "$TOR_INSTALLER" ]]; then
+  bash "$TOR_INSTALLER"
+elif command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y tor obfs4proxy
+else
   echo "apt-get is unavailable; skipping Tor bridge runtime install"
   exit 0
 fi
 
-sudo apt-get update
-sudo apt-get install -y tor snowflake-client obfs4proxy python3-venv xvfb x11vnc openbox
-
-tor --version | head -1
-command -v snowflake-client
-command -v obfs4proxy
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get install -y python3-venv xvfb x11vnc openbox
+fi
 
 if command -v python3 >/dev/null 2>&1; then
   tmp_venv="$(mktemp -d)"
