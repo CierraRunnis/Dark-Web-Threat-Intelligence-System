@@ -829,6 +829,8 @@ cleanup_stray_processes() {
   pkill -f "darkweb_collector.celery_app:app worker" 2>/dev/null || true
   pkill -f "scripts/crawl.py enqueue-due" 2>/dev/null || true
   pkill -f "scripts/crawl.py sync-public-vulns" 2>/dev/null || true
+  pkill -f "$HOME/.local/share/bishe/tor_bridge_runtime/torrc" 2>/dev/null || true
+  pkill -f "$HOME/.local/share/bishe/tor_bridge_runtime/snowflake.log" 2>/dev/null || true
 }
 
 tmux_new_window() {

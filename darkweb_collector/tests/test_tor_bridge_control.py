@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
 
-from darkweb_collector.tor_bridge_control import build_torrc, load_tor_bridge_settings, _client_transport_plugin, _validate_start_inputs
+from darkweb_collector.tor_bridge_control import (
+    build_torrc,
+    load_tor_bridge_settings,
+    save_tor_bridge_settings,
+    start_tor_bridge,
+    stop_tor_bridge,
+    _client_transport_plugin,
+    _validate_start_inputs,
+)
 
 
 def _settings(**overrides):
@@ -80,6 +89,39 @@ class TorBridgeControlTests(unittest.TestCase):
 
         self.assertTrue(settings["tor_executable"].endswith("tor.exe"))
         self.assertTrue(settings["transport_executable"].endswith("snowflake-client.exe"))
+
+    def test_start_rejects_busy_socks_port_before_process_start(self):
+        old_settings_path = os.environ.get("DARKWEB_TOR_BRIDGE_SETTINGS_PATH")
+        with tempfile.TemporaryDirectory() as temp_dir, socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            try:
+                os.environ["DARKWEB_TOR_BRIDGE_SETTINGS_PATH"] = str(Path(temp_dir) / "settings.json")
+                tor_path = Path(temp_dir) / "tor"
+                transport_path = Path(temp_dir) / "snowflake-client"
+                tor_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                transport_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                os.chmod(tor_path, 0o755)
+                os.chmod(transport_path, 0o755)
+                listener.bind(("127.0.0.1", 0))
+                listener.listen(1)
+                busy_port = listener.getsockname()[1]
+
+                save_tor_bridge_settings(
+                    _settings(
+                        tor_executable=str(tor_path),
+                        transport_executable=str(transport_path),
+                        socks_port=busy_port,
+                        data_directory=str(Path(temp_dir) / "runtime"),
+                    )
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "already in use"):
+                    start_tor_bridge()
+            finally:
+                stop_tor_bridge()
+                if old_settings_path is None:
+                    os.environ.pop("DARKWEB_TOR_BRIDGE_SETTINGS_PATH", None)
+                else:
+                    os.environ["DARKWEB_TOR_BRIDGE_SETTINGS_PATH"] = old_settings_path
 
 
 if __name__ == "__main__":

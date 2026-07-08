@@ -420,6 +420,17 @@ def _socks_listener_ready(settings: dict[str, Any]) -> bool:
         return False
 
 
+def _ensure_socks_port_available(settings: dict[str, Any]) -> None:
+    if not _socks_listener_ready(settings):
+        return
+    host = _string(settings.get("socks_host")) or DEFAULT_SOCKS_HOST
+    port = _int(settings.get("socks_port"), DEFAULT_SOCKS_PORT)
+    raise RuntimeError(
+        f"Tor bridge SOCKS port {host}:{port} is already in use. "
+        "Stop the existing Tor bridge process or choose another SOCKS port."
+    )
+
+
 def _read_log_tail(path: str, max_bytes: int = 65536) -> str:
     log_path = Path(path)
     if not log_path.exists():
@@ -472,6 +483,7 @@ def start_tor_bridge() -> dict[str, Any]:
     with _process_lock:
         if _process_running():
             return get_tor_bridge_status()
+        _ensure_socks_port_available(settings)
         torrc_path = write_torrc(settings)
         Path(paths["data_directory"]).mkdir(parents=True, exist_ok=True)
         log_handle = Path(paths["log_path"]).open("a", encoding="utf-8")
