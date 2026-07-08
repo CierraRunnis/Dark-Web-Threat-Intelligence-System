@@ -839,6 +839,7 @@ tmux_new_window() {
   shift 2
   local command_body="$*"
   local wrapped_command
+  : > "$log_path"
   wrapped_command="
 set +e
 exec > >(tee -a $(printf '%q' "$log_path")) 2>&1
@@ -1058,6 +1059,7 @@ start_services() {
   local vulnerability_sync_log="$LOG_DIR/vuln-sync.log"
 
   local redis_command
+  : > "$redis_log"
   redis_command="
 set -euo pipefail
 exec > >(tee -a $(printf '%q' "$redis_log")) 2>&1
