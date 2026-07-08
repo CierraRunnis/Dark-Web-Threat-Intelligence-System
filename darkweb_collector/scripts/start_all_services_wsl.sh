@@ -914,14 +914,13 @@ try:
 except Exception:
     raise SystemExit(1)
 
-site_health = payload.get("site_health")
-raise SystemExit(0 if isinstance(site_health, list) and len(site_health) > 0 else 1)
+raise SystemExit(0 if payload.get("status") == "ok" else 1)
 PY
 }
 
 frontend_ready() {
   curl -fsS "$FRONTEND_URL" >/dev/null 2>&1 || return 1
-  api_ready "$FRONTEND_URL/api/jobs"
+  api_ready "$FRONTEND_URL/api/health"
 }
 
 test_port_bindable() {
@@ -1152,10 +1151,9 @@ import json
 import sys
 from urllib.request import urlopen
 
-with urlopen('$API_JOBS_URL', timeout=3) as response:
+with urlopen('$API_HEALTH_URL', timeout=3) as response:
     payload = json.load(response)
-site_health = payload.get('site_health')
-raise SystemExit(0 if isinstance(site_health, list) and len(site_health) > 0 else 1)
+raise SystemExit(0 if payload.get('status') == 'ok' else 1)
 PY" "$SERVICE_WAIT_SECONDS"; then
     warn "api health check did not become ready within ${SERVICE_WAIT_SECONDS}s"
     describe_port_owner "$API_PORT"
@@ -1197,10 +1195,9 @@ import json
 import sys
 from urllib.request import urlopen
 
-with urlopen('$FRONTEND_URL/api/jobs', timeout=3) as response:
+with urlopen('$FRONTEND_URL/api/health', timeout=3) as response:
     payload = json.load(response)
-site_health = payload.get('site_health')
-raise SystemExit(0 if isinstance(site_health, list) and len(site_health) > 0 else 1)
+raise SystemExit(0 if payload.get('status') == 'ok' else 1)
 PY" "$SERVICE_WAIT_SECONDS"; then
     warn "frontend did not become ready within ${SERVICE_WAIT_SECONDS}s"
     describe_port_owner "$FRONTEND_PORT"
@@ -1251,8 +1248,8 @@ show_status() {
     info "redis: down"
   fi
 
-  if api_ready "$API_JOBS_URL"; then
-    info "api: up ($API_JOBS_URL)"
+  if api_ready "$API_HEALTH_URL"; then
+    info "api: up ($API_HEALTH_URL)"
   else
     info "api: down"
     describe_port_owner "$API_PORT"
