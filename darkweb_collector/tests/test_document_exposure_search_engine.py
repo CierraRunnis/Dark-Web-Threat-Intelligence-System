@@ -10,6 +10,7 @@ from darkweb_collector.document_exposure import (
     DiscoverySource,
     _detect_search_block_reason,
     _parse_search_engine_candidates,
+    _search_candidates_for_source,
     build_document_exposure_summary,
     list_document_exposures_payload,
     save_watchlist_payload,
@@ -66,6 +67,51 @@ class SearchEngineDocumentExposureTests(unittest.TestCase):
         self.assertEqual(candidates[0]["url"], "https://www.catl.com/")
         self.assertEqual(candidates[0]["title"], "宁德时代 · CATL")
         self.assertEqual(candidates[0]["source_detail"], "www.catl.com")
+
+    def test_search_engine_scan_uses_browser_fallback_after_http_challenge(self):
+        source = DiscoverySource("bing_search", "Bing", "https://www.bing.com/search?q={query}", "search_engine")
+        blocked_html = "<html><title>Security verification</title><body>captcha</body></html>"
+        browser_html = """
+        <html><body>
+          <ol id="b_results">
+            <li class="b_algo">
+              <a href="https://www.bing.com/ck/a?!&&u=a1aHR0cHM6Ly93d3cuY2F0bC5jb20vZW4v">
+                CATL
+              </a>
+            </li>
+          </ol>
+        </body></html>
+        """
+
+        with patch("darkweb_collector.document_exposure._fetch_html", return_value=blocked_html), patch(
+            "darkweb_collector.document_exposure.fetch_page_artifacts_with_session",
+            return_value={
+                "url": "https://www.bing.com/search?q=CATL&rdr=1",
+                "title": "CATL - Search",
+                "html": browser_html,
+                "screenshot_png": b"",
+            },
+        ):
+            candidates = _search_candidates_for_source(source, "https://www.bing.com/search?q=CATL", "CATL")
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["url"], "https://www.catl.com/en/")
+
+    def test_so360_result_page_login_links_are_filtered(self):
+        source = DiscoverySource("so360_search", "360 Search", "https://www.so.com/s?q={query}", "search_engine")
+        html = """
+        <html><head><title>CATL_360搜索</title></head><body id="main">
+          <a href="http://i.360.cn/login?src=pcw_newso">登录</a>
+          <a href="http://i.360.cn/reg?src=pcw_newso">注册</a>
+          <a href="http://www.baidu.com/s?wd=CATL">百度搜索</a>
+          <a href="https://example.com/reports/CATL-risk-report.pdf">CATL risk report.pdf</a>
+        </body></html>
+        """
+
+        self.assertEqual(_detect_search_block_reason(source, html, "https://www.so.com/s?q=CATL"), "")
+        candidates = _parse_search_engine_candidates(source, html, "https://www.so.com/s?q=CATL")
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["url"], "https://example.com/reports/CATL-risk-report.pdf")
 
     def test_search_engine_scan_persists_generic_web_result(self):
         watchlist = save_watchlist_payload(

@@ -224,6 +224,24 @@ SEARCH_RESULT_SKIP_SUFFIXES = {
     ".gif",
     ".webp",
 }
+SEARCH_ENGINE_UTILITY_HOSTS = {
+    "baidu.com",
+    "www.baidu.com",
+    "bing.com",
+    "www.bing.com",
+    "so.com",
+    "www.so.com",
+    "i.360.cn",
+    "map.360.cn",
+    "e.360.cn",
+}
+SEARCH_ENGINE_UTILITY_TITLES = {
+    "\u767b\u5f55",
+    "\u6ce8\u518c",
+    "\u767e\u5ea6\u641c\u7d22",
+    "\u5fc5\u5e94\u641c\u7d22",
+    "bing",
+}
 
 
 DEFAULT_TERMS = [
@@ -1663,9 +1681,33 @@ def _fetch_netdisk_api_candidates(source: DiscoverySource, term: str) -> list[di
     return _parse_netdisk_api_candidates(source, payload, term)
 
 
+def _looks_like_search_result_page(source: DiscoverySource, html: str, url: str) -> bool:
+    lowered = f"{html}\n{url}".lower()
+    if source.key == "bing_search":
+        return (
+            "class=\"b_algo\"" in lowered
+            or "class='b_algo'" in lowered
+            or "id=\"b_results\"" in lowered
+            or "id='b_results'" in lowered
+        )
+    if source.key == "baidu_search":
+        return (
+            "\u767e\u5ea6\u641c\u7d22" in html
+            or "id=\"content_left\"" in lowered
+            or "id='content_left'" in lowered
+        )
+    if source.key == "so360_search":
+        return (
+            "360\u641c\u7d22" in html
+            or "id=\"main\"" in lowered
+            or "id='main'" in lowered
+        )
+    return False
+
+
 def _detect_search_block_reason(source: DiscoverySource, html: str, url: str) -> str:
     lowered = f"{html}\n{url}".lower()
-    if source.key == "bing_search" and ("class=\"b_algo\"" in html or "id=\"b_results\"" in html):
+    if source.category == "search_engine" and _looks_like_search_result_page(source, html, url):
         return ""
     if "安全验证" in html or "captcha" in lowered or "verify you are human" in lowered:
         return f"{source.key}:captcha_or_security_verification"
@@ -2112,6 +2154,20 @@ def _is_search_navigation_text(text: str) -> bool:
     return normalized in {item.lower() for item in navigation_tokens}
 
 
+def _is_search_utility_candidate(source: DiscoverySource, url: str, title: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    normalized_title = _normalize_text(title).lower()
+    if host in SEARCH_ENGINE_UTILITY_HOSTS:
+        return True
+    if source.key == "so360_search" and host.endswith(".360.cn"):
+        return True
+    if host == "i.360.cn" and path.startswith(("/login", "/reg")):
+        return True
+    return normalized_title in {item.lower() for item in SEARCH_ENGINE_UTILITY_TITLES}
+
+
 def _parse_search_engine_candidates(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
     parser = _AnchorParser(include_noscript=True)
     parser.feed(html)
@@ -2123,6 +2179,8 @@ def _parse_search_engine_candidates(source: DiscoverySource, html: str, requeste
             continue
         target_url = _search_result_target_url(source, item.get("href") or "", requested_url)
         if not target_url or target_url in seen:
+            continue
+        if _is_search_utility_candidate(source, target_url, title):
             continue
         seen.add(target_url)
         host = urlparse(target_url).netloc.lower()
@@ -2330,9 +2388,42 @@ def _build_search_urls(term: str, source_families: list[str] | None = None) -> l
     return [(source, source.search_url_template.format(query=encoded)) for source in _ordered_discovery_sources(source_families)]
 
 
+def _search_engine_candidates_with_browser(source: DiscoverySource, url: str) -> list[dict[str, Any]]:
+    artifacts = fetch_page_artifacts_with_session(
+        url,
+        wait_seconds=5,
+        timeout_seconds=45,
+    )
+    current_url = _normalize_text(artifacts.get("url")) or url
+    search_html = str(artifacts.get("html") or "")
+    block_reason = _detect_search_block_reason(source, search_html, current_url)
+    candidates = _parse_candidates_from_html(source, search_html, current_url)
+    if block_reason and not candidates:
+        raise RuntimeError(f"{block_reason}:browser_fallback")
+    return candidates
+
+
 def _search_candidates_for_source(source: DiscoverySource, url: str, term: str) -> list[dict[str, Any]]:
     if source.fetch_mode in {"pansou_api", "panhub_api"}:
         return _fetch_netdisk_api_candidates(source, term)
+    if source.category == "search_engine":
+        http_error: Exception | None = None
+        try:
+            search_html = _fetch_html(url, timeout=30)
+            block_reason = _detect_search_block_reason(source, search_html, url)
+            if block_reason:
+                raise RuntimeError(block_reason)
+            candidates = _parse_candidates_from_html(source, search_html, url)
+            if candidates:
+                return candidates
+        except Exception as exc:
+            http_error = exc
+        try:
+            return _search_engine_candidates_with_browser(source, url)
+        except Exception as exc:
+            if http_error is not None:
+                raise RuntimeError(f"{http_error}; browser_fallback:{exc}") from exc
+            raise
     search_html = _fetch_html(url, timeout=30)
     block_reason = _detect_search_block_reason(source, search_html, url)
     if block_reason:
