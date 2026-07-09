@@ -69,6 +69,20 @@ class SearchEngineDocumentExposureTests(unittest.TestCase):
         self.assertEqual(candidates[0]["title"], "宁德时代 · CATL")
         self.assertEqual(candidates[0]["source_detail"], "www.catl.com")
 
+    def test_search_engine_parser_prefers_descriptive_duplicate_title(self):
+        source = DiscoverySource("bing_search", "Bing", "https://www.bing.com/search?q={query}", "search_engine")
+        html = """
+        <html><body>
+          <a href="https://example.com/breach/23andme">example.comhttps://example.com</a>
+          <a href="https://example.com/breach/23andme">23andMe Data Breach: affected records</a>
+        </body></html>
+        """
+
+        candidates = _parse_search_engine_candidates(source, html, "https://www.bing.com/search?q=23andMe")
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["title"], "23andMe Data Breach: affected records")
+
     def test_search_engine_scan_uses_browser_fallback_after_http_challenge(self):
         source = DiscoverySource("bing_search", "Bing", "https://www.bing.com/search?q={query}", "search_engine")
         blocked_html = "<html><title>Security verification</title><body>captcha</body></html>"

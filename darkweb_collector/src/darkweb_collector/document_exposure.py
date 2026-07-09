@@ -2376,33 +2376,57 @@ def _is_search_utility_candidate(source: DiscoverySource, url: str, title: str) 
     return normalized_title in {item.lower() for item in SEARCH_ENGINE_UTILITY_TITLES}
 
 
+def _search_result_title_quality(title: str, target_url: str) -> int:
+    text = _normalize_text(title)
+    if not text:
+        return 0
+    host = urlparse(target_url).netloc.lower().removeprefix("www.")
+    lowered = text.lower()
+    compact = re.sub(r"\s+", "", lowered)
+    score = min(len(text), 120)
+    if "http://" in lowered or "https://" in lowered:
+        score -= 80
+    if host and host in compact:
+        score -= 30
+    if re.fullmatch(r"[\w.-]+\.[a-z]{2,}(?:https?://.*)?", compact):
+        score -= 50
+    return score
+
+
 def _parse_search_engine_candidates(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
     parser = _AnchorParser(include_noscript=True)
     parser.feed(html)
     candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: dict[str, dict[str, Any]] = {}
     for item in parser.anchors:
         title = _normalize_text(item.get("text"))
         if _is_search_navigation_text(title):
             continue
         target_url = _search_result_target_url(source, item.get("href") or "", requested_url)
-        if not target_url or target_url in seen:
+        if not target_url:
             continue
         if _is_search_utility_candidate(source, target_url, title):
             continue
-        seen.add(target_url)
+        if target_url in seen:
+            candidate = seen[target_url]
+            if _search_result_title_quality(title, target_url) > _search_result_title_quality(str(candidate.get("title") or ""), target_url):
+                preview_text = _normalize_text(" ".join([title, target_url]))
+                candidate["title"] = title or target_url
+                candidate["preview_text"] = preview_text
+                candidate["file_names"] = _extract_file_names(preview_text, [])
+            continue
         host = urlparse(target_url).netloc.lower()
         preview_text = _normalize_text(" ".join([title, target_url]))
-        candidates.append(
-            {
-                "url": target_url,
-                "title": title or target_url,
-                "source": source.key,
-                "source_detail": host,
-                "preview_text": preview_text,
-                "file_names": _extract_file_names(preview_text, []),
-            }
-        )
+        candidate = {
+            "url": target_url,
+            "title": title or target_url,
+            "source": source.key,
+            "source_detail": host,
+            "preview_text": preview_text,
+            "file_names": _extract_file_names(preview_text, []),
+        }
+        seen[target_url] = candidate
+        candidates.append(candidate)
         if len(candidates) >= SEARCH_ENGINE_RESULT_LIMIT:
             break
     return candidates
