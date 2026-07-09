@@ -85,6 +85,97 @@ SENSITIVE_KEYWORDS = (
     "名录",
     "清单",
 )
+SENSITIVE_CONTEXT_SIGNALS = (
+    "leak",
+    "leaked",
+    "leaks",
+    "leakage",
+    "breach",
+    "breached",
+    "exposed",
+    "exposure",
+    "disclosure",
+    "confidential",
+    "internal",
+    "secret",
+    "password",
+    "credential",
+    "database",
+    "source code",
+    "customer",
+    "employee",
+    "supplier",
+    "contract",
+    "quotation",
+    "bid",
+    "tender",
+    "file",
+    "files",
+    "document",
+    "documents",
+    "泄露",
+    "泄漏",
+    "泄密",
+    "外泄",
+    "被泄露",
+    "数据泄露",
+    "文件泄露",
+    "内部",
+    "机密",
+    "保密",
+    "敏感",
+    "密码",
+    "账号",
+    "凭据",
+    "数据库",
+    "源代码",
+    "客户",
+    "员工",
+    "供应商",
+    "合同",
+    "报价",
+    "招标",
+    "投标",
+    "通讯录",
+    "名单",
+    "清单",
+    "财务",
+    "设计文件",
+)
+CONTEXTUAL_TERM_TYPES = {
+    "sensitive_keyword",
+    "leak_keyword",
+    "risk_keyword",
+    "confidential_keyword",
+    "credential_keyword",
+    "internal_keyword",
+    "file_leak",
+}
+ENTITY_TOKEN_STOPWORDS = {
+    "and",
+    "or",
+    "the",
+    "data",
+    "file",
+    "files",
+    "document",
+    "documents",
+    "report",
+    "reports",
+    "annual",
+    "internal",
+    "confidential",
+    "secret",
+    "leak",
+    "leaked",
+    "leaks",
+    "leakage",
+    "breach",
+    "breached",
+    "exposed",
+    "exposure",
+    "disclosure",
+}
 FILE_NAME_EXTENSIONS = r"pdf|docx?|xlsx?|pptx?|zip|rar|7z|csv|txt|jpe?g|png|gif|webp|bmp|mov|mp4|m4v|avi|mkv|mp3|m4a|wav"
 FILE_NAME_RE = re.compile(rf"\b[\w\-. ]+\.(?:{FILE_NAME_EXTENSIONS})\b", re.IGNORECASE)
 LOOSE_FILE_NAME_RE = re.compile(rf"[^\n\r|｜<>\"']{{1,180}}\.(?:{FILE_NAME_EXTENSIONS})", re.IGNORECASE)
@@ -1727,9 +1818,102 @@ def _load_storage_state_path(platform_key: str) -> str | None:
     return str(path) if path.exists() else None
 
 
-def _matched_terms(title: str, preview_text: str, file_names: list[str], terms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _compact_match_text(value: str) -> str:
+    return re.sub(r"\s+", "", _normalize_text(value).lower())
+
+
+def _contains_context_token(haystack: str, compact_haystack: str, token: str) -> bool:
+    normalized = _normalize_text(token).lower()
+    if not normalized:
+        return False
+    compact_token = re.sub(r"\s+", "", normalized)
+    if not compact_token:
+        return False
+    if re.fullmatch(r"[a-z0-9_.-]+", normalized):
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", haystack))
+    return normalized in haystack or compact_token in compact_haystack
+
+
+def _context_signal_hits(value: str) -> list[str]:
+    haystack = _normalize_text(value).lower()
+    compact_haystack = _compact_match_text(value)
+    hits: list[str] = []
+    seen: set[str] = set()
+    for signal in SENSITIVE_CONTEXT_SIGNALS:
+        normalized = _normalize_text(signal).lower()
+        if normalized and normalized not in seen and _contains_context_token(haystack, compact_haystack, normalized):
+            seen.add(normalized)
+            hits.append(signal)
+    return hits
+
+
+def _strip_context_signals(value: str) -> str:
+    text = _normalize_text(value).lower()
+    for signal in sorted(SENSITIVE_CONTEXT_SIGNALS, key=len, reverse=True):
+        normalized = _normalize_text(signal).lower()
+        if not normalized:
+            continue
+        text = text.replace(normalized, " ")
+        compact_signal = re.sub(r"\s+", "", normalized)
+        if compact_signal != normalized:
+            text = text.replace(compact_signal, " ")
+    return text
+
+
+def _entity_tokens_from_value(value: str) -> list[str]:
+    stripped = _strip_context_signals(value)
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in re.findall(r"[a-z0-9][a-z0-9_.-]{1,}|[\u4e00-\u9fff]{2,}", stripped, re.IGNORECASE):
+        normalized = _normalize_text(token).lower().strip("._-")
+        if not normalized or normalized in seen or normalized in ENTITY_TOKEN_STOPWORDS:
+            continue
+        if normalized.isdigit():
+            continue
+        seen.add(normalized)
+        tokens.append(normalized)
+    return tokens
+
+
+def _watchlist_entity_tokens(organization_name: str, terms: list[dict[str, Any]]) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    values = [_normalize_text(organization_name)]
+    values.extend(_normalize_text(item.get("term")) for item in terms)
+    for value in values:
+        for token in _entity_tokens_from_value(value):
+            if token not in seen:
+                seen.add(token)
+                tokens.append(token)
+    return tokens
+
+
+def _context_entity_hits(haystack: str, compact_haystack: str, entity_tokens: list[str]) -> list[str]:
+    hits: list[str] = []
+    for token in entity_tokens:
+        if _contains_context_token(haystack, compact_haystack, token):
+            hits.append(token)
+    return hits
+
+
+def _is_contextual_monitor_term(term: dict[str, Any]) -> bool:
+    term_type = _normalize_text(term.get("term_type")).lower()
+    if term_type in CONTEXTUAL_TERM_TYPES:
+        return True
+    return bool(_context_signal_hits(_normalize_text(term.get("term"))))
+
+
+def _matched_terms(
+    title: str,
+    preview_text: str,
+    file_names: list[str],
+    terms: list[dict[str, Any]],
+    *,
+    organization_name: str = "",
+) -> list[dict[str, Any]]:
     haystack = " ".join([title, preview_text, " ".join(file_names)]).lower()
-    compact_haystack = re.sub(r"\s+", "", haystack)
+    compact_haystack = _compact_match_text(haystack)
+    entity_tokens = _watchlist_entity_tokens(organization_name, terms)
     matches = []
     seen: set[str] = set()
     for term in terms:
@@ -1739,12 +1923,31 @@ def _matched_terms(title: str, preview_text: str, file_names: list[str], terms: 
         lowered = value.lower()
         compact_lowered = re.sub(r"\s+", "", lowered)
         if (lowered in haystack or compact_lowered in compact_haystack) and lowered not in seen:
+            if _is_contextual_monitor_term(term) and entity_tokens and not _context_entity_hits(haystack, compact_haystack, entity_tokens):
+                continue
             seen.add(lowered)
             matches.append(
                 {
                     "term": value,
                     "term_type": str(term.get("term_type") or "custom"),
                     "weight": int(term.get("weight") or 0),
+                }
+            )
+            continue
+        if lowered in seen or not _is_contextual_monitor_term(term):
+            continue
+        entity_hits = _context_entity_hits(haystack, compact_haystack, entity_tokens or _entity_tokens_from_value(value))
+        signal_hits = _context_signal_hits(haystack)
+        if entity_hits and signal_hits:
+            seen.add(lowered)
+            matches.append(
+                {
+                    "term": value,
+                    "term_type": str(term.get("term_type") or "custom"),
+                    "weight": int(term.get("weight") or 0),
+                    "match_type": "contextual_sensitive",
+                    "matched_entities": entity_hits[:5],
+                    "matched_signals": signal_hits[:8],
                 }
             )
     return matches
@@ -1763,7 +1966,12 @@ def _score_document_hit(title: str, preview_text: str, file_names: list[str], ma
         confidence_score += 10
     if access_state == "public":
         confidence_score += 10
-    sensitive_hits = [token for token in SENSITIVE_KEYWORDS if token in title or token in preview_text]
+    signal_text = " ".join([title, preview_text, " ".join(file_names)])
+    sensitive_hits = [
+        token
+        for token in (*SENSITIVE_KEYWORDS, *SENSITIVE_CONTEXT_SIGNALS)
+        if _contains_context_token(signal_text.lower(), _compact_match_text(signal_text), str(token))
+    ]
     risk_score = confidence_score + min(30, len(sensitive_hits) * 8)
     if len(file_names) >= 3:
         risk_score += 10
@@ -3178,6 +3386,7 @@ def scan_watchlist_once(
                     detail["preview_text"],
                     detail["file_names"],
                     terms,
+                    organization_name=str(watchlist.get("organization_name") or ""),
                 )
                 if not matches:
                     continue

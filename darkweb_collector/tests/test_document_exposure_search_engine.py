@@ -9,6 +9,7 @@ from unittest.mock import patch
 from darkweb_collector.document_exposure import (
     DiscoverySource,
     _detect_search_block_reason,
+    _matched_terms,
     _parse_search_engine_candidates,
     _search_candidates_for_source,
     build_document_exposure_summary,
@@ -164,6 +165,61 @@ class SearchEngineDocumentExposureTests(unittest.TestCase):
         summary = build_document_exposure_summary(source_family="search_engine")
         self.assertEqual(summary["totalHits"], 1)
         self.assertEqual(summary["lastHitCount"], 1)
+
+    def test_search_engine_scan_persists_contextual_sensitive_result(self):
+        watchlist = save_watchlist_payload(
+            {
+                "name": "Sensitive Search Engine Test",
+                "organization_name": "Tesla",
+                "enabled": True,
+                "source_families": ["search_engine"],
+                "file_types": ["pdf"],
+                "page_limit": 1,
+                "detail_fetch": False,
+                "terms": [
+                    {
+                        "term": "Tesla data breach",
+                        "term_type": "leak_keyword",
+                        "weight": 18,
+                        "enabled": True,
+                    }
+                ],
+            }
+        )
+        html = """
+        <html><body>
+          <a href="https://example.com/leaks/tesla-employee-files.pdf">
+            Tesla confirms breach involving leaked employee files.pdf
+          </a>
+        </body></html>
+        """
+
+        with patch("darkweb_collector.document_exposure._fetch_html", return_value=html):
+            result = scan_watchlist_once(
+                int(watchlist["id"]),
+                source_families=["search_engine"],
+                file_types=["pdf"],
+                page_limit=1,
+                detail_fetch=False,
+            )
+
+        self.assertEqual(result["hits"], 1)
+        rows = list_document_exposures_payload(source_family="search_engine", limit=20)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["matchedTerms"][0]["term"], "Tesla data breach")
+        self.assertEqual(rows[0]["matchedTerms"][0]["match_type"], "contextual_sensitive")
+        self.assertIn("breach", rows[0]["matchedTerms"][0]["matched_signals"])
+
+    def test_sensitive_keyword_only_requires_watchlist_entity(self):
+        matches = _matched_terms(
+            "Unrelated internal employee files.pdf",
+            "",
+            [],
+            [{"term": "internal", "term_type": "sensitive_keyword", "weight": 6}],
+            organization_name="CATL",
+        )
+
+        self.assertEqual(matches, [])
 
 
 if __name__ == "__main__":
