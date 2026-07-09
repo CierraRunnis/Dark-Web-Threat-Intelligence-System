@@ -119,7 +119,6 @@ const navTree = [
     title: '文件监测',
     icon: 'Files',
     children: [
-      { path: '/document-exposure/search-engine', title: '搜索引擎监测', icon: 'Search' },
       { path: '/document-exposure/netdisk', title: '网盘监测', icon: 'Share' },
       { path: '/document-exposure/document-library', title: '文库监测', icon: 'Files' },
       { path: '/document-exposure/code-monitoring', title: '代码监测', icon: 'Connection' },

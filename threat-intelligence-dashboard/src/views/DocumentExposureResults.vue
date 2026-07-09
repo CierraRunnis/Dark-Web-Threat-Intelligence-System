@@ -6,7 +6,7 @@
           <EventTableToolbar
             eyebrow="命中结果"
             title="文件监测命中列表"
-            description="筛选并核验文档平台、网盘聚合与搜索引擎中的疑似文件暴露命中。"
+            description="筛选并核验文档平台与网盘聚合中的疑似文件暴露命中。"
             :search-value="searchValue"
             search-placeholder="搜索标题、平台、企业名"
             :active-filters="activeFilters"
@@ -15,7 +15,6 @@
             <template #filters>
               <el-select v-model="sourceFamilyFilter" placeholder="来源家族" style="width: 160px" clearable>
                 <el-option label="网盘聚合" value="netdisk_aggregator" />
-                <el-option label="搜索引擎" value="search_engine" />
                 <el-option label="文档平台" value="document_library" />
               </el-select>
               <el-select v-model="platformFilter" placeholder="平台" style="width: 160px" clearable>
@@ -122,7 +121,6 @@ const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWid
 
 const sourceFamilyLabelMap = {
   netdisk_aggregator: '网盘聚合',
-  search_engine: '搜索引擎',
   document_library: '文档平台',
 }
 

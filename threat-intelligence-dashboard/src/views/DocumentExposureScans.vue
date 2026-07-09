@@ -60,7 +60,6 @@
               <span>来源家族</span>
               <el-select v-model="scanForm.sourceFamilies" multiple collapse-tags placeholder="选择来源家族">
                 <el-option label="网盘聚合" value="netdisk_aggregator" />
-                <el-option label="搜索引擎" value="search_engine" />
                 <el-option label="文档平台" value="document_library" />
               </el-select>
             </div>
@@ -201,7 +200,6 @@ const statusLabelMap = {
 
 const sourceFamilyLabelMap = {
   netdisk_aggregator: '网盘聚合',
-  search_engine: '搜索引擎',
   document_library: '文档平台',
 }
 
@@ -281,7 +279,9 @@ function defaultPageLimit(sourceFamilies) {
 function applyWatchlist(payload) {
   if (!payload) return
   scanForm.watchlistId = payload.id
-  scanForm.sourceFamilies = Array.isArray(payload.source_families) ? [...payload.source_families] : []
+  scanForm.sourceFamilies = Array.isArray(payload.source_families)
+    ? payload.source_families.filter((item) => item === 'netdisk_aggregator' || item === 'document_library')
+    : []
   scanForm.fileTypes = Array.isArray(payload.file_types) ? [...payload.file_types] : []
   scanForm.pageLimit = Number(payload.page_limit || defaultPageLimit(scanForm.sourceFamilies))
   scanForm.detailFetch = isNetdiskOnly(scanForm.sourceFamilies) ? false : Boolean(payload.detail_fetch ?? true)

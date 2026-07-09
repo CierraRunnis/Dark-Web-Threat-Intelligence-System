@@ -52,7 +52,6 @@ from darkweb_collector.document_exposure_browser import (
 )
 from darkweb_collector.document_exposure_platforms import (
     PLATFORMS,
-    SEARCH_ENGINES,
     ExposurePlatform,
     get_exposure_platform,
     monitored_domains,
@@ -225,9 +224,6 @@ class DiscoverySource:
 DISCOVERY_SOURCES: tuple[DiscoverySource, ...] = (
     DiscoverySource("pansou", "PanSou", "pansou://search?kw={query}", "netdisk_search", "pansou_api"),
     DiscoverySource("panhub", "PanHub", "panhub://search?kw={query}", "netdisk_search", "panhub_api"),
-    DiscoverySource("baidu_search", "百度搜索", "https://www.baidu.com/s?wd={query}", "search_engine"),
-    DiscoverySource("bing_search", "Bing", "https://www.bing.com/search?q={query}", "search_engine"),
-    DiscoverySource("so360_search", "360搜索", "https://www.so.com/s?q={query}", "search_engine"),
     DiscoverySource("xiaobaipan", "小白盘", "https://www.xiaobaipan.com/s/{query}.html", "netdisk_search"),
     DiscoverySource("xiaobudian", "小不点搜索", "https://www.xiaoso.net/search?wd={query}", "netdisk_search"),
     DiscoverySource("lingfengyun", "凌风云", "https://www.lingfengyun.com/search?q={query}", "netdisk_search"),
@@ -303,49 +299,17 @@ NETDISK_SCAN_MODE_ENV = "NETDISK_SCAN_MODE"
 NETDISK_SCAN_MODE_LEGACY = "legacy"
 NETDISK_SCAN_MODE_INCREMENTAL = "incremental"
 DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_ENV = "DARKWEB_DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_SOURCES"
-SEARCH_ENGINE_RESULT_LIMIT = 20
-SEARCH_RESULT_SKIP_SUFFIXES = {
-    ".css",
-    ".js",
-    ".ico",
-    ".svg",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".webp",
-}
-SEARCH_ENGINE_UTILITY_HOSTS = {
-    "baidu.com",
-    "www.baidu.com",
-    "bing.com",
-    "www.bing.com",
-    "so.com",
-    "www.so.com",
-    "i.360.cn",
-    "map.360.cn",
-    "e.360.cn",
-}
-SEARCH_ENGINE_UTILITY_TITLES = {
-    "\u767b\u5f55",
-    "\u6ce8\u518c",
-    "\u767e\u5ea6\u641c\u7d22",
-    "\u5fc5\u5e94\u641c\u7d22",
-    "bing",
-}
-
-
 DEFAULT_TERMS = [
     {"term": "示例企业", "term_type": "company_name", "weight": 15, "enabled": True},
     {"term": "example.com", "term_type": "domain", "weight": 12, "enabled": True},
     {"term": "内部", "term_type": "sensitive_keyword", "weight": 6, "enabled": True},
 ]
-DEFAULT_SOURCE_FAMILIES = ["netdisk_aggregator", "search_engine", "document_library"]
+DEFAULT_SOURCE_FAMILIES = ["netdisk_aggregator", "document_library"]
+SUPPORTED_SOURCE_FAMILIES = set(DEFAULT_SOURCE_FAMILIES)
 DEFAULT_PAGE_LIMIT = 4
 DOCUMENT_LIBRARY_DEFAULT_PAGE_LIMIT = 10
 DEFAULT_FILE_TYPES = ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "zip", "rar", "7z", "txt", "csv"]
 SOURCE_FAMILY_LABELS = {
-    "search_engine": "搜索引擎监测",
     "netdisk_aggregator": "网盘监测",
     "document_library": "文库监测",
     "other": "其他来源",
@@ -434,8 +398,6 @@ def _source_family_for_source(source: DiscoverySource | None = None, platform_ty
     category = str((source.category if source is not None else platform_type) or "").strip().lower()
     if category == "netdisk_search":
         return "netdisk_aggregator"
-    if category == "search_engine":
-        return "search_engine"
     if category == "document_library":
         return "document_library"
     if category == "netdisk_share":
@@ -443,7 +405,7 @@ def _source_family_for_source(source: DiscoverySource | None = None, platform_ty
     return "other"
 
 
-def _normalize_source_families(value: Any) -> list[str]:
+def _normalize_source_families(value: Any, *, default_when_empty: bool = True) -> list[str]:
     items = _parse_json(value, value)
     if isinstance(items, str):
         items = [part.strip() for part in items.split(",")]
@@ -453,10 +415,12 @@ def _normalize_source_families(value: Any) -> list[str]:
     rows: list[str] = []
     for item in items:
         normalized = _normalize_text(item)
-        if normalized and normalized not in seen:
+        if normalized in SUPPORTED_SOURCE_FAMILIES and normalized not in seen:
             seen.add(normalized)
             rows.append(normalized)
-    return rows or list(DEFAULT_SOURCE_FAMILIES)
+    if rows:
+        return rows
+    return list(DEFAULT_SOURCE_FAMILIES) if default_when_empty else []
 
 
 def _default_page_limit_for_source_families(source_families: Any) -> int:
@@ -565,7 +529,7 @@ def ensure_netdisk_source_health_defaults() -> None:
 
 
 def _ordered_discovery_sources(source_families: list[str] | None = None) -> list[DiscoverySource]:
-    selected = set(_normalize_source_families(source_families)) if source_families else None
+    selected = set(_normalize_source_families(source_families, default_when_empty=False)) if source_families else None
     sources: list[DiscoverySource] = []
     for source in DISCOVERY_SOURCES:
         source_family = _source_family_for_source(source)
@@ -589,7 +553,7 @@ def _ordered_discovery_sources(source_families: list[str] | None = None) -> list
 
 
 def _netdisk_detail_fetch_default(source_families: list[str], configured_default: Any) -> bool:
-    if source_families in (["netdisk_aggregator"], ["search_engine"]):
+    if source_families == ["netdisk_aggregator"]:
         return False
     return bool(configured_default)
 
@@ -819,28 +783,7 @@ def _platform_label(platform_key: str | None, discovery_source_key: str | None =
     key = _normalize_text(platform_key)
     if key in PLATFORMS:
         return get_exposure_platform(key).label
-    for item in SEARCH_ENGINES:
-        if item.key == key:
-            return item.label
     return key or _discovery_source_label(discovery_source_key)
-
-
-def _search_result_resource_fingerprint(source_key: str, url: str) -> str:
-    parsed = urlparse(str(url or ""))
-    if not parsed.scheme or not parsed.netloc:
-        return ""
-    normalized = urlunparse(
-        (
-            parsed.scheme.lower(),
-            parsed.netloc.lower(),
-            parsed.path.rstrip("/") or "/",
-            "",
-            parsed.query,
-            "",
-        )
-    )
-    digest = hashlib.sha1(normalized.encode("utf-8", "ignore")).hexdigest()[:24]
-    return f"search_result:{_normalize_text(source_key)}:{digest}"
 
 
 def _extract_access_code(*texts: Any) -> str:
@@ -1772,34 +1715,8 @@ def _fetch_netdisk_api_candidates(source: DiscoverySource, term: str) -> list[di
     return _parse_netdisk_api_candidates(source, payload, term)
 
 
-def _looks_like_search_result_page(source: DiscoverySource, html: str, url: str) -> bool:
-    lowered = f"{html}\n{url}".lower()
-    if source.key == "bing_search":
-        return (
-            "class=\"b_algo\"" in lowered
-            or "class='b_algo'" in lowered
-            or "id=\"b_results\"" in lowered
-            or "id='b_results'" in lowered
-        )
-    if source.key == "baidu_search":
-        return (
-            "\u767e\u5ea6\u641c\u7d22" in html
-            or "id=\"content_left\"" in lowered
-            or "id='content_left'" in lowered
-        )
-    if source.key == "so360_search":
-        return (
-            "360\u641c\u7d22" in html
-            or "id=\"main\"" in lowered
-            or "id='main'" in lowered
-        )
-    return False
-
-
 def _detect_search_block_reason(source: DiscoverySource, html: str, url: str) -> str:
     lowered = f"{html}\n{url}".lower()
-    if source.category == "search_engine" and _looks_like_search_result_page(source, html, url):
-        return ""
     if "安全验证" in html or "captcha" in lowered or "verify you are human" in lowered:
         return f"{source.key}:captcha_or_security_verification"
     if "登录" in html or "sign in" in lowered or "passport.baidu.com" in lowered:
@@ -2282,156 +2199,6 @@ def _extract_file_names(text: str, anchors: list[dict[str, str]]) -> list[str]:
     return results[:30]
 
 
-def _search_engine_platform(source: DiscoverySource) -> ExposurePlatform | None:
-    return next((item for item in SEARCH_ENGINES if item.key == source.key), None)
-
-
-def _search_engine_source_hosts(source: DiscoverySource) -> set[str]:
-    hosts = {urlparse(source.search_url_template).netloc.lower()}
-    platform = _search_engine_platform(source)
-    if platform is not None:
-        hosts.update(domain.lower() for domain in platform.domains)
-    return {host for host in hosts if host}
-
-
-def _is_search_engine_redirect(source: DiscoverySource, url: str) -> bool:
-    parsed = urlparse(url)
-    path = parsed.path.lower()
-    if source.key == "baidu_search":
-        return path.startswith("/link")
-    if source.key == "bing_search":
-        return path.startswith("/ck/")
-    if source.key == "so360_search":
-        return path.startswith(("/link", "/url"))
-    return False
-
-
-def _is_search_result_asset(url: str) -> bool:
-    parsed = urlparse(url)
-    path = parsed.path.lower()
-    return any(path.endswith(suffix) for suffix in SEARCH_RESULT_SKIP_SUFFIXES)
-
-
-def _search_result_target_url(source: DiscoverySource, href: str, requested_url: str) -> str:
-    absolute = urljoin(requested_url, href)
-    source_hosts = _search_engine_source_hosts(source)
-    for variant in _candidate_url_variants(absolute):
-        parsed = urlparse(variant)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            continue
-        host = parsed.netloc.lower()
-        is_source_host = any(host == item or host.endswith(f".{item}") for item in source_hosts)
-        if is_source_host:
-            continue
-        if _is_search_result_asset(variant):
-            continue
-        return _clean_candidate_url(variant)
-    return ""
-
-
-def _is_search_navigation_text(text: str) -> bool:
-    normalized = _normalize_text(text).lower()
-    if len(normalized) < 2:
-        return True
-    if ("http://" in normalized or "https://" in normalized) and "›" in normalized:
-        return True
-    if re.match(r"^[a-z0-9.-]+\.[a-z]{2,}\s+https?://", normalized):
-        return True
-    navigation_tokens = {
-        "百度首页",
-        "新闻",
-        "hao123",
-        "地图",
-        "视频",
-        "图片",
-        "知道",
-        "文库",
-        "贴吧",
-        "采购",
-        "学术",
-        "更多",
-        "下一页",
-        "上一页",
-        "翻页",
-        "bing",
-        "microsoft",
-        "隐私",
-        "设置",
-        "反馈",
-    }
-    return normalized in {item.lower() for item in navigation_tokens}
-
-
-def _is_search_utility_candidate(source: DiscoverySource, url: str, title: str) -> bool:
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    path = parsed.path.lower()
-    normalized_title = _normalize_text(title).lower()
-    if host in SEARCH_ENGINE_UTILITY_HOSTS:
-        return True
-    if source.key == "so360_search" and host.endswith(".360.cn"):
-        return True
-    if host == "i.360.cn" and path.startswith(("/login", "/reg")):
-        return True
-    return normalized_title in {item.lower() for item in SEARCH_ENGINE_UTILITY_TITLES}
-
-
-def _search_result_title_quality(title: str, target_url: str) -> int:
-    text = _normalize_text(title)
-    if not text:
-        return 0
-    host = urlparse(target_url).netloc.lower().removeprefix("www.")
-    lowered = text.lower()
-    compact = re.sub(r"\s+", "", lowered)
-    score = min(len(text), 120)
-    if "http://" in lowered or "https://" in lowered:
-        score -= 80
-    if host and host in compact:
-        score -= 30
-    if re.fullmatch(r"[\w.-]+\.[a-z]{2,}(?:https?://.*)?", compact):
-        score -= 50
-    return score
-
-
-def _parse_search_engine_candidates(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
-    parser = _AnchorParser(include_noscript=True)
-    parser.feed(html)
-    candidates: list[dict[str, Any]] = []
-    seen: dict[str, dict[str, Any]] = {}
-    for item in parser.anchors:
-        title = _normalize_text(item.get("text"))
-        if _is_search_navigation_text(title):
-            continue
-        target_url = _search_result_target_url(source, item.get("href") or "", requested_url)
-        if not target_url:
-            continue
-        if _is_search_utility_candidate(source, target_url, title):
-            continue
-        if target_url in seen:
-            candidate = seen[target_url]
-            if _search_result_title_quality(title, target_url) > _search_result_title_quality(str(candidate.get("title") or ""), target_url):
-                preview_text = _normalize_text(" ".join([title, target_url]))
-                candidate["title"] = title or target_url
-                candidate["preview_text"] = preview_text
-                candidate["file_names"] = _extract_file_names(preview_text, [])
-            continue
-        host = urlparse(target_url).netloc.lower()
-        preview_text = _normalize_text(" ".join([title, target_url]))
-        candidate = {
-            "url": target_url,
-            "title": title or target_url,
-            "source": source.key,
-            "source_detail": host,
-            "preview_text": preview_text,
-            "file_names": _extract_file_names(preview_text, []),
-        }
-        seen[target_url] = candidate
-        candidates.append(candidate)
-        if len(candidates) >= SEARCH_ENGINE_RESULT_LIMIT:
-            break
-    return candidates
-
-
 def _parse_pikasoo_candidates(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
     parser = _PikasooResultParser()
     parser.feed(html)
@@ -2551,8 +2318,6 @@ def _parse_lzpanx_candidates(source: DiscoverySource, html: str, requested_url: 
 
 
 def _parse_candidates_from_html(source: DiscoverySource, html: str, requested_url: str) -> list[dict[str, Any]]:
-    if source.category == "search_engine":
-        return _parse_search_engine_candidates(source, html, requested_url)
     if source.key == "pikasoo":
         pikasoo_candidates = _parse_pikasoo_candidates(source, html, requested_url)
         if pikasoo_candidates:
@@ -2620,42 +2385,9 @@ def _build_search_urls(term: str, source_families: list[str] | None = None) -> l
     return [(source, source.search_url_template.format(query=encoded)) for source in _ordered_discovery_sources(source_families)]
 
 
-def _search_engine_candidates_with_browser(source: DiscoverySource, url: str) -> list[dict[str, Any]]:
-    artifacts = fetch_page_artifacts_with_session(
-        url,
-        wait_seconds=5,
-        timeout_seconds=45,
-    )
-    current_url = _normalize_text(artifacts.get("url")) or url
-    search_html = str(artifacts.get("html") or "")
-    block_reason = _detect_search_block_reason(source, search_html, current_url)
-    candidates = _parse_candidates_from_html(source, search_html, current_url)
-    if block_reason and not candidates:
-        raise RuntimeError(f"{block_reason}:browser_fallback")
-    return candidates
-
-
 def _search_candidates_for_source(source: DiscoverySource, url: str, term: str) -> list[dict[str, Any]]:
     if source.fetch_mode in {"pansou_api", "panhub_api"}:
         return _fetch_netdisk_api_candidates(source, term)
-    if source.category == "search_engine":
-        http_error: Exception | None = None
-        try:
-            search_html = _fetch_html(url, timeout=30)
-            block_reason = _detect_search_block_reason(source, search_html, url)
-            if block_reason:
-                raise RuntimeError(block_reason)
-            candidates = _parse_candidates_from_html(source, search_html, url)
-            if candidates:
-                return candidates
-        except Exception as exc:
-            http_error = exc
-        try:
-            return _search_engine_candidates_with_browser(source, url)
-        except Exception as exc:
-            if http_error is not None:
-                raise RuntimeError(f"{http_error}; browser_fallback:{exc}") from exc
-            raise
     search_html = _fetch_html(url, timeout=30)
     block_reason = _detect_search_block_reason(source, search_html, url)
     if block_reason:
@@ -2786,7 +2518,7 @@ def _search_candidate_pages_for_source(
                 "_health": health_payload,
             }
         )
-    elif source_family in {"document_library", "search_engine"} and health_updates is not None:
+    elif source_family == "document_library" and health_updates is not None:
         health_updates.append(_source_health_payload(source, error_text, _now_utc_iso()))
     return rows
 
@@ -3008,7 +2740,7 @@ def ensure_default_watchlist() -> dict[str, Any]:
             watchlist = existing[0]
             terms = list_exposure_watch_terms(connection, int(watchlist["id"]))
             metadata = _watchlist_metadata(watchlist)
-            source_families = metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
+            source_families = _normalize_source_families(metadata.get("source_families"))
             return {
                 **watchlist,
                 "terms": terms,
@@ -3074,7 +2806,7 @@ def list_watchlists_payload() -> list[dict[str, Any]]:
         payloads = []
         for row in rows:
             metadata = _watchlist_metadata(row)
-            source_families = metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
+            source_families = _normalize_source_families(metadata.get("source_families"))
             payloads.append(
                 {
                     **row,
@@ -3090,7 +2822,7 @@ def list_watchlists_payload() -> list[dict[str, Any]]:
 
 def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
     now = _now_utc_iso()
-    source_families = payload.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
+    source_families = _normalize_source_families(payload.get("source_families"))
     page_limit = int(payload.get("page_limit") or _default_page_limit_for_source_families(source_families))
     with get_db_connection() as connection:
         watchlist_id = upsert_exposure_watchlist(
@@ -3132,7 +2864,7 @@ def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
         connection.commit()
         watchlist = get_exposure_watchlist(connection, watchlist_id)
         metadata = _watchlist_metadata(watchlist or {})
-        saved_source_families = metadata.get("source_families") or list(DEFAULT_SOURCE_FAMILIES)
+        saved_source_families = _normalize_source_families(metadata.get("source_families"))
         return {
             **(watchlist or {}),
             "terms": list_exposure_watch_terms(connection, watchlist_id),
@@ -3162,9 +2894,29 @@ def scan_watchlist_once(
             return {"watchlist_id": watchlist_id, "scanned_terms": 0, "candidates": 0, "hits": 0, "message": "watchlist disabled"}
         terms = [item for item in list_exposure_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
     watchlist_meta = _watchlist_metadata(watchlist)
-    selected_source_families = _normalize_source_families(source_families or watchlist_meta.get("source_families"))
+    explicit_source_family_request = bool(source_families)
+    selected_source_families = _normalize_source_families(
+        source_families or watchlist_meta.get("source_families"),
+        default_when_empty=not explicit_source_family_request,
+    )
     selected_file_types = _normalize_file_types(file_types or watchlist_meta.get("file_types"))
     watchlist_source_families = _normalize_source_families(watchlist_meta.get("source_families"))
+    if not selected_source_families:
+        return {
+            "watchlist_id": watchlist_id,
+            "watchlist_name": watchlist["name"],
+            "scanned_terms": 0,
+            "candidates": 0,
+            "hits": 0,
+            "errors": ["unsupported source family"],
+            "source_families": [],
+            "file_types": selected_file_types,
+            "page_limit": page_limit or max_candidates_per_term or DEFAULT_PAGE_LIMIT,
+            "detail_fetch": bool(detail_fetch if detail_fetch is not None else True),
+            "netdisk_scan_mode": NETDISK_SCAN_MODE_LEGACY,
+            "source_stats": [],
+            "message": "no supported source families selected",
+        }
     use_watchlist_page_limit = not source_families or selected_source_families == watchlist_source_families
     configured_page_limit = page_limit or (watchlist_meta.get("page_limit") if use_watchlist_page_limit else None)
     selected_page_limit = int(
@@ -3195,7 +2947,7 @@ def scan_watchlist_once(
                 (str(row.get("source_key") or ""), str(row.get("term") or "")): row
                 for row in list_netdisk_source_states(connection, watchlist_id=int(watchlist["id"]))
             }
-    for source_family in ("document_library", "search_engine"):
+    for source_family in ("document_library",):
         if source_family in selected_source_families:
             ensure_source_health_defaults(source_family)
 
@@ -3236,15 +2988,11 @@ def scan_watchlist_once(
                 seen_candidate_urls.add(candidate_url)
                 candidate_source_url = _normalize_text(candidate.get("_source_url")) or url
                 detail_platform = platform_from_url(candidate["url"])
-                if detail_platform is None and source_family == "search_engine":
-                    detail_platform = _search_engine_platform(source)
                 if detail_platform is None:
                     continue
                 candidate_resource_fingerprint = (
                     _netdisk_url_resource_fingerprint(detail_platform.key, candidate_url)
                     if detail_platform.platform_type == "netdisk_share"
-                    else _search_result_resource_fingerprint(source.key, candidate_url)
-                    if detail_platform.platform_type == "search_engine"
                     else ""
                 )
                 if candidate_resource_fingerprint and candidate_resource_fingerprint in seen_resource_fingerprints:
@@ -3322,8 +3070,6 @@ def scan_watchlist_once(
                         access_state = access_state_override or (
                             _probe_netdisk_link_access_state(candidate["url"])
                             if detail_platform.platform_type == "netdisk_share"
-                            else "public"
-                            if detail_platform.platform_type == "search_engine"
                             else "unknown"
                         )
                         detail = {
@@ -3399,8 +3145,6 @@ def scan_watchlist_once(
                         detail.get("file_entries") or [],
                     )
                     if detail_platform.platform_type == "netdisk_share"
-                    else _search_result_resource_fingerprint(source.key, detail["page_url"])
-                    if detail_platform.platform_type == "search_engine"
                     else ""
                 )
                 if resource_fingerprint and resource_fingerprint in seen_resource_fingerprints:
@@ -3657,6 +3401,12 @@ def list_document_exposures_payload(
         )
         platform_key = row.get("platform") or ""
         platform_label = _platform_label(platform_key, row.get("discovery_source"))
+        row_source_family = _source_family_for_source(
+            platform_type=row.get("platform_type"),
+            source=next((item for item in DISCOVERY_SOURCES if item.key == row.get("discovery_source")), None),
+        )
+        if row_source_family not in SUPPORTED_SOURCE_FAMILIES:
+            continue
         payload = {
             "id": int(row["id"]),
             "watchlistId": int(row["watchlist_id"]),
@@ -3668,7 +3418,7 @@ def list_document_exposures_payload(
             "discoverySource": row.get("discovery_source") or "",
             "discoverySourceLabel": _discovery_source_label(row.get("discovery_source")),
             "sourceDetail": _normalize_text((raw_payload or {}).get("source_detail")),
-            "sourceFamily": _source_family_for_source(platform_type=row.get("platform_type"), source=next((item for item in DISCOVERY_SOURCES if item.key == row.get("discovery_source")), None)),
+            "sourceFamily": row_source_family,
             "canonicalUrl": row.get("canonical_url") or "",
             "title": row.get("title") or "",
             "normalizedTitle": row.get("normalized_title") or "",
@@ -4104,7 +3854,7 @@ def list_exposure_scan_runs_payload(watchlist_id: int | None = None, limit: int 
                 "watchlistId": int(row["watchlist_id"]),
                 "watchlistName": row.get("watchlist_name") or "",
                 "organizationName": row.get("organization_name") or "",
-                "sourceFamilies": _normalize_source_families(row.get("source_families_json")),
+                "sourceFamilies": _normalize_source_families(row.get("source_families_json"), default_when_empty=False),
                 "requestedTerms": _parse_json(row.get("requested_terms_json"), []),
                 "candidateCount": int(row.get("candidate_count") or 0),
                 "hitCount": int(row.get("hit_count") or 0),

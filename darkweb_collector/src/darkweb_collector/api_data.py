@@ -1589,7 +1589,7 @@ def build_intelligence_payload() -> dict[str, Any]:
             "route": "/document-exposure",
             "eyebrow": "模块预览",
             "title": "文件监测",
-            "summary": "集中查看文档平台、网盘聚合与搜索引擎中的疑似企业文件暴露线索。",
+            "summary": "集中查看文档平台与网盘聚合中的疑似企业文件暴露线索。",
             "highlight": f"{document_exposure_summary['highRiskCount']} 条高风险命中",
             "tone": "warning",
             "stats": [
@@ -1643,7 +1643,7 @@ def build_intelligence_payload() -> dict[str, Any]:
             {
                 "label": "监测命中",
                 "value": str(document_exposure_summary["totalHits"]),
-                "description": "来自文档平台、网盘聚合与搜索引擎的疑似暴露文件数量。",
+                "description": "来自文档平台与网盘聚合的疑似暴露文件数量。",
                 "trend": f"{document_exposure_summary['highRiskCount']} 条高风险",
                 "tone": "warning",
                 "icon": "Files",
@@ -1721,7 +1721,7 @@ def build_intelligence_payload() -> dict[str, Any]:
             },
             "/document-exposure/results": {
                 "kicker": "文件监测",
-                "subtitle": "筛选和复核文档平台、网盘聚合与搜索引擎中的疑似文件暴露命中。",
+                "subtitle": "筛选和复核文档平台与网盘聚合中的疑似文件暴露命中。",
             },
             "/collector-control": {
                 "kicker": "Collection Control",

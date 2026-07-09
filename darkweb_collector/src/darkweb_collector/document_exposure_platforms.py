@@ -460,37 +460,6 @@ PLATFORMS: dict[str, ExposurePlatform] = {
 }
 
 
-SEARCH_ENGINES: tuple[ExposurePlatform, ...] = (
-    ExposurePlatform(
-        key="baidu_search",
-        label="百度搜索",
-        module="document_exposure",
-        platform_type="search_engine",
-        homepage_url="https://www.baidu.com/",
-        login_url="https://www.baidu.com/",
-        domains=("baidu.com", "www.baidu.com"),
-    ),
-    ExposurePlatform(
-        key="bing_search",
-        label="Bing",
-        module="document_exposure",
-        platform_type="search_engine",
-        homepage_url="https://www.bing.com/",
-        login_url="https://www.bing.com/",
-        domains=("bing.com", "www.bing.com"),
-    ),
-    ExposurePlatform(
-        key="so360_search",
-        label="360搜索",
-        module="document_exposure",
-        platform_type="search_engine",
-        homepage_url="https://www.so.com/",
-        login_url="https://www.so.com/",
-        domains=("so.com", "www.so.com"),
-    ),
-)
-
-
 def list_exposure_platforms(
     *,
     include_discovery_only: bool = True,
@@ -498,8 +467,6 @@ def list_exposure_platforms(
     module: str | None = None,
 ) -> list[ExposurePlatform]:
     platforms: list[ExposurePlatform] = []
-    if module in {None, "document_exposure"}:
-        platforms.extend(SEARCH_ENGINES)
     for key in sorted(PLATFORMS):
         platform = PLATFORMS[key]
         if module and platform.module != str(module).strip():

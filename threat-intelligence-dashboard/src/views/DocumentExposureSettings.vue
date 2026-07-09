@@ -291,19 +291,6 @@ const route = useRoute()
 const router = useRouter()
 
 const MODULE_CONFIG = {
-  search_engine: {
-    sourceFamily: 'search_engine',
-    label: '搜索引擎监测',
-    title: '搜索引擎监测配置',
-    eyebrow: 'Search Engine',
-    subtitle: '配置搜索引擎监测对象、关键词、文件类型和搜索来源。',
-    sourceLabel: '搜索引擎',
-    sourceTitle: '搜索引擎信息源',
-    sessionTitle: '搜索平台会话',
-    watchlistTitle: '搜索引擎监测对象与关键词',
-    settingsRoute: '/document-exposure/search-engine/settings',
-    platformTypes: ['search_engine'],
-  },
   netdisk_aggregator: {
     sourceFamily: 'netdisk_aggregator',
     label: '网盘监测',
@@ -375,7 +362,7 @@ const watchlistForm = reactive({
 })
 
 const currentSourceFamily = computed(() => (
-  route.meta.sourceFamily || route.query.source_family || 'search_engine'
+  route.meta.sourceFamily || route.query.source_family || 'netdisk_aggregator'
 ))
 const showSettingsSourceTypeColumn = computed(() => viewportWidth.value >= 1180)
 const showSettingsSourceAccessColumn = computed(() => viewportWidth.value >= 1500)
@@ -406,7 +393,7 @@ const sessionAccountColumnWidth = computed(() => viewportWidth.value < 1500 ? 14
 const sessionVerifiedColumnWidth = computed(() => 150)
 const sessionErrorMinWidth = computed(() => 180)
 const sessionActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 220 : 240)
-const currentModule = computed(() => MODULE_CONFIG[currentSourceFamily.value] || MODULE_CONFIG.search_engine)
+const currentModule = computed(() => MODULE_CONFIG[currentSourceFamily.value] || MODULE_CONFIG.netdisk_aggregator)
 const modulePlatformRows = computed(() => allPlatforms.value
   .filter((item) => currentModule.value.platformTypes.includes(item.platform_type))
   .sort(comparePlatformRows))
@@ -479,7 +466,6 @@ function platformSortRank(row) {
 
 function platformTypeLabel(type) {
   return {
-    search_engine: '搜索引擎',
     netdisk_search: '网盘聚合源',
     netdisk_share: '网盘分享平台',
     document_library: '文库平台',

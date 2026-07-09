@@ -98,21 +98,8 @@ const routes = [
   },
   {
     path: '/document-exposure',
-    redirect: '/document-exposure/search-engine',
+    redirect: '/document-exposure/netdisk',
     meta: { hidden: true },
-  },
-  {
-    path: '/document-exposure/search-engine',
-    name: 'DocumentExposureSearchEngine',
-    component: DocumentExposureWorkbench,
-    meta: {
-      title: '搜索引擎监测',
-      icon: 'Search',
-      sourceFamily: 'search_engine',
-      monitorGroup: 'document-exposure',
-      kicker: '文件监测',
-      subtitle: '按搜索引擎来源查看敏感文档命中趋势、分布和处置入口。',
-    },
   },
   {
     path: '/document-exposure/netdisk',
@@ -176,20 +163,8 @@ const routes = [
   },
   {
     path: '/document-exposure/settings',
-    redirect: '/document-exposure/search-engine/settings',
+    redirect: '/document-exposure/netdisk/settings',
     meta: { hidden: true },
-  },
-  {
-    path: '/document-exposure/search-engine/settings',
-    name: 'DocumentExposureSettings',
-    component: DocumentExposureSettings,
-    meta: {
-      title: '搜索引擎监测配置',
-      hidden: true,
-      sourceFamily: 'search_engine',
-      kicker: '文件监测',
-      subtitle: '独立管理搜索引擎监测对象、关键词和搜索源。',
-    },
   },
   {
     path: '/document-exposure/netdisk/settings',
