@@ -124,6 +124,12 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
     margin-left: var(--ti-sidebar-collapsed);
   }
 
+  .main-content.main-content--blank {
+    width: 100%;
+    max-width: 100vw;
+    margin-left: 0;
+  }
+
   .page-content {
     padding: 18px;
   }

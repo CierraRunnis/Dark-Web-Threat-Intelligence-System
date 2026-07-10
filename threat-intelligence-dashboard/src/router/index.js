@@ -18,6 +18,7 @@ import CodeMonitoringSettings from '@/views/CodeMonitoringSettings.vue'
 import CodeMonitoringScans from '@/views/CodeMonitoringScans.vue'
 import CodeMonitoringDetail from '@/views/CodeMonitoringDetail.vue'
 import RemotePlatformLogin from '@/views/RemotePlatformLogin.vue'
+import UiDemo from '@/views/UiDemo.vue'
 
 const routes = [
   {
@@ -232,6 +233,16 @@ const routes = [
       hidden: true,
       kicker: '文件监测',
       subtitle: '查看代码扫描记录、平台分布、命中数和错误信息。',
+    },
+  },
+  {
+    path: '/ui-demo',
+    name: 'UiDemo',
+    component: UiDemo,
+    meta: {
+      title: '新版界面 Demo',
+      hidden: true,
+      layout: 'blank',
     },
   },
   {
