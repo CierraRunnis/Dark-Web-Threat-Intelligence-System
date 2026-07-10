@@ -18,6 +18,7 @@ $FrontendPort = if ($env:DARKWEB_FRONTEND_PORT) { [int]$env:DARKWEB_FRONTEND_POR
 $FrontendUrl = "http://${FrontendHost}:${FrontendPort}"
 $ServiceWaitSeconds = 45
 $SchedulerIntervalSeconds = if ($env:SCHEDULER_INTERVAL_SECONDS) { [int]$env:SCHEDULER_INTERVAL_SECONDS } else { 60 }
+$env:DARKWEB_SCHEDULER_ENABLED = if ($env:DARKWEB_SCHEDULER_ENABLED) { $env:DARKWEB_SCHEDULER_ENABLED } else { "1" }
 $VulnSyncIntervalSeconds = if ($env:VULN_SYNC_INTERVAL_SECONDS) { [int]$env:VULN_SYNC_INTERVAL_SECONDS } else { 3600 }
 $VulnSyncLimit = if ($env:VULN_SYNC_LIMIT) { [int]$env:VULN_SYNC_LIMIT } else { 300 }
 $PansouEnabled = $env:DARKWEB_PANSOU_ENABLED -ne "0"

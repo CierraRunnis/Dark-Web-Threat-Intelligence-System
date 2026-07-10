@@ -128,6 +128,7 @@ const navTree = [
   { type: 'item', path: '/vulnerability-alerts', title: '漏洞预警', icon: 'WarningFilled' },
   { type: 'item', path: '/threat-situation', title: '威胁态势', icon: 'TrendCharts' },
   { type: 'item', path: '/collector-control', title: '采集控制', icon: 'VideoPlay' },
+  { type: 'item', path: '/darkweb-monitoring', title: '暗网监测', icon: 'View' },
   {
     type: 'group',
     key: 'document-exposure',

@@ -12,6 +12,44 @@
 - 一键在线更新：在版本信息区域直接更新当前 Git 分支，并自动同步依赖和重启服务。
 - Windows / WSL 启动脚本：提供一键准备依赖、注册命令、启动服务和查看状态的脚本。
 
+## 区域暗网监测
+
+系统提供独立暗网监测工作台，默认纳管长安不夜城、XSS、BreachForums 和 Telegram 四类来源，并使用西藏、Tibet、Xizang、拉萨、日喀则等区域关键词建立监测范围。
+
+每条命中线索进入监测台账后会生成 30 分钟初验截止时间。初验记录包括来源平台与网址、威胁类型、关联单位或行业、发现时间、截图合规状态、置信度、建议处置方向、研判人员、处置状态和情报编目号。存在原始截图但尚未标记合规时，系统会阻止对外报送。
+
+关闭论坛和 Telegram 的登录状态由独立连接器维护，主系统不保存平台账号。连接器需提供一个受控 HTTP(S) JSON 接口，并通过以下环境变量接入：
+
+```text
+DARKWEB_CHANGAN_CONNECTOR_URL
+DARKWEB_XSS_CONNECTOR_URL
+DARKWEB_BREACHFORUMS_CONNECTOR_URL
+DARKWEB_TELEGRAM_CONNECTOR_URL
+```
+
+如连接器启用 Bearer Token，可分别配置同名前缀的 `*_CONNECTOR_TOKEN`。接口返回格式：
+
+```json
+{
+  "findings": [
+    {
+      "event_id": "source-stable-id",
+      "title": "线索标题",
+      "source_url": "https://source.example/thread/1",
+      "threat_type": "数据售卖",
+      "target_name": "关联单位",
+      "target_industry": "关联行业",
+      "discovered_at": "2026-07-10T10:00:00+00:00",
+      "content_excerpt": "合规截取的原始内容摘要",
+      "screenshot_url": "/collector-output/source/thread-1.png",
+      "confidence_level": "medium"
+    }
+  ]
+}
+```
+
+Windows 和 WSL 启动脚本中的调度器会定期轮询连接器、检查 30 分钟 SLA、生成已结束日期的日报，并在月初归档上月月报。默认连接器轮询间隔为 300 秒，可通过 `DARKWEB_CONNECTOR_POLL_INTERVAL_SECONDS` 调整。
+
 ## 项目结构
 
 ```text

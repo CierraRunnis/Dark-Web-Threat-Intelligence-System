@@ -604,6 +604,69 @@ ON monitoring_keyword_notifications(status, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event_key
 ON monitoring_keyword_notifications(event_key, status, dry_run);
+
+CREATE TABLE IF NOT EXISTS darkweb_monitoring_cases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    source_platform TEXT NOT NULL,
+    source_url TEXT NOT NULL DEFAULT '',
+    threat_title TEXT NOT NULL,
+    threat_type TEXT NOT NULL DEFAULT '待研判',
+    target_name TEXT NOT NULL DEFAULT '',
+    target_industry TEXT NOT NULL DEFAULT '',
+    discovered_at TEXT NOT NULL,
+    first_detected_at TEXT NOT NULL,
+    sla_due_at TEXT NOT NULL,
+    verification_status TEXT NOT NULL DEFAULT 'pending',
+    verified_at TEXT,
+    cataloged_at TEXT,
+    catalog_status TEXT NOT NULL DEFAULT 'unfiled',
+    catalog_number TEXT NOT NULL DEFAULT '',
+    reviewer TEXT NOT NULL DEFAULT '',
+    confidence_level TEXT NOT NULL DEFAULT 'medium',
+    suggested_action TEXT NOT NULL DEFAULT '',
+    disposition TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    screenshot_url TEXT NOT NULL DEFAULT '',
+    screenshot_compliant INTEGER NOT NULL DEFAULT 0,
+    content_excerpt TEXT NOT NULL DEFAULT '',
+    pushed_at TEXT,
+    sla_alerted_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_darkweb_monitoring_cases_detected
+ON darkweb_monitoring_cases(first_detected_at, verification_status);
+
+CREATE INDEX IF NOT EXISTS idx_darkweb_monitoring_cases_platform
+ON darkweb_monitoring_cases(source_platform, discovered_at);
+
+CREATE INDEX IF NOT EXISTS idx_darkweb_monitoring_cases_sla
+ON darkweb_monitoring_cases(sla_due_at, verified_at);
+
+CREATE TABLE IF NOT EXISTS darkweb_monitoring_source_states (
+    source_key TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'waiting_configuration',
+    last_success_at TEXT NOT NULL DEFAULT '',
+    last_error_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_finding_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS darkweb_monitoring_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_type TEXT NOT NULL,
+    period TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    UNIQUE(report_type, period)
+);
+
+CREATE INDEX IF NOT EXISTS idx_darkweb_monitoring_reports_period
+ON darkweb_monitoring_reports(report_type, period);
 """
 
 
@@ -613,6 +676,11 @@ LEGACY_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
     },
     "monitoring_keyword_notifications": {
         "event_key": "TEXT NOT NULL DEFAULT ''",
+    },
+    "darkweb_monitoring_cases": {
+        "catalog_status": "TEXT NOT NULL DEFAULT 'unfiled'",
+        "catalog_number": "TEXT NOT NULL DEFAULT ''",
+        "sla_alerted_at": "TEXT",
     },
     "document_hits": {
         "resource_fingerprint": "TEXT NOT NULL DEFAULT ''",

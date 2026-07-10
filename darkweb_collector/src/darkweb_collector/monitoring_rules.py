@@ -27,6 +27,18 @@ DEFAULT_MONITORING_KEYWORDS = [
     {"keyword": "government", "category": "org_keywords", "weight": 10, "enabled": True, "match_mode": "word_boundary"},
     {"keyword": "能源", "category": "org_keywords", "weight": 10, "enabled": True, "match_mode": "contains"},
     {"keyword": "energy", "category": "org_keywords", "weight": 8, "enabled": True, "match_mode": "word_boundary"},
+    {"keyword": "西藏", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "contains"},
+    {"keyword": "西藏自治区", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "contains"},
+    {"keyword": "藏区", "category": "geo_keywords", "weight": 20, "enabled": True, "match_mode": "contains"},
+    {"keyword": "tibet", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "word_boundary"},
+    {"keyword": "xizang", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "word_boundary"},
+    {"keyword": "拉萨", "category": "geo_keywords", "weight": 22, "enabled": True, "match_mode": "contains"},
+    {"keyword": "日喀则", "category": "geo_keywords", "weight": 22, "enabled": True, "match_mode": "contains"},
+    {"keyword": "山南", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
+    {"keyword": "林芝", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
+    {"keyword": "昌都", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
+    {"keyword": "那曲", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
+    {"keyword": "阿里地区", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
 ]
 SAMPLE_HINT_WORDS = ("sample", "samples", "proof", "mirror", "preview", "demo", "file", "files", "paste", "download", "link")
 URL_RE = re.compile(r"https?://[^\s'\"<>)]+", re.IGNORECASE)
@@ -80,9 +92,18 @@ def _event_text(event: dict[str, Any]) -> str:
 
 def _seed_keywords(connection) -> list[dict[str, Any]]:
     current = list_monitoring_keywords(connection)
-    if current:
+    existing = {
+        (_normalize_text(item.get("keyword")).lower(), _normalize_text(item.get("category")))
+        for item in current
+    }
+    missing = [
+        {**item, "updated_at": utc_now_iso()}
+        for item in DEFAULT_MONITORING_KEYWORDS
+        if (item["keyword"].lower(), item["category"]) not in existing
+    ]
+    if not missing:
         return current
-    rows = [{**item, "updated_at": utc_now_iso()} for item in DEFAULT_MONITORING_KEYWORDS]
+    rows = [*current, *missing]
     replace_monitoring_keywords(connection, rows)
     connection.commit()
     return list_monitoring_keywords(connection)
