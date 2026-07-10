@@ -940,6 +940,9 @@ function Test-ProjectManagedProcess {
     if ($null -eq $ProcessRow) {
         return $false
     }
+    if ($ProcessRow.CommandLine -like "*run_self_update.py*") {
+        return $false
+    }
     if (Test-ProjectManagedCommandLine -CommandLine $ProcessRow.CommandLine) {
         return $true
     }

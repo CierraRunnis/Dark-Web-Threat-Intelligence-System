@@ -79,9 +79,17 @@
         </div>
         <strong>{{ versionTitle }}</strong>
         <p>{{ versionDescription }}</p>
-        <a v-if="versionStatus?.update_available && versionStatus?.compare_url" :href="versionStatus.compare_url" target="_blank" rel="noreferrer">
-          查看 main 更新
-        </a>
+        <el-button
+          class="sidebar__update"
+          size="small"
+          :type="versionStatus?.update_available ? 'primary' : 'default'"
+          :loading="updateRunning"
+          :disabled="versionLoading || updateRunning"
+          @click="runUpdate"
+        >
+          <el-icon v-if="!updateRunning"><Download /></el-icon>
+          <span>{{ updateButtonLabel }}</span>
+        </el-button>
       </div>
       <button class="sidebar__collapse" @click="shell.toggleSidebar">
         <el-icon>
@@ -94,17 +102,24 @@
 </template>
 
 <script setup>
+import { ElMessage } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { clearAuthSession } from '@/composables/useAuth'
 import { useShellLayout } from '@/composables/useShellLayout'
 
 const route = useRoute()
 const shell = useShellLayout()
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
+const UPDATE_POLL_INTERVAL_MS = 2000
+const UPDATE_TIMEOUT_MS = 30 * 60 * 1000
 const versionStatus = ref(null)
 const versionLoading = ref(false)
 const versionError = ref('')
+const updateState = ref(null)
 let versionTimer = null
+let updatePollTimer = null
+let updateStartedAt = 0
 
 const navTree = [
   { type: 'item', path: '/', title: '总览', icon: 'DataLine' },
@@ -165,6 +180,7 @@ watch(
 )
 
 const versionTitle = computed(() => {
+  if (updateRunning.value) return '正在更新系统'
   if (versionLoading.value && !versionStatus.value) return '检查中'
   if (versionError.value && !versionStatus.value) return '检查失败'
   if (versionStatus.value?.update_available) return '发现新版本'
@@ -172,6 +188,7 @@ const versionTitle = computed(() => {
 })
 
 const versionDescription = computed(() => {
+  if (updateRunning.value) return updateState.value?.message || '正在准备更新'
   if (versionError.value && !versionStatus.value) return versionError.value
   if (!versionStatus.value) return '正在检查版本信息'
   const branch = versionStatus.value.branch || versionStatus.value.current?.branch || 'main'
@@ -188,6 +205,22 @@ const currentVersionLabel = computed(() => (
   || 'local'
 ))
 
+const updateRunning = computed(() => ['queued', 'running'].includes(updateState.value?.status))
+
+const updateButtonLabel = computed(() => {
+  if (updateRunning.value) return updateState.value?.message || '正在更新'
+  return versionStatus.value?.update_available ? '一键更新' : '检查并更新'
+})
+
+async function readResponseError(response) {
+  try {
+    const payload = await response.json()
+    return payload?.detail || payload?.message || ''
+  } catch {
+    return ''
+  }
+}
+
 async function loadVersionStatus() {
   if (versionLoading.value) return
   versionLoading.value = true
@@ -203,13 +236,101 @@ async function loadVersionStatus() {
   }
 }
 
+function stopUpdatePolling() {
+  if (updatePollTimer) window.clearTimeout(updatePollTimer)
+  updatePollTimer = null
+}
+
+function scheduleUpdatePoll() {
+  stopUpdatePolling()
+  updatePollTimer = window.setTimeout(pollUpdateStatus, UPDATE_POLL_INTERVAL_MS)
+}
+
+async function handleUpdateFinished(state) {
+  stopUpdatePolling()
+  if (state.status === 'failed') {
+    ElMessage.error(state.error || state.message || '自动更新失败')
+    return
+  }
+  if (!state.updated) {
+    ElMessage.success('当前已经是最新版本')
+    await loadVersionStatus()
+    return
+  }
+
+  ElMessage.success('更新完成，服务已重启，请重新登录')
+  window.setTimeout(() => {
+    clearAuthSession()
+    window.location.assign('/login?updated=1')
+  }, 1000)
+}
+
+async function pollUpdateStatus() {
+  if (!updateRunning.value) return
+  if (Date.now() - updateStartedAt > UPDATE_TIMEOUT_MS) {
+    updateState.value = { ...updateState.value, status: 'failed', error: '更新等待超时，请查看服务日志' }
+    await handleUpdateFinished(updateState.value)
+    return
+  }
+
+  try {
+    const response = await fetch('/api/system/update/status')
+    if (response.ok) {
+      const state = await response.json()
+      if (state.job_id === updateState.value?.job_id) {
+        updateState.value = state
+        if (!['queued', 'running'].includes(state.status)) {
+          await handleUpdateFinished(state)
+          return
+        }
+      }
+    }
+  } catch {
+    // The API is briefly unavailable while the updater restarts the service.
+  }
+  scheduleUpdatePoll()
+}
+
+async function runUpdate() {
+  if (updateRunning.value) return
+  try {
+    const response = await fetch('/api/system/update', { method: 'POST' })
+    if (!response.ok) {
+      throw new Error((await readResponseError(response)) || `更新启动失败：${response.status}`)
+    }
+    updateState.value = await response.json()
+    updateStartedAt = Date.now()
+    ElMessage.info('更新任务已启动，服务会自动重启')
+    scheduleUpdatePoll()
+  } catch (error) {
+    ElMessage.error(error.message || '无法启动自动更新')
+  }
+}
+
+async function resumeRunningUpdate() {
+  try {
+    const response = await fetch('/api/system/update/status')
+    if (!response.ok) return
+    const state = await response.json()
+    if (['queued', 'running'].includes(state.status)) {
+      updateState.value = state
+      updateStartedAt = Date.now()
+      scheduleUpdatePoll()
+    }
+  } catch {
+    // A status check should not block the rest of the sidebar.
+  }
+}
+
 onMounted(() => {
   loadVersionStatus()
+  resumeRunningUpdate()
   versionTimer = window.setInterval(loadVersionStatus, VERSION_CHECK_INTERVAL_MS)
 })
 
 onBeforeUnmount(() => {
   if (versionTimer) window.clearInterval(versionTimer)
+  stopUpdatePolling()
 })
 </script>
 
@@ -445,12 +566,17 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 
-.sidebar__version a {
-  display: inline-flex;
-  margin-top: 8px;
-  color: var(--ti-primary);
-  font-size: 12px;
-  font-weight: 700;
+.sidebar__update {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.sidebar__update :deep(.el-button__text),
+.sidebar__update span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar__collapse {

@@ -109,6 +109,11 @@ from darkweb_collector.tor_bridge_control import (
     write_torrc,
 )
 from darkweb_collector.version_check import build_version_status
+from darkweb_collector.self_update import (
+    SelfUpdateError,
+    read_public_update_status,
+    start_self_update,
+)
 
 
 app = FastAPI(title="Darkweb Collector API", version="v.11.0")
@@ -125,6 +130,7 @@ AUTH_EXEMPT_PATHS = {
     "/api/auth/login",
     "/api/health",
     "/api/system/version",
+    "/api/system/update/status",
 }
 DEFAULT_AUTH_PASSWORD = "123456"
 
@@ -314,6 +320,19 @@ def health() -> dict[str, str]:
 @app.get("/api/system/version")
 def system_version() -> dict:
     return build_version_status()
+
+
+@app.get("/api/system/update/status")
+def system_update_status() -> dict:
+    return read_public_update_status()
+
+
+@app.post("/api/system/update", status_code=202)
+def system_update() -> dict:
+    try:
+        return start_self_update()
+    except SelfUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class AuthLoginRequest(BaseModel):
