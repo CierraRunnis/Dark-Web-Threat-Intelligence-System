@@ -100,6 +100,8 @@
       </header>
 
       <main class="ops-content">
+        <Transition name="ops-page" mode="out-in">
+        <div :key="currentModule" class="ops-page-stage">
         <template v-if="currentModule === 'overview'">
         <section class="ops-heading">
           <div>
@@ -113,13 +115,18 @@
         </section>
 
         <section class="ops-metrics" aria-label="核心指标">
-          <article v-for="(metric, index) in displayMetrics" :key="metric.label" class="ops-metric">
+          <article
+            v-for="(metric, index) in displayMetrics"
+            :key="metric.label"
+            class="ops-metric"
+            :style="{ '--item-index': index }"
+          >
             <span class="ops-metric__icon" :class="`ops-metric__icon--${metric.tone}`">
               <el-icon><component :is="metric.icon || metricIcons[index]" /></el-icon>
             </span>
             <div>
               <span>{{ metric.label }}</span>
-              <strong>{{ metric.value }}</strong>
+              <strong><AnimatedValue :value="metric.value" :delay="160 + index * 80" /></strong>
             </div>
             <small>{{ metric.trend || metric.description || '较上一周期持平' }}</small>
           </article>
@@ -157,10 +164,11 @@
                   <span>时间</span>
                 </div>
                 <router-link
-                  v-for="row in incidentRows"
+                  v-for="(row, index) in incidentRows"
                   :key="row.key"
                   :to="row.route"
                   class="ops-incident-row"
+                  :style="{ '--item-index': index }"
                 >
                   <span class="ops-severity" :class="`ops-severity--${row.severity}`">{{ severityLabel(row.severity) }}</span>
                   <span class="ops-incident-row__title" :title="row.title">{{ row.title }}</span>
@@ -233,6 +241,8 @@
         </div>
         </template>
         <UiDemoModule v-else :module-id="currentModule" />
+        </div>
+        </Transition>
       </main>
     </section>
   </div>
@@ -247,6 +257,7 @@ import '@/lib/echarts'
 import { useAuth } from '@/composables/useAuth'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 import { useJobsData } from '@/composables/useJobsData'
+import AnimatedValue from '@/components/AnimatedValue.vue'
 import UiDemoModule from '@/views/UiDemoModule.vue'
 import {
   attackTypeShare as fallbackAttackTypeShare,
@@ -558,6 +569,7 @@ onMounted(async () => {
   --ops-red: #dc2626;
   --ops-orange: #f97316;
   --ops-green: #0f766e;
+  --ops-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
   display: grid;
   grid-template-columns: 226px minmax(0, 1fr);
   width: 100%;
@@ -658,6 +670,11 @@ onMounted(async () => {
 
 .ops-nav__item .el-icon {
   font-size: 16px;
+  transition: transform 0.22s var(--ops-motion-ease);
+}
+
+.ops-nav__item:hover .el-icon {
+  transform: translateX(2px);
 }
 
 .ops-nav__item small {
@@ -697,6 +714,7 @@ onMounted(async () => {
   border-radius: 50%;
   background: #22c55e;
   box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12);
+  animation: ops-status-pulse 2.6s ease-in-out infinite;
 }
 
 .ops-runtime__dot--warning {
@@ -780,11 +798,17 @@ onMounted(async () => {
   background: #ffffff;
   color: #475569;
   cursor: pointer;
+  transition: border-color 0.18s ease, color 0.18s ease, transform 0.18s var(--ops-motion-ease);
 }
 
 .ops-icon-button:hover {
   border-color: #b8c1cc;
   color: var(--ops-blue);
+  transform: translateY(-1px);
+}
+
+.ops-icon-button:active {
+  transform: scale(0.94);
 }
 
 .ops-icon-button:disabled {
@@ -825,6 +849,25 @@ onMounted(async () => {
   padding: 24px;
 }
 
+.ops-page-stage {
+  min-width: 0;
+}
+
+.ops-page-enter-active,
+.ops-page-leave-active {
+  transition: opacity 0.2s ease, transform 0.28s var(--ops-motion-ease);
+}
+
+.ops-page-enter-from {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.ops-page-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
 .ops-heading {
   display: flex;
   min-width: 0;
@@ -832,6 +875,7 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 20px;
   margin-bottom: 18px;
+  animation: ops-rise 0.44s var(--ops-motion-ease) both;
 }
 
 .ops-heading h1 {
@@ -878,6 +922,13 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   padding: 14px 16px;
+  animation: ops-rise 0.48s var(--ops-motion-ease) both;
+  animation-delay: calc(80ms + var(--item-index, 0) * 70ms);
+  transition: background 0.18s ease;
+}
+
+.ops-metric:hover {
+  background: #fafcff;
 }
 
 .ops-metric + .ops-metric {
@@ -893,6 +944,8 @@ onMounted(async () => {
   border-radius: 6px;
   background: #e8eefc;
   color: var(--ops-blue);
+  animation: ops-icon-pop 0.5s var(--ops-motion-ease) both;
+  animation-delay: calc(150ms + var(--item-index, 0) * 70ms);
 }
 
 .ops-metric__icon--danger {
@@ -961,6 +1014,27 @@ onMounted(async () => {
   border: 1px solid var(--ops-border);
   border-radius: 8px;
   background: var(--ops-surface);
+  animation: ops-rise 0.5s var(--ops-motion-ease) both;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ops-main-column .ops-panel:first-child,
+.ops-right-rail .ops-panel:first-child {
+  animation-delay: 180ms;
+}
+
+.ops-main-column .ops-panel:nth-child(2),
+.ops-right-rail .ops-panel:nth-child(2) {
+  animation-delay: 240ms;
+}
+
+.ops-right-rail .ops-panel:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+.ops-panel:hover {
+  border-color: #cbd3de;
+  box-shadow: 0 7px 20px rgba(15, 23, 42, 0.05);
 }
 
 .ops-panel__header {
@@ -998,6 +1072,25 @@ onMounted(async () => {
   width: 100%;
   height: 264px;
   padding: 8px 12px 12px;
+}
+
+.ops-trend-panel {
+  position: relative;
+}
+
+.ops-trend-panel::after {
+  position: absolute;
+  z-index: 2;
+  top: 64px;
+  bottom: 18px;
+  left: 7%;
+  width: 1px;
+  background: rgba(37, 99, 235, 0.2);
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.16);
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  animation: ops-chart-scan 7.2s linear 1s infinite;
 }
 
 .ops-distribution-chart {
@@ -1046,6 +1139,8 @@ onMounted(async () => {
   color: #536274;
   font-size: 10px;
   transition: background 0.16s ease;
+  animation: ops-row-in 0.36s var(--ops-motion-ease) both;
+  animation-delay: calc(260ms + var(--item-index, 0) * 38ms);
 }
 
 .ops-incident-table__head + .ops-incident-row {
@@ -1122,6 +1217,7 @@ onMounted(async () => {
   height: 6px;
   border-radius: 50%;
   background: currentColor;
+  animation: ops-status-pulse 2.4s ease-in-out infinite;
 }
 
 .ops-health--warning {
@@ -1177,6 +1273,7 @@ onMounted(async () => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
+  animation: ops-status-pulse 2.8s ease-in-out infinite;
 }
 
 .ops-site-row__dot--healthy {
@@ -1213,7 +1310,12 @@ onMounted(async () => {
   align-items: stretch;
   gap: 9px;
   padding: 8px 0;
+  animation: ops-row-in 0.38s var(--ops-motion-ease) both;
 }
+
+.ops-watchlist article:nth-child(2) { animation-delay: 55ms; }
+.ops-watchlist article:nth-child(3) { animation-delay: 110ms; }
+.ops-watchlist article:nth-child(4) { animation-delay: 165ms; }
 
 .ops-watchlist article + article {
   border-top: 1px solid var(--ops-border-soft);
@@ -1274,6 +1376,33 @@ onMounted(async () => {
 
 @keyframes ops-spin {
   to { transform: rotate(360deg); }
+}
+
+@keyframes ops-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ops-row-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes ops-icon-pop {
+  0% { opacity: 0; transform: scale(0.72); }
+  65% { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes ops-status-pulse {
+  0%, 100% { opacity: 0.7; transform: scale(0.88); }
+  50% { opacity: 1; transform: scale(1.14); }
+}
+
+@keyframes ops-chart-scan {
+  0% { left: 7%; opacity: 0; }
+  8%, 88% { opacity: 0.7; }
+  100% { left: 93%; opacity: 0; }
 }
 
 @media (max-width: 1240px) {
@@ -1443,6 +1572,7 @@ onMounted(async () => {
     background: #ffffff;
     color: var(--ops-text);
     box-shadow: 0 16px 42px rgba(15, 23, 42, 0.22);
+    animation: ops-mobile-menu-in 0.24s var(--ops-motion-ease) both;
   }
 
   .ops-mobile-menu header {
@@ -1579,6 +1709,22 @@ onMounted(async () => {
 
   .ops-metric strong {
     font-size: 18px;
+  }
+}
+
+@keyframes ops-mobile-menu-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ops-demo *,
+  .ops-demo *::before,
+  .ops-demo *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
 </style>

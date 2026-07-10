@@ -12,13 +12,18 @@
     </header>
 
     <section class="module-metrics" :aria-label="`${model.title}核心指标`">
-      <article v-for="(metric, index) in model.metrics" :key="metric.label" class="module-metric">
+      <article
+        v-for="(metric, index) in model.metrics"
+        :key="metric.label"
+        class="module-metric"
+        :style="{ '--item-index': index }"
+      >
         <span class="module-metric__icon" :class="`module-metric__icon--${metric.tone || 'primary'}`">
           <el-icon><component :is="metric.icon || defaultIcons[index]" /></el-icon>
         </span>
         <div>
           <span>{{ metric.label }}</span>
-          <strong>{{ formatNumber(metric.value) }}</strong>
+          <strong><AnimatedValue :value="formatNumber(metric.value)" :delay="160 + index * 80" /></strong>
           <small>{{ metric.description || metric.trend || '持续监测' }}</small>
         </div>
       </article>
@@ -39,7 +44,11 @@
           <span>TOP {{ Math.min(model.ranking.length, 6) }}</span>
         </header>
         <div class="module-ranking">
-          <article v-for="(item, index) in model.ranking.slice(0, 6)" :key="`${item.name}-${index}`">
+          <article
+            v-for="(item, index) in model.ranking.slice(0, 6)"
+            :key="`${item.name}-${index}`"
+            :style="{ '--item-index': index }"
+          >
             <span class="module-ranking__index">{{ String(index + 1).padStart(2, '0') }}</span>
             <div>
               <strong :title="item.name">{{ item.name }}</strong>
@@ -64,7 +73,12 @@
             <span>{{ model.columns.source }}</span>
             <span>{{ model.columns.time }}</span>
           </div>
-          <article v-for="row in model.rows.slice(0, 9)" :key="row.key" class="module-table__row">
+          <article
+            v-for="(row, index) in model.rows.slice(0, 9)"
+            :key="row.key"
+            class="module-table__row"
+            :style="{ '--item-index': index }"
+          >
             <span class="module-severity" :class="`module-severity--${row.severity}`">{{ severityLabel(row.severity) }}</span>
             <div class="module-table__title">
               <strong :title="row.title">{{ row.title }}</strong>
@@ -89,6 +103,7 @@ import { useIntelligenceData } from '@/composables/useIntelligenceData'
 import { useJobsData } from '@/composables/useJobsData'
 import { useDocumentExposureApi } from '@/composables/useDocumentExposureApi'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
+import AnimatedValue from '@/components/AnimatedValue.vue'
 import * as fallback from '@/mock/intelligence'
 
 const props = defineProps({
@@ -448,7 +463,10 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
 </script>
 
 <style scoped lang="scss">
-.module-view { min-width: 0; }
+.module-view {
+  min-width: 0;
+  --module-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
 
 .module-heading {
   display: flex;
@@ -457,6 +475,7 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
   justify-content: space-between;
   gap: 20px;
   margin-bottom: 18px;
+  animation: module-rise 0.44s var(--module-motion-ease) both;
 }
 
 .module-heading h1 { margin: 0; font-size: 24px; line-height: 1.25; }
@@ -475,9 +494,13 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
   color: #334155;
   font-size: 11px;
   font-weight: 700;
+  transition: border-color 0.18s ease, color 0.18s ease, transform 0.18s var(--module-motion-ease);
 }
 
-.module-action:hover { border-color: #9aa6b5; color: var(--ops-blue); }
+.module-action:hover { border-color: #9aa6b5; color: var(--ops-blue); transform: translateY(-1px); }
+.module-action:hover .el-icon { transform: translateX(2px); }
+.module-action .el-icon { transition: transform 0.18s var(--module-motion-ease); }
+.module-action:active { transform: scale(0.96); }
 
 .module-metrics {
   display: grid;
@@ -496,10 +519,14 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
   align-items: center;
   gap: 10px;
   padding: 14px 16px;
+  animation: module-rise 0.48s var(--module-motion-ease) both;
+  animation-delay: calc(80ms + var(--item-index, 0) * 70ms);
+  transition: background 0.18s ease;
 }
 
 .module-metric + .module-metric { border-left: 1px solid var(--ops-border-soft); }
-.module-metric__icon { display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; border-radius: 6px; background: #e8eefc; color: var(--ops-blue); }
+.module-metric:hover { background: #fafcff; }
+.module-metric__icon { display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; border-radius: 6px; background: #e8eefc; color: var(--ops-blue); animation: module-icon-pop 0.5s var(--module-motion-ease) both; animation-delay: calc(150ms + var(--item-index, 0) * 70ms); }
 .module-metric__icon--danger { background: #fee2e2; color: var(--ops-red); }
 .module-metric__icon--warning { background: #ffedd5; color: var(--ops-orange); }
 .module-metric__icon--success { background: #ccfbf1; color: var(--ops-green); }
@@ -509,27 +536,33 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
 .module-metric small { overflow: hidden; margin-top: 3px; color: #7b8797; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 
 .module-grid { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; }
-.module-panel { min-width: 0; overflow: hidden; border: 1px solid var(--ops-border); border-radius: 8px; background: #fff; }
+.module-panel { min-width: 0; overflow: hidden; border: 1px solid var(--ops-border); border-radius: 8px; background: #fff; animation: module-rise 0.5s var(--module-motion-ease) both; transition: border-color 0.2s ease, box-shadow 0.2s ease; }
+.module-panel:nth-child(1) { animation-delay: 180ms; }
+.module-panel:nth-child(2) { animation-delay: 240ms; }
+.module-panel:nth-child(3) { animation-delay: 300ms; }
+.module-panel:hover { border-color: #cbd3de; box-shadow: 0 7px 20px rgba(15, 23, 42, 0.05); }
 .module-panel--table { grid-column: 1 / -1; }
+.module-panel--trend { position: relative; }
+.module-panel--trend::after { position: absolute; z-index: 2; top: 64px; bottom: 18px; left: 7%; width: 1px; background: rgba(37, 99, 235, 0.2); box-shadow: 0 0 8px rgba(37, 99, 235, 0.16); content: ''; opacity: 0; pointer-events: none; animation: module-chart-scan 7.2s linear 1s infinite; }
 .module-panel__header { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 15px; border-bottom: 1px solid var(--ops-border-soft); }
 .module-panel__header h2 { margin: 0; font-size: 14px; }
 .module-panel__header span { color: var(--ops-muted); font-family: var(--ti-font-mono); font-size: 10px; }
 .module-chart { width: 100%; height: 270px; padding: 8px 12px 12px; }
 
 .module-ranking { padding: 7px 14px; }
-.module-ranking article { display: grid; min-height: 41px; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.module-ranking article { display: grid; min-height: 41px; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 8px; animation: module-row-in 0.36s var(--module-motion-ease) both; animation-delay: calc(260ms + var(--item-index, 0) * 42ms); }
 .module-ranking article + article { border-top: 1px solid var(--ops-border-soft); }
 .module-ranking__index { color: #94a3b8; font-family: var(--ti-font-mono); font-size: 9px; }
 .module-ranking article > div { display: grid; min-width: 0; gap: 5px; }
 .module-ranking strong { overflow: hidden; color: #334155; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .module-ranking article > div > span { display: block; height: 3px; overflow: hidden; border-radius: 2px; background: #eef1f5; }
-.module-ranking i { display: block; height: 100%; border-radius: inherit; background: var(--ops-blue); }
+.module-ranking i { display: block; height: 100%; border-radius: inherit; background: var(--ops-blue); transform-origin: left; animation: module-bar-grow 0.66s var(--module-motion-ease) both; animation-delay: calc(330ms + var(--item-index, 0) * 42ms); }
 .module-ranking b { color: #475569; font-family: var(--ti-font-mono); font-size: 10px; }
 
 .module-table__head,
 .module-table__row { display: grid; min-width: 0; grid-template-columns: 60px minmax(220px, 1.8fr) minmax(110px, 0.8fr) minmax(100px, 0.7fr) 92px; align-items: center; gap: 12px; }
 .module-table__head { min-height: 34px; padding: 0 15px; background: #f8f9fb; color: #8491a3; font-size: 9px; font-weight: 700; }
-.module-table__row { min-height: 55px; padding: 8px 15px; border-top: 1px solid var(--ops-border-soft); color: #536274; font-size: 10px; }
+.module-table__row { min-height: 55px; padding: 8px 15px; border-top: 1px solid var(--ops-border-soft); color: #536274; font-size: 10px; animation: module-row-in 0.36s var(--module-motion-ease) both; animation-delay: calc(300ms + var(--item-index, 0) * 36ms); }
 .module-table__head + .module-table__row { border-top: 0; }
 .module-table__row:hover { background: #f8fafc; }
 .module-table__row > span:not(.module-severity), .module-table__row time { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -545,6 +578,33 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
 .module-severity--low { background: #d1fae5; color: #047857; }
 .module-empty { display: grid; min-height: 140px; place-items: center; color: #94a3b8; font-size: 11px; }
 .module-empty--table { min-height: 90px; }
+
+@keyframes module-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes module-row-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes module-icon-pop {
+  0% { opacity: 0; transform: scale(0.72); }
+  65% { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes module-bar-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes module-chart-scan {
+  0% { left: 7%; opacity: 0; }
+  8%, 88% { opacity: 0.7; }
+  100% { left: 93%; opacity: 0; }
+}
 
 @media (max-width: 1024px) {
   .module-grid { grid-template-columns: minmax(0, 1fr) 280px; }
@@ -575,5 +635,15 @@ watch(() => props.moduleId, loadMonitorData, { immediate: true })
   .module-metric { padding: 12px 10px; }
   .module-metric__icon { width: 28px; height: 28px; }
   .module-metric strong { font-size: 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .module-view *,
+  .module-view *::before,
+  .module-view *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 </style>
