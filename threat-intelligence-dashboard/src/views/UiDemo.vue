@@ -5,7 +5,6 @@
         <span class="ops-brand__mark"><el-icon><Aim /></el-icon></span>
         <span class="ops-brand__copy">
           <strong>DWTI</strong>
-          <small>THREAT INTELLIGENCE</small>
         </span>
       </router-link>
 
@@ -18,7 +17,7 @@
             :to="item.path"
             class="ops-nav__item"
             :class="{
-              'ops-nav__item--active': item.path === '/ui-demo',
+              'ops-nav__item--active': item.path === route.path,
               'ops-nav__item--mobile': item.mobile,
             }"
           >
@@ -28,6 +27,32 @@
           </router-link>
         </section>
       </nav>
+
+      <button
+        class="ops-nav__more"
+        type="button"
+        aria-label="查看全部功能"
+        :aria-expanded="mobileMenuOpen"
+        @click="mobileMenuOpen = !mobileMenuOpen"
+      >
+        <el-icon><Menu /></el-icon>
+        <span>全部</span>
+      </button>
+
+      <section v-if="mobileMenuOpen" class="ops-mobile-menu" aria-label="全部功能">
+        <header>
+          <h2>全部功能</h2>
+          <button type="button" aria-label="关闭功能菜单" @click="mobileMenuOpen = false">
+            <el-icon><Close /></el-icon>
+          </button>
+        </header>
+        <div>
+          <router-link v-for="item in flatNavigation" :key="item.path" :to="item.path">
+            <el-icon><component :is="item.icon" /></el-icon>
+            <span>{{ item.label }}</span>
+          </router-link>
+        </div>
+      </section>
 
       <div class="ops-sidebar__footer">
         <div class="ops-runtime">
@@ -41,12 +66,11 @@
     <section class="ops-workspace">
       <header class="ops-topbar">
         <div class="ops-topbar__title">
-          <span>监测总览</span>
-          <strong>情报运营工作台</strong>
+          <strong>{{ currentMeta.title }}</strong>
         </div>
 
         <div class="ops-topbar__actions">
-          <div class="ops-range" aria-label="趋势时间范围">
+          <div v-if="currentModule === 'overview'" class="ops-range" aria-label="趋势时间范围">
             <button
               v-for="range in ranges"
               :key="range.value"
@@ -76,9 +100,9 @@
       </header>
 
       <main class="ops-content">
+        <template v-if="currentModule === 'overview'">
         <section class="ops-heading">
           <div>
-            <span class="ops-eyebrow">REAL-TIME MONITORING</span>
             <h1>今日风险态势</h1>
             <p>过去 24 小时共纳入 {{ totalSignals }} 条公开线索，{{ highRiskSignals }} 条需要优先研判。</p>
           </div>
@@ -106,7 +130,6 @@
             <section class="ops-panel ops-trend-panel">
               <header class="ops-panel__header">
                 <div>
-                  <span class="ops-panel__kicker">活动趋势</span>
                   <h2>跨模块风险变化</h2>
                 </div>
                 <span class="ops-panel__meta">{{ rangeLabel }}</span>
@@ -117,10 +140,9 @@
             <section class="ops-panel ops-incidents">
               <header class="ops-panel__header">
                 <div>
-                  <span class="ops-panel__kicker">研判队列</span>
                   <h2>最新重点事件</h2>
                 </div>
-                <router-link class="ops-text-link" to="/threat-situation">
+                <router-link class="ops-text-link" to="/ui-demo/situation">
                   查看全部
                   <el-icon><ArrowRight /></el-icon>
                 </router-link>
@@ -155,7 +177,6 @@
             <section class="ops-panel ops-distribution">
               <header class="ops-panel__header">
                 <div>
-                  <span class="ops-panel__kicker">风险构成</span>
                   <h2>情报类型分布</h2>
                 </div>
               </header>
@@ -165,7 +186,6 @@
             <section class="ops-panel ops-collection">
               <header class="ops-panel__header">
                 <div>
-                  <span class="ops-panel__kicker">运行状态</span>
                   <h2>采集链路</h2>
                 </div>
                 <span class="ops-health" :class="{ 'ops-health--warning': !jobsHealthy }">{{ jobsStatus }}</span>
@@ -186,7 +206,7 @@
                 <div v-if="!siteHealth.length" class="ops-empty ops-empty--compact">暂无站点状态</div>
               </div>
 
-              <router-link class="ops-panel__action" to="/collector-control">
+              <router-link class="ops-panel__action" to="/ui-demo/collector">
                 进入采集控制
                 <el-icon><ArrowRight /></el-icon>
               </router-link>
@@ -195,7 +215,6 @@
             <section class="ops-panel ops-watchlist">
               <header class="ops-panel__header">
                 <div>
-                  <span class="ops-panel__kicker">人工跟踪</span>
                   <h2>重点线索</h2>
                 </div>
                 <span class="ops-panel__meta">{{ watchlist.length }}</span>
@@ -212,19 +231,23 @@
             </section>
           </aside>
         </div>
+        </template>
+        <UiDemoModule v-else :module-id="currentModule" />
       </main>
     </section>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import VChart from 'vue-echarts'
 import '@/lib/echarts'
 import { useAuth } from '@/composables/useAuth'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 import { useJobsData } from '@/composables/useJobsData'
+import UiDemoModule from '@/views/UiDemoModule.vue'
 import {
   attackTypeShare as fallbackAttackTypeShare,
   dashboardSummaryCards as fallbackSummaryCards,
@@ -236,11 +259,13 @@ import {
 } from '@/mock/intelligence'
 
 const { state: authState } = useAuth()
+const route = useRoute()
 const { data: intelligence, refresh: refreshIntelligence } = useIntelligenceData()
 const { data: jobsState, refresh: refreshJobs } = useJobsData()
 
 const selectedRange = ref('7d')
 const refreshing = ref(false)
+const mobileMenuOpen = ref(false)
 const versionLabel = ref('v0.11.1')
 
 const ranges = [
@@ -249,27 +274,50 @@ const ranges = [
   { label: '30D', value: '30d' },
 ]
 
+const moduleMeta = {
+  overview: { title: '监测总览' },
+  ransomware: { title: '勒索情报' },
+  'data-leak': { title: '数据泄露' },
+  vulnerabilities: { title: '漏洞预警' },
+  situation: { title: '威胁态势' },
+  collector: { title: '采集控制' },
+  netdisk: { title: '网盘监测' },
+  'document-library': { title: '文库监测' },
+  'code-monitoring': { title: '代码监测' },
+}
+
+const currentModule = computed(() => (
+  moduleMeta[route.params.module] ? route.params.module : 'overview'
+))
+const currentMeta = computed(() => moduleMeta[currentModule.value])
+
 const navigation = [
   {
     label: '情报研判',
     items: [
       { label: '监测总览', path: '/ui-demo', icon: 'Grid', mobile: true },
-      { label: '勒索情报', path: '/ransomware', icon: 'Lock', mobile: true },
-      { label: '数据泄露', path: '/data-leak', icon: 'Document', mobile: true },
-      { label: '漏洞预警', path: '/vulnerability-alerts', icon: 'WarningFilled', mobile: true },
-      { label: '威胁态势', path: '/threat-situation', icon: 'TrendCharts' },
+      { label: '勒索情报', path: '/ui-demo/ransomware', icon: 'Lock', mobile: true },
+      { label: '数据泄露', path: '/ui-demo/data-leak', icon: 'Document', mobile: true },
+      { label: '漏洞预警', path: '/ui-demo/vulnerabilities', icon: 'WarningFilled', mobile: true },
+      { label: '威胁态势', path: '/ui-demo/situation', icon: 'TrendCharts' },
     ],
   },
   {
     label: '监测任务',
     items: [
-      { label: '采集控制', path: '/collector-control', icon: 'VideoPlay' },
-      { label: '网盘监测', path: '/document-exposure/netdisk', icon: 'Share', mobile: true },
-      { label: '文库监测', path: '/document-exposure/document-library', icon: 'Files' },
-      { label: '代码监测', path: '/document-exposure/code-monitoring', icon: 'Connection' },
+      { label: '采集控制', path: '/ui-demo/collector', icon: 'VideoPlay' },
+      { label: '网盘监测', path: '/ui-demo/netdisk', icon: 'Share' },
+      { label: '文库监测', path: '/ui-demo/document-library', icon: 'Files' },
+      { label: '代码监测', path: '/ui-demo/code-monitoring', icon: 'Connection' },
     ],
   },
 ]
+
+const flatNavigation = computed(() => navigation.flatMap((section) => section.items))
+
+watch(() => route.fullPath, () => {
+  mobileMenuOpen.value = false
+})
 
 const metricIcons = ['Bell', 'Lock', 'Document', 'WarningFilled']
 const jobs = computed(() => jobsState.value || {})
@@ -326,7 +374,7 @@ const incidentRows = computed(() => {
       source: item.vendor || item.product || '公开漏洞源',
       severity: item.severity || (item.isExploited ? 'critical' : 'high'),
       time: item.disclosureTime || item.disclosure_time || '',
-      route: '/vulnerability-alerts',
+      route: '/ui-demo/vulnerabilities',
     })),
     ...ransomwareEvents.value.map((item, index) => ({
       key: item.id || `ransomware-${index}`,
@@ -335,7 +383,7 @@ const incidentRows = computed(() => {
       source: item.attacker || item.sourceSite || '勒索站点',
       severity: item.severity || (Number(item.riskScore || 0) >= 75 ? 'critical' : 'high'),
       time: item.disclosureTime || item.disclosure_time || '',
-      route: '/ransomware',
+      route: '/ui-demo/ransomware',
     })),
     ...dataLeakEvents.value.map((item, index) => ({
       key: item.id || `data-leak-${index}`,
@@ -344,7 +392,7 @@ const incidentRows = computed(() => {
       source: item.attacker || item.sourceSite || '公开论坛',
       severity: item.severity || (Number(item.riskScore || 0) >= 75 ? 'critical' : 'high'),
       time: item.disclosureTime || item.disclosure_time || '',
-      route: '/data-leak',
+      route: '/ui-demo/data-leak',
     })),
   ]
     .sort((left, right) => String(right.time).localeCompare(String(left.time)))
@@ -564,15 +612,6 @@ onMounted(async () => {
   font-size: 16px;
 }
 
-.ops-brand__copy small {
-  margin-top: 4px;
-  overflow: hidden;
-  color: #8e99a8;
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .ops-nav {
   flex: 1;
   min-height: 0;
@@ -625,6 +664,11 @@ onMounted(async () => {
   color: #7f8b9a;
   font-family: var(--ti-font-mono);
   font-size: 10px;
+}
+
+.ops-nav__more,
+.ops-mobile-menu {
+  display: none;
 }
 
 .ops-sidebar__footer {
@@ -684,13 +728,7 @@ onMounted(async () => {
   line-height: 1.2;
 }
 
-.ops-topbar__title span {
-  color: var(--ops-muted);
-  font-size: 10px;
-}
-
 .ops-topbar__title strong {
-  margin-top: 3px;
   overflow: hidden;
   font-size: 15px;
   text-overflow: ellipsis;
@@ -797,7 +835,7 @@ onMounted(async () => {
 }
 
 .ops-heading h1 {
-  margin-top: 4px;
+  margin-top: 0;
   font-size: 24px;
   line-height: 1.25;
 }
@@ -806,13 +844,6 @@ onMounted(async () => {
   margin-top: 6px;
   color: var(--ops-muted);
   font-size: 12px;
-}
-
-.ops-eyebrow,
-.ops-panel__kicker {
-  color: var(--ops-orange);
-  font-size: 9px;
-  font-weight: 800;
 }
 
 .ops-heading__status {
@@ -948,7 +979,7 @@ onMounted(async () => {
 }
 
 .ops-panel__header h2 {
-  margin-top: 2px;
+  margin-top: 0;
   overflow: hidden;
   font-size: 14px;
   line-height: 1.3;
@@ -1341,6 +1372,7 @@ onMounted(async () => {
 
   .ops-nav {
     display: flex;
+    width: calc(100% - 62px);
     height: 100%;
     margin: 0;
     overflow: hidden;
@@ -1377,18 +1409,110 @@ onMounted(async () => {
     font-size: 17px;
   }
 
+  .ops-nav__more {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    display: flex;
+    width: 54px;
+    height: 52px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #aeb8c5;
+    font-size: 8px;
+  }
+
+  .ops-nav__more .el-icon {
+    font-size: 17px;
+  }
+
+  .ops-mobile-menu {
+    position: fixed;
+    right: 8px;
+    bottom: 72px;
+    left: 8px;
+    display: block;
+    overflow: hidden;
+    border: 1px solid var(--ops-border);
+    border-radius: 8px;
+    background: #ffffff;
+    color: var(--ops-text);
+    box-shadow: 0 16px 42px rgba(15, 23, 42, 0.22);
+  }
+
+  .ops-mobile-menu header {
+    display: flex;
+    min-height: 48px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--ops-border-soft);
+  }
+
+  .ops-mobile-menu h2 {
+    margin: 0;
+    font-size: 14px;
+  }
+
+  .ops-mobile-menu header button {
+    display: inline-flex;
+    width: 32px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    background: transparent;
+    color: #64748b;
+  }
+
+  .ops-mobile-menu > div {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1px;
+    padding: 8px;
+    background: var(--ops-border-soft);
+  }
+
+  .ops-mobile-menu a {
+    display: flex;
+    min-width: 0;
+    min-height: 64px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    background: #ffffff;
+    color: #475569;
+    font-size: 10px;
+  }
+
+  .ops-mobile-menu a.router-link-exact-active {
+    color: var(--ops-blue);
+  }
+
+  .ops-mobile-menu a .el-icon {
+    font-size: 18px;
+  }
+
   .ops-workspace {
     height: calc(100vh - 64px);
     grid-template-rows: 58px minmax(0, 1fr);
   }
 
   .ops-topbar {
+    justify-content: flex-end;
     padding: 0 12px;
   }
 
   .ops-range,
+  .ops-topbar__title,
   .ops-account span:last-child,
-  .ops-topbar__title span {
+  .ops-account__avatar {
     display: none;
   }
 

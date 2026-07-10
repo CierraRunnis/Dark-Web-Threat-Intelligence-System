@@ -236,7 +236,7 @@ const routes = [
     },
   },
   {
-    path: '/ui-demo',
+    path: '/ui-demo/:module?',
     name: 'UiDemo',
     component: UiDemo,
     meta: {
