@@ -735,13 +735,22 @@ function Test-PortAvailable {
 }
 
 function Find-AvailablePort {
-    param([int[]]$Candidates)
+    param(
+        [int[]]$Candidates,
+        [int[]]$ExcludedPorts = @()
+    )
     foreach ($candidate in $Candidates) {
+        if ($ExcludedPorts -contains $candidate) {
+            continue
+        }
         if (Test-PortAvailable -Port $candidate) {
             return $candidate
         }
     }
     for ($port = 18000; $port -lt 18100; $port++) {
+        if ($ExcludedPorts -contains $port) {
+            continue
+        }
         if (Test-PortAvailable -Port $port) {
             return $port
         }
@@ -756,7 +765,7 @@ function Ensure-ApiPort {
         return
     }
 
-    $fallback = Find-AvailablePort -Candidates @(18000, 18001, 18002, 18003, 18004, 18005)
+    $fallback = Find-AvailablePort -Candidates @(18000, 18001, 18002, 18003, 18004, 18005) -ExcludedPorts @($FrontendPort)
     Write-Warn "Port $ApiPort is occupied by a process that could not be stopped; using API port $fallback"
     Set-ApiPort -Port $fallback
 }
@@ -764,12 +773,17 @@ function Ensure-ApiPort {
 function Ensure-FrontendPort {
     Stop-ListenersOnPort -Port $FrontendPort -Reason "required by darkweb dashboard"
     Start-Sleep -Milliseconds 500
-    if (Test-PortAvailable -Port $FrontendPort) {
+    if ($FrontendPort -ne $ApiPort -and (Test-PortAvailable -Port $FrontendPort)) {
         return
     }
 
-    $fallback = Find-AvailablePort -Candidates @(5174, 5175, 5176, 5177, 5178, 5179)
-    Write-Warn "Port $FrontendPort is occupied by a process that could not be stopped; using frontend port $fallback"
+    $fallback = Find-AvailablePort -Candidates @(5174, 5175, 5176, 5177, 5178, 5179) -ExcludedPorts @($ApiPort)
+    if ($FrontendPort -eq $ApiPort) {
+        Write-Warn "Frontend port $FrontendPort conflicts with the API port; using frontend port $fallback"
+    }
+    else {
+        Write-Warn "Port $FrontendPort is occupied by a process that could not be stopped; using frontend port $fallback"
+    }
     Set-FrontendPort -Port $fallback
 }
 
