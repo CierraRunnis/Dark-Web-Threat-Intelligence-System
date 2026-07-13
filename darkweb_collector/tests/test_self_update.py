@@ -66,6 +66,16 @@ class SelfUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(SelfUpdateError, "未提交修改"):
             apply_git_update(self.checkout, "main")
 
+    def test_apply_git_update_rejects_non_main_checkout(self):
+        _git(self.checkout, "checkout", "-b", "feature")
+
+        with self.assertRaisesRegex(SelfUpdateError, "main 分支"):
+            apply_git_update(self.checkout, "main")
+
+    def test_apply_git_update_rejects_non_main_target(self):
+        with self.assertRaisesRegex(SelfUpdateError, "origin/main"):
+            apply_git_update(self.checkout, "feature")
+
     def test_current_version_prefers_live_git_branch_and_commit(self):
         expected_commit = _git(self.checkout, "rev-parse", "HEAD")
         old_branch = os.environ.pop("DARKWEB_UPDATE_BRANCH", None)

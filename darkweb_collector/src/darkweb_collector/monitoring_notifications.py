@@ -43,8 +43,9 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _notifications_enabled() -> bool:
-    return _normalize_text(os.environ.get(NOTIFICATION_ENABLED_ENV)).lower() not in {"0", "false", "no", "off"}
+def _notifications_enabled(config: BotConfig) -> bool:
+    environment_enabled = _normalize_text(os.environ.get(NOTIFICATION_ENABLED_ENV)).lower() not in {"0", "false", "no", "off"}
+    return environment_enabled and config.enabled
 
 
 def _match_entries(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -375,34 +376,20 @@ def _build_event_summary(event: dict[str, Any]) -> str:
 
 def build_keyword_match_markdown(event: dict[str, Any]) -> str:
     title = _display_title(event)
-    source_url = _normalize_text(event.get("source_url"))
-    threat_type = _display_value(event.get("leak_type") or event.get("category"), "待研判")
-    target_name = _display_value(event.get("victim"), "待确认")
-    target_industry = _display_value(event.get("industry"), "待确认")
-    confidence_score = int(event.get("confidence_score") or event.get("rule_risk_score") or event.get("risk_score") or 0)
-    confidence_label = "高" if confidence_score >= 75 else "中" if confidence_score >= 45 else "低"
-    screenshots = event.get("screenshot_resources") or []
-    screenshot_status = "已留存，自动通知未附原图，待人工完成合规处理" if screenshots else "暂无"
-    suggestion = (
-        "核验样本真实性和数据归属，固定证据并通知关联单位开展泄露排查。"
-        if any(token in threat_type for token in ("售卖", "泄露", "数据库", "凭证", "源码"))
-        else "复核来源可信度和目标关联性，固定证据后通知关联单位研判。"
-    )
     lines = [
-        "### 暗网监测初筛告警",
-        f"> 发现时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "### 监控关键词命中通知",
+        f"> 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        f"- 威胁标题：{title}",
-        f"- 来源平台/网址：{_display_source(event)} / {source_url or '未提供'}",
-        f"- 威胁类型：{threat_type}",
-        f"- 关联目标：{target_name} / {target_industry}",
+        f"- 事件标题：{title}",
+        f"- 情报来源：{_display_source(event)}",
+        f"- 受害对象：{_display_value(event.get('victim'))}",
+        f"- 攻击者/关联主体：{_display_value(event.get('attacker'))}",
         f"- 披露时间：{_display_disclosure_date(event)}",
-        f"- 原始内容截图：{screenshot_status}",
-        f"- 初步置信度评估：{confidence_label}（{confidence_score}）",
-        f"- 建议处置方向：{suggestion}",
-        f"- 内容摘要：{_build_event_summary(event)}",
-        "- 初验时限：发现后 30 分钟内完成验证与情报编目",
+        f"- 事件摘要：{_build_event_summary(event)}",
     ]
+    source_url = _normalize_text(event.get("source_url"))
+    if source_url:
+        lines.append(f"- 来源链接：{source_url}")
     return "\n".join(lines)
 
 
@@ -442,7 +429,8 @@ def notify_keyword_matches_for_events(
     *,
     config: BotConfig | None = None,
 ) -> dict[str, Any]:
-    if not _notifications_enabled():
+    resolved_config = config or load_bot_config()
+    if not _notifications_enabled(resolved_config):
         return {
             "enabled": False,
             "matched": 0,
@@ -453,7 +441,6 @@ def notify_keyword_matches_for_events(
             "outside_window": 0,
         }
 
-    resolved_config = config or load_bot_config()
     status = bot_config_status(resolved_config)
     if not status.get("configured") and not resolved_config.dry_run:
         return {

@@ -247,8 +247,15 @@
       <div class="ti-card-header">
         <div class="ti-card-title">Bot 助手推送</div>
         <div class="health-actions">
+          <el-switch
+            :model-value="botPushEnabled"
+            :disabled="botConfigLoading || botToggleLoading"
+            active-text="推送开启"
+            inactive-text="推送停止"
+            @change="toggleBotEnabled"
+          />
           <el-button plain :loading="botConfigLoading" @click="loadBotConfig">刷新配置</el-button>
-          <el-button type="success" plain :loading="botTestLoading" :disabled="!botSmartConfigured || !botHasTargets" @click="testBotMessage">测试推送</el-button>
+          <el-button type="success" plain :loading="botTestLoading" :disabled="!botPushEnabled || !botSmartConfigured || !botHasTargets" @click="testBotMessage">测试推送</el-button>
         </div>
       </div>
       <div class="ti-card-body">
@@ -528,6 +535,7 @@ const localBrowserPoolLabel = computed(() => {
   return `${running}/${capacity}`
 })
 const botSmartConfigured = computed(() => botConfig.value.provider === 'wechat_work_aibot' && botConfig.value.configured)
+const botPushEnabled = computed(() => botConfig.value.enabled !== false)
 const botSecretConfigured = computed(() => botConfig.value.provider === 'wechat_work_aibot' && botConfig.value.has_secret)
 const botHasTargets = computed(() => Number(botConfig.value.chat_target_count || 0) > 0 || Boolean(botConfig.value.chat_id))
 const botTargetLabel = computed(() => {
@@ -639,11 +647,13 @@ const ransomwareConfig = ref({
 const botConfigLoading = ref(false)
 const botSaveLoading = ref(false)
 const botTestLoading = ref(false)
+const botToggleLoading = ref(false)
 const botIdInput = ref('')
 const botSecretInput = ref('')
 const botLastError = ref('')
 const botConfig = ref({
   provider: 'wechat_work_aibot',
+  enabled: true,
   configured: false,
   source: 'none',
   has_secret: false,
@@ -956,6 +966,26 @@ async function saveBotConfig() {
     ElMessage.error(botLastError.value)
   } finally {
     botSaveLoading.value = false
+  }
+}
+
+async function toggleBotEnabled(enabled) {
+  botToggleLoading.value = true
+  try {
+    const response = await fetch('/api/bot/enabled', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: Boolean(enabled) }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    botConfig.value = await response.json()
+    botLastError.value = ''
+    ElMessage.success(enabled ? 'Bot 推送已开启' : 'Bot 推送已停止')
+  } catch (error) {
+    botLastError.value = error.message || '更新 Bot 推送状态失败'
+    ElMessage.error(botLastError.value)
+  } finally {
+    botToggleLoading.value = false
   }
 }
 

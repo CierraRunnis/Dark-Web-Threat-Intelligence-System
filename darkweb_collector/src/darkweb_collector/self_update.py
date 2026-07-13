@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
-from darkweb_collector.version_check import current_version_payload
-
-
 ACTIVE_STATUSES = {"queued", "running"}
+UPDATE_BRANCH = "main"
+UPDATE_REMOTE = "origin"
 BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 REMOTE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -160,6 +159,11 @@ def _ensure_update_ready(project_root: Path, branch: str, remote: str) -> None:
         raise SelfUpdateError("当前安装不是 Git 工作副本，无法执行在线更新")
     _validate_branch(branch)
     _validate_remote(remote)
+    if branch != UPDATE_BRANCH or remote != UPDATE_REMOTE:
+        raise SelfUpdateError("在线更新目标固定为 origin/main")
+    checkout_branch = _run_git(project_root, "branch", "--show-current").stdout.strip()
+    if checkout_branch != UPDATE_BRANCH:
+        raise SelfUpdateError("在线更新仅允许在 main 分支执行")
     dirty = _run_git(project_root, "status", "--porcelain", "--untracked-files=no").stdout.strip()
     if dirty:
         raise SelfUpdateError("项目存在未提交修改，请先提交或还原后再更新")
@@ -285,9 +289,8 @@ def run_self_update(job_id: str, branch: str, remote: str = "origin", wait_secon
 
 
 def start_self_update() -> dict[str, Any]:
-    current = current_version_payload()
-    branch = _validate_branch(str(current.get("branch") or ""))
-    remote = _validate_remote(os.environ.get("DARKWEB_UPDATE_REMOTE", "origin"))
+    branch = UPDATE_BRANCH
+    remote = UPDATE_REMOTE
 
     existing = read_update_status()
     if existing.get("status") in ACTIVE_STATUSES and _process_running(existing.get("pid")):

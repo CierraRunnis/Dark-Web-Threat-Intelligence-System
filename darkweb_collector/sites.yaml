@@ -34,6 +34,57 @@
       "render_wait_seconds": 12
     },
     {
+      "site_name": "changan_night_city",
+      "enabled": false,
+      "seed_urls": [
+        "env:DARKWEB_CHANGAN_CONNECTOR_URL"
+      ],
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 50,
+      "max_detail_pages_per_run": 0,
+      "cooldown_seconds": 900,
+      "output_dir": "output/changan-night-city",
+      "dedupe_window_minutes": 180,
+      "connector_url_env": "DARKWEB_CHANGAN_CONNECTOR_URL",
+      "connector_token_env": "DARKWEB_CHANGAN_CONNECTOR_TOKEN"
+    },
+    {
+      "site_name": "xss",
+      "enabled": false,
+      "seed_urls": [
+        "env:DARKWEB_XSS_CONNECTOR_URL"
+      ],
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 50,
+      "max_detail_pages_per_run": 0,
+      "cooldown_seconds": 900,
+      "output_dir": "output/xss",
+      "dedupe_window_minutes": 180,
+      "connector_url_env": "DARKWEB_XSS_CONNECTOR_URL",
+      "connector_token_env": "DARKWEB_XSS_CONNECTOR_TOKEN"
+    },
+    {
+      "site_name": "breachforums",
+      "enabled": false,
+      "seed_urls": [
+        "env:DARKWEB_BREACHFORUMS_CONNECTOR_URL"
+      ],
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 50,
+      "max_detail_pages_per_run": 0,
+      "cooldown_seconds": 900,
+      "output_dir": "output/breachforums",
+      "dedupe_window_minutes": 180,
+      "connector_url_env": "DARKWEB_BREACHFORUMS_CONNECTOR_URL",
+      "connector_token_env": "DARKWEB_BREACHFORUMS_CONNECTOR_TOKEN"
+    },
+    {
       "site_name": "chaos",
       "enabled": true,
       "seed_urls": [

@@ -66,11 +66,11 @@
       <div
         v-show="!shell.state.sidebarCollapsed"
         class="sidebar__version"
-        :class="{ 'sidebar__version--update': versionStatus?.update_available }"
+        :class="{ 'sidebar__version--update': versionNeedsAttention }"
       >
         <div class="sidebar__version-head">
           <span class="sidebar__version-label">版本信息</span>
-          <el-icon v-if="versionStatus?.update_available" class="sidebar__version-icon sidebar__version-icon--warning">
+          <el-icon v-if="versionNeedsAttention" class="sidebar__version-icon sidebar__version-icon--warning">
             <WarningFilled />
           </el-icon>
           <el-icon v-else class="sidebar__version-icon">
@@ -84,7 +84,7 @@
           size="small"
           :type="versionStatus?.update_available ? 'primary' : 'default'"
           :loading="updateRunning"
-          :disabled="versionLoading || updateRunning"
+          :disabled="versionLoading || updateRunning || !versionCanUpdate"
           @click="runUpdate"
         >
           <el-icon v-if="!updateRunning"><Download /></el-icon>
@@ -128,7 +128,6 @@ const navTree = [
   { type: 'item', path: '/vulnerability-alerts', title: '漏洞预警', icon: 'WarningFilled' },
   { type: 'item', path: '/threat-situation', title: '威胁态势', icon: 'TrendCharts' },
   { type: 'item', path: '/collector-control', title: '采集控制', icon: 'VideoPlay' },
-  { type: 'item', path: '/darkweb-monitoring', title: '暗网监测', icon: 'View' },
   {
     type: 'group',
     key: 'document-exposure',
@@ -184,7 +183,10 @@ const versionTitle = computed(() => {
   if (updateRunning.value) return '正在更新系统'
   if (versionLoading.value && !versionStatus.value) return '检查中'
   if (versionError.value && !versionStatus.value) return '检查失败'
+  if (versionStatus.value?.status === 'error') return '检查失败'
+  if (versionStatus.value?.relation === 'wrong_branch') return '当前非 main 分支'
   if (versionStatus.value?.update_available) return '发现新版本'
+  if (versionStatus.value?.relation === 'unknown') return '版本状态未知'
   return `当前 ${currentVersionLabel.value}`
 })
 
@@ -192,12 +194,18 @@ const versionDescription = computed(() => {
   if (updateRunning.value) return updateState.value?.message || '正在准备更新'
   if (versionError.value && !versionStatus.value) return versionError.value
   if (!versionStatus.value) return '正在检查版本信息'
-  const branch = versionStatus.value.branch || versionStatus.value.current?.branch || 'main'
+  const target = versionStatus.value.target?.ref || 'origin/main'
+  const checkout = versionStatus.value.current?.branch || '未知分支'
   const latest = versionStatus.value.latest?.short_commit || ''
+  if (versionStatus.value.status === 'error') return `无法确认 ${target} 状态`
+  if (versionStatus.value.relation === 'wrong_branch') return `当前 ${checkout} · 更新目标 ${target}`
   if (versionStatus.value.update_available) {
-    return `本地 ${currentVersionLabel.value} / ${branch} ${latest || '-'}`
+    return `${target} 有更新 · ${latest || '-'}`
   }
-  return latest ? `${branch} 分支已同步 · ${latest}` : `${branch} 分支已同步`
+  if (versionStatus.value.relation === 'identical') {
+    return latest ? `${target} 已同步 · ${latest}` : `${target} 已同步`
+  }
+  return `无法确认 ${target} 状态`
 })
 
 const currentVersionLabel = computed(() => (
@@ -207,9 +215,16 @@ const currentVersionLabel = computed(() => (
 ))
 
 const updateRunning = computed(() => ['queued', 'running'].includes(updateState.value?.status))
+const versionCanUpdate = computed(() => versionStatus.value?.status === 'ok' && versionStatus.value?.can_update === true)
+const versionNeedsAttention = computed(() => Boolean(
+  versionStatus.value
+  && (versionStatus.value.status !== 'ok' || versionStatus.value.relation !== 'identical'),
+))
 
 const updateButtonLabel = computed(() => {
   if (updateRunning.value) return updateState.value?.message || '正在更新'
+  if (versionStatus.value?.relation === 'wrong_branch') return '仅 main 可更新'
+  if (!versionCanUpdate.value) return '无法更新'
   return versionStatus.value?.update_available ? '一键更新' : '检查并更新'
 })
 

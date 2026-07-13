@@ -740,7 +740,7 @@ export const situationAlerts = [
     title: '北美制造业勒索告警持续上扬',
     description: 'LockBit 与 RansomHub 在制造业链条中出现重复投放迹象，相关谈判贴文增量明显。',
     time: '2026-03-10 09:24',
-    source: '勒索情报 / 暗网监测'
+    source: '勒索情报 / 数据泄露情报'
   },
   {
     level: 'high',

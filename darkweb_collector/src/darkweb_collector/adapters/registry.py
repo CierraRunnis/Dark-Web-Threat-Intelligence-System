@@ -5,6 +5,7 @@ from darkweb_collector.adapters.chaos import ChaosAdapter
 from darkweb_collector.adapters.darkforums import DarkforumsAdapter
 from darkweb_collector.adapters.dragonforce import DragonforceAdapter
 from darkweb_collector.adapters.dragonforceblog import DragonforceblogAdapter
+from darkweb_collector.adapters.forum_connector import ForumConnectorAdapter
 from darkweb_collector.adapters.lynx import LynxAdapter
 
 
@@ -14,6 +15,9 @@ ADAPTERS: dict[str, SiteAdapter] = {
     ChaosAdapter.site_name: ChaosAdapter(),
     LynxAdapter.site_name: LynxAdapter(),
     DragonforceblogAdapter.site_name: DragonforceblogAdapter(),
+    "changan_night_city": ForumConnectorAdapter("changan_night_city"),
+    "xss": ForumConnectorAdapter("xss"),
+    "breachforums": ForumConnectorAdapter("breachforums"),
 }
 
 

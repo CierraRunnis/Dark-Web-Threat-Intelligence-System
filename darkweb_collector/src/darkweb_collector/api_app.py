@@ -27,6 +27,7 @@ from darkweb_collector.bot_assistant import (
     post_bot_payload,
     send_intelligence_digest,
     set_bot_config,
+    set_bot_enabled,
 )
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
@@ -88,15 +89,6 @@ from darkweb_collector.document_exposure_sessions import (
     verify_platform_session,
 )
 from darkweb_collector.document_exposure_platforms import list_exposure_platforms
-from darkweb_collector.darkweb_monitoring import (
-    build_daily_report,
-    build_monthly_report,
-    build_overview as build_darkweb_monitoring_overview,
-    ingest_finding,
-    push_case,
-    review_case,
-    run_monitoring_cycle,
-)
 from darkweb_collector.remote_browser_sessions import (
     close_remote_browser_login,
     control_remote_browser,
@@ -310,11 +302,6 @@ def warm_payloads_on_startup() -> None:
         ensure_netdisk_source_health_defaults()
     except Exception:
         logger.exception("failed to initialize netdisk source health records")
-    if os.environ.get("DARKWEB_AUTO_MONITORING", "0").strip().lower() not in {"0", "false", "no", "off"}:
-        try:
-            start_continuous_dispatch()
-        except Exception:
-            logger.exception("failed to start automatic darkweb monitoring")
     global _warmup_started
     if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
         logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
@@ -509,36 +496,6 @@ class MonitoringKeywordsRequest(BaseModel):
     keywords: list[MonitoringKeywordRow]
 
 
-class DarkwebMonitoringFindingRequest(BaseModel):
-    event_id: str = ""
-    source_platform: str
-    source_url: str = ""
-    title: str
-    threat_type: str = "待研判"
-    target_name: str = ""
-    target_industry: str = ""
-    discovered_at: str = ""
-    content_excerpt: str = ""
-    screenshot_url: str = ""
-    screenshot_compliant: bool = False
-    confidence_level: str = "medium"
-    suggested_action: str = ""
-    metadata: dict = Field(default_factory=dict)
-
-
-class DarkwebMonitoringReviewRequest(BaseModel):
-    verification_status: str
-    confidence_level: str = "medium"
-    target_name: str = ""
-    target_industry: str = ""
-    threat_type: str = "待研判"
-    suggested_action: str = ""
-    screenshot_compliant: bool = False
-    reviewer: str = ""
-    disposition: str = ""
-    note: str = ""
-
-
 class BotSendRequest(BaseModel):
     type: str = "digest"
     content: str = ""
@@ -561,6 +518,10 @@ class BotConfigRequest(BaseModel):
     webhook_url: str = ""
     webhook_key: str = ""
     secret: str = ""
+
+
+class BotEnabledRequest(BaseModel):
+    enabled: bool
 
 
 class ExposureWatchTermRequest(BaseModel):
@@ -830,63 +791,14 @@ def monitoring_keyword_notifications() -> list[dict]:
         return list_monitoring_keyword_notifications(connection)
 
 
-@app.get("/api/darkweb-monitoring/overview")
-def darkweb_monitoring_overview() -> dict:
-    return build_darkweb_monitoring_overview()
-
-
-@app.post("/api/darkweb-monitoring/findings")
-def darkweb_monitoring_ingest(payload: DarkwebMonitoringFindingRequest) -> dict:
-    try:
-        return ingest_finding(payload.model_dump())
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/darkweb-monitoring/cases/{case_id}/review")
-def darkweb_monitoring_review(case_id: int, payload: DarkwebMonitoringReviewRequest) -> dict:
-    try:
-        return review_case(case_id, payload.model_dump())
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="darkweb monitoring case not found") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/darkweb-monitoring/cases/{case_id}/push")
-def darkweb_monitoring_push(case_id: int) -> dict:
-    try:
-        return push_case(case_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="darkweb monitoring case not found") from exc
-    except (ValueError, BotAssistantError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/darkweb-monitoring/run", status_code=202)
-def darkweb_monitoring_run() -> dict:
-    return run_monitoring_cycle()
-
-
-@app.get("/api/darkweb-monitoring/reports/daily")
-def darkweb_monitoring_daily_report(date: str | None = None) -> dict:
-    try:
-        return build_daily_report(date)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/darkweb-monitoring/reports/monthly")
-def darkweb_monitoring_monthly_report(month: str | None = None) -> dict:
-    try:
-        return build_monthly_report(month)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @app.get("/api/bot/status")
 def bot_status() -> dict:
     return bot_config_status()
+
+
+@app.post("/api/bot/enabled")
+def update_bot_enabled(payload: BotEnabledRequest) -> dict:
+    return set_bot_enabled(payload.enabled)
 
 
 @app.get("/api/platform-sessions")

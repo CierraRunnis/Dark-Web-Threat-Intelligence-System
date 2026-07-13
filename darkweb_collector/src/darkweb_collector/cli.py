@@ -121,14 +121,7 @@ def _enqueue_due() -> int:
         return str(async_result.id)
 
     dispatched = enqueue_due_sites(seed_dispatcher=seed_dispatcher, state_store=get_state_store(prefer_redis=True))
-    from darkweb_collector.darkweb_monitoring import generate_due_reports, poll_configured_connectors, scan_sla_breaches
-
-    maintenance = {
-        "connectors": poll_configured_connectors(),
-        "sla": scan_sla_breaches(),
-        "generated_reports": generate_due_reports(),
-    }
-    print(json.dumps({"site_dispatches": dispatched, **maintenance}, ensure_ascii=False, indent=2))
+    print(json.dumps(dispatched, ensure_ascii=False, indent=2))
     return 0
 
 

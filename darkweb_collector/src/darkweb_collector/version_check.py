@@ -93,10 +93,19 @@ def current_version_payload() -> dict[str, Any]:
         "version": version or "local",
         "commit": commit,
         "short_commit": _short_commit(commit),
-        "branch": os.environ.get("DARKWEB_UPDATE_BRANCH", "").strip() or git_branch or str(version_file.get("branch") or "").strip() or DEFAULT_BRANCH,
+        "branch": git_branch or str(version_file.get("branch") or "").strip(),
         "repository": os.environ.get("DARKWEB_UPDATE_REPO", "").strip() or str(version_file.get("repository") or "").strip() or DEFAULT_REPOSITORY,
         "updated_at": str(version_file.get("updated_at") or "").strip(),
         "source": "git" if git_commit else "version_file" if version_file else "unknown",
+    }
+
+
+def update_target_payload(repository: str = "") -> dict[str, str]:
+    return {
+        "repository": repository or DEFAULT_REPOSITORY,
+        "remote": "origin",
+        "branch": DEFAULT_BRANCH,
+        "ref": f"origin/{DEFAULT_BRANCH}",
     }
 
 
@@ -143,7 +152,8 @@ def _same_commit(left: str, right: str) -> bool:
 def build_version_status() -> dict[str, Any]:
     current = current_version_payload()
     repository = current["repository"]
-    branch = current["branch"]
+    target = update_target_payload(repository)
+    branch = target["branch"]
     latest: dict[str, Any] = {}
     status = "ok"
     error = ""
@@ -156,7 +166,20 @@ def build_version_status() -> dict[str, Any]:
 
     current_commit = str(current.get("commit") or "")
     latest_commit = str(latest.get("commit") or "")
-    update_available = bool(latest_commit and current_commit and not _same_commit(current_commit, latest_commit))
+    checkout_branch = str(current.get("branch") or "")
+    on_target_branch = checkout_branch == branch
+    commits_known = bool(latest_commit and current_commit)
+    same_commit = commits_known and _same_commit(current_commit, latest_commit)
+    update_available = bool(on_target_branch and commits_known and not same_commit)
+    can_update = bool(on_target_branch and commits_known and status == "ok")
+    if not on_target_branch:
+        relation = "wrong_branch"
+    elif not commits_known or status != "ok":
+        relation = "unknown"
+    elif same_commit:
+        relation = "identical"
+    else:
+        relation = "different"
     if update_available and current_commit:
         compare_url = f"https://github.com/{repository}/compare/{urllib.parse.quote(current_commit, safe='')}...{urllib.parse.quote(branch, safe='')}"
     else:
@@ -164,6 +187,8 @@ def build_version_status() -> dict[str, Any]:
 
     if status == "error":
         message = "无法检查 GitHub 更新"
+    elif not on_target_branch:
+        message = "当前工作区未检出 main 分支"
     elif update_available:
         message = "发现新版本"
     elif latest_commit:
@@ -176,8 +201,11 @@ def build_version_status() -> dict[str, Any]:
         "message": message,
         "repository": repository,
         "branch": branch,
+        "target": target,
         "current": current,
         "latest": latest,
+        "relation": relation,
+        "can_update": can_update,
         "update_available": update_available,
         "compare_url": compare_url,
         "checked_at": _now_iso(),

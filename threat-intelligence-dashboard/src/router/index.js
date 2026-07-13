@@ -7,7 +7,6 @@ import DataLeak from '@/views/DataLeak.vue'
 import VulnerabilityAlerts from '@/views/VulnerabilityAlerts.vue'
 import ThreatSituation from '@/views/ThreatSituation.vue'
 import CollectorControl from '@/views/CollectorControl.vue'
-import DarkWebMonitoring from '@/views/DarkWebMonitoring.vue'
 import EventDetail from '@/views/EventDetail.vue'
 import DocumentExposureSettings from '@/views/DocumentExposureSettings.vue'
 import DocumentExposureScans from '@/views/DocumentExposureScans.vue'
@@ -96,17 +95,6 @@ const routes = [
       icon: 'VideoPlay',
       kicker: 'Collection Control',
       subtitle: '统一触发采集任务、查看同步状态和手工联调入口。',
-    },
-  },
-  {
-    path: '/darkweb-monitoring',
-    name: 'DarkWebMonitoring',
-    component: DarkWebMonitoring,
-    meta: {
-      title: '暗网监测',
-      icon: 'View',
-      kicker: '',
-      subtitle: '统一查看暗网平台状态、30 分钟 SLA、案件复核和报告导出。',
     },
   },
   {

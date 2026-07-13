@@ -20,26 +20,6 @@ from darkweb_collector.utils import utc_now_iso
 
 
 logger = logging.getLogger(__name__)
-DEFAULT_MONITORING_KEYWORDS = [
-    {"keyword": "中国", "category": "geo_keywords", "weight": 10, "enabled": True, "match_mode": "contains"},
-    {"keyword": "china", "category": "geo_keywords", "weight": 8, "enabled": True, "match_mode": "word_boundary"},
-    {"keyword": "政府", "category": "org_keywords", "weight": 12, "enabled": True, "match_mode": "contains"},
-    {"keyword": "government", "category": "org_keywords", "weight": 10, "enabled": True, "match_mode": "word_boundary"},
-    {"keyword": "能源", "category": "org_keywords", "weight": 10, "enabled": True, "match_mode": "contains"},
-    {"keyword": "energy", "category": "org_keywords", "weight": 8, "enabled": True, "match_mode": "word_boundary"},
-    {"keyword": "西藏", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "contains"},
-    {"keyword": "西藏自治区", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "contains"},
-    {"keyword": "藏区", "category": "geo_keywords", "weight": 20, "enabled": True, "match_mode": "contains"},
-    {"keyword": "tibet", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "word_boundary"},
-    {"keyword": "xizang", "category": "geo_keywords", "weight": 25, "enabled": True, "match_mode": "word_boundary"},
-    {"keyword": "拉萨", "category": "geo_keywords", "weight": 22, "enabled": True, "match_mode": "contains"},
-    {"keyword": "日喀则", "category": "geo_keywords", "weight": 22, "enabled": True, "match_mode": "contains"},
-    {"keyword": "山南", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
-    {"keyword": "林芝", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
-    {"keyword": "昌都", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
-    {"keyword": "那曲", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
-    {"keyword": "阿里地区", "category": "geo_keywords", "weight": 18, "enabled": True, "match_mode": "contains"},
-]
 SAMPLE_HINT_WORDS = ("sample", "samples", "proof", "mirror", "preview", "demo", "file", "files", "paste", "download", "link")
 URL_RE = re.compile(r"https?://[^\s'\"<>)]+", re.IGNORECASE)
 SAMPLE_PREFIX_RE = re.compile(
@@ -90,28 +70,9 @@ def _event_text(event: dict[str, Any]) -> str:
     return "\n".join(_normalize_text(item) for item in parts if _normalize_text(item))
 
 
-def _seed_keywords(connection) -> list[dict[str, Any]]:
-    current = list_monitoring_keywords(connection)
-    existing = {
-        (_normalize_text(item.get("keyword")).lower(), _normalize_text(item.get("category")))
-        for item in current
-    }
-    missing = [
-        {**item, "updated_at": utc_now_iso()}
-        for item in DEFAULT_MONITORING_KEYWORDS
-        if (item["keyword"].lower(), item["category"]) not in existing
-    ]
-    if not missing:
-        return current
-    rows = [*current, *missing]
-    replace_monitoring_keywords(connection, rows)
-    connection.commit()
-    return list_monitoring_keywords(connection)
-
-
 def get_monitoring_keywords() -> list[dict[str, Any]]:
     with get_db_connection() as connection:
-        return _seed_keywords(connection)
+        return list_monitoring_keywords(connection)
 
 
 def save_monitoring_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -184,7 +145,7 @@ def _can_use_global_monitoring_cache(connection, normalized_events: list[dict[st
 
 
 def _cached_monitoring_summary(connection) -> dict[str, Any] | None:
-    keywords = _seed_keywords(connection)
+    keywords = list_monitoring_keywords(connection)
     cache_key = _monitoring_cache_key(connection, keywords)
     with _MONITORING_CACHE_LOCK:
         if _MONITORING_CACHE_KEY != cache_key:
@@ -404,7 +365,7 @@ def _with_monitoring(event: dict[str, Any], keywords: list[dict[str, Any]]) -> d
 
 
 def enrich_events(connection, normalized_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    keywords = _seed_keywords(connection)
+    keywords = list_monitoring_keywords(connection)
     return [_with_monitoring(event, keywords) for event in normalized_events]
 
 
@@ -515,7 +476,7 @@ def _priority_alert_stream(enriched_events: list[dict[str, Any]], limit: int = 8
 
 def build_monitoring_payload(connection, normalized_events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     global _MONITORING_CACHE_KEY, _MONITORING_CACHE_EVENTS, _MONITORING_CACHE_PAYLOAD
-    keywords = _seed_keywords(connection)
+    keywords = list_monitoring_keywords(connection)
     use_global_cache = _can_use_global_monitoring_cache(connection, normalized_events)
     cache_key = _monitoring_cache_key(connection, keywords) if use_global_cache else ""
     if use_global_cache:

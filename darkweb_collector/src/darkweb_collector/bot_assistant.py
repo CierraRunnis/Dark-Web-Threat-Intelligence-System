@@ -50,6 +50,7 @@ class BotAssistantError(RuntimeError):
 @dataclass(frozen=True)
 class BotConfig:
     provider: str = BOT_PROVIDER_WECHAT_WORK_AIBOT
+    enabled: bool = True
     bot_id: str = ""
     chat_id: str = ""
     chat_ids: tuple[str, ...] = ()
@@ -207,6 +208,7 @@ def load_bot_config(
         raw_dry_run = os.environ.get("BOT_DRY_RUN", "0") == "1"
 
     settings = _load_settings()
+    resolved_enabled = settings.get("enabled", True) is not False
     settings_path = str(_settings_path())
     explicit_bot = _normalize_text(bot_id) or _normalize_text(secret) or _normalize_text(chat_id)
     explicit_webhook = _normalize_text(webhook_url) or _normalize_text(webhook_key)
@@ -316,6 +318,7 @@ def load_bot_config(
 
     return BotConfig(
         provider=resolved_provider,
+        enabled=resolved_enabled,
         bot_id=resolved_bot_id,
         chat_id=resolved_chat_id,
         chat_ids=resolved_chat_ids,
@@ -342,17 +345,19 @@ def set_bot_config(
     provider: str = BOT_PROVIDER_WECHAT_WORK_AIBOT,
 ) -> dict[str, Any]:
     normalized_provider = _normalize_text(provider) or BOT_PROVIDER_WECHAT_WORK_AIBOT
+    existing = _load_settings()
+    enabled = existing.get("enabled", True) is not False
     if normalized_provider == BOT_PROVIDER_WECHAT_WORK_AIBOT:
         normalized_bot_id = _normalize_text(bot_id)
         normalized_secret = _normalize_text(secret)
         if not normalized_bot_id or not normalized_secret:
             raise BotAssistantError("bot_id and secret are required for WeCom AI Bot")
-        existing = _load_settings()
         same_bot = _normalize_text(existing.get("bot_id")) == normalized_bot_id
         existing_chat_ids = _normalize_chat_ids(existing.get("chat_ids")) if same_bot else ()
         chat_ids = _normalize_chat_ids([_normalize_text(chat_id), *existing_chat_ids, _normalize_text(existing.get("chat_id")) if same_bot else ""])
         payload = {
             "provider": BOT_PROVIDER_WECHAT_WORK_AIBOT,
+            "enabled": enabled,
             "bot_id": normalized_bot_id,
             "secret": normalized_secret,
             "chat_ids": list(chat_ids),
@@ -372,6 +377,7 @@ def set_bot_config(
         raise BotAssistantError("webhook_url or webhook_key is required")
     payload = {
         "provider": BOT_PROVIDER_WECHAT_WORK_WEBHOOK,
+        "enabled": enabled,
         "webhook_url": resolved_url,
         "webhook_key": resolved_key,
         "secret": _normalize_text(secret),
@@ -381,12 +387,27 @@ def set_bot_config(
     return bot_config_status(load_bot_config())
 
 
+def set_bot_enabled(enabled: bool) -> dict[str, Any]:
+    payload = _load_settings()
+    payload["enabled"] = bool(enabled)
+    payload["updated_at"] = _now_utc_iso()
+    _save_settings(payload)
+
+    config = load_bot_config()
+    if config.enabled:
+        ensure_wecom_aibot_listener(config)
+    else:
+        stop_wecom_aibot_listener()
+    return bot_config_status(config)
+
+
 def bot_config_status(config: BotConfig | None = None) -> dict[str, Any]:
     resolved = config or load_bot_config()
     parsed = urlparse(resolved.webhook_url)
     configured = bool(resolved.bot_id and resolved.secret) if resolved.provider == BOT_PROVIDER_WECHAT_WORK_AIBOT else bool(resolved.webhook_url)
     status = {
         "provider": resolved.provider,
+        "enabled": resolved.enabled,
         "configured": configured,
         "source": resolved.source,
         "has_secret": bool(resolved.secret),
@@ -513,7 +534,8 @@ class _WeComAibotListener:
 
     def ensure_started(self, config: BotConfig | None = None) -> None:
         resolved = config or load_bot_config()
-        if resolved.provider != BOT_PROVIDER_WECHAT_WORK_AIBOT or not resolved.bot_id or not resolved.secret or resolved.dry_run:
+        if not resolved.enabled or resolved.provider != BOT_PROVIDER_WECHAT_WORK_AIBOT or not resolved.bot_id or not resolved.secret or resolved.dry_run:
+            self.stop()
             return
         signature = hashlib.sha256(
             f"{resolved.bot_id}\0{resolved.secret}\0{resolved.websocket_url}".encode("utf-8")
@@ -541,6 +563,11 @@ class _WeComAibotListener:
             self._thread = thread
             thread.start()
             self._started = True
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._stop_event:
+                self._stop_event.set()
 
     def _client_connected_locked(self) -> bool:
         client = self._client
@@ -576,7 +603,7 @@ class _WeComAibotListener:
             running = bool(self._thread and self._thread.is_alive())
             connected = self._client_connected_locked()
             return {
-                "enabled": configured and not resolved.dry_run,
+                "enabled": resolved.enabled and configured and not resolved.dry_run,
                 "running": running,
                 "connected": connected,
                 "authenticated": self._authenticated,
@@ -689,6 +716,10 @@ _WECOM_AIBOT_LISTENER = _WeComAibotListener()
 
 def ensure_wecom_aibot_listener(config: BotConfig | None = None) -> None:
     _WECOM_AIBOT_LISTENER.ensure_started(config)
+
+
+def stop_wecom_aibot_listener() -> None:
+    _WECOM_AIBOT_LISTENER.stop()
 
 
 def wecom_aibot_listener_status(config: BotConfig | None = None) -> dict[str, Any]:
@@ -824,6 +855,8 @@ def post_bot_payload(payload: dict[str, Any], config: BotConfig | None = None) -
     resolved_payload = _payload_for_provider(payload, resolved)
     if resolved.dry_run:
         return {"ok": True, "dry_run": True, "payload": resolved_payload, **bot_config_status(resolved)}
+    if not resolved.enabled:
+        raise BotAssistantError("Bot push is disabled")
     if resolved.provider == BOT_PROVIDER_WECHAT_WORK_AIBOT:
         return _post_wecom_aibot_payload(resolved_payload, resolved)
     if resolved.provider != BOT_PROVIDER_WECHAT_WORK_WEBHOOK:

@@ -9,46 +9,23 @@
 - 前端分析工作台：提供数据浏览、任务状态、采集结果和风险线索查看能力。
 - 后台任务调度：使用 Redis 和 Celery 处理采集、渲染、详情解析和同步任务。
 - Tor 网桥控制：支持在系统内配置并启动 Snowflake / obfs4 等 Tor 网桥模式，为采集代理提供本地 SOCKS 入口。
-- 一键在线更新：在版本信息区域直接更新当前 Git 分支，并自动同步依赖和重启服务。
+- 一键在线更新：在版本信息区域直接同步 `origin/main`，并自动同步依赖和重启服务。
 - Windows / WSL 启动脚本：提供一键准备依赖、注册命令、启动服务和查看状态的脚本。
 
-## 区域暗网监测
+## 数据泄露来源接入
 
-系统提供独立暗网监测工作台，默认纳管长安不夜城、XSS、BreachForums 和 Telegram 四类来源，并使用西藏、Tibet、Xizang、拉萨、日喀则等区域关键词建立监测范围。
-
-每条命中线索进入监测台账后会生成 30 分钟初验截止时间。初验记录包括来源平台与网址、威胁类型、关联单位或行业、发现时间、截图合规状态、置信度、建议处置方向、研判人员、处置状态和情报编目号。存在原始截图但尚未标记合规时，系统会阻止对外报送。
-
-关闭论坛和 Telegram 的登录状态由独立连接器维护，主系统不保存平台账号。连接器需提供一个受控 HTTP(S) JSON 接口，并通过以下环境变量接入：
+长安不夜城、XSS 和 BreachForums 作为普通采集站点接入现有“数据泄露情报”流程，不提供独立监测模块。连接器地址与令牌通过环境变量配置：
 
 ```text
 DARKWEB_CHANGAN_CONNECTOR_URL
+DARKWEB_CHANGAN_CONNECTOR_TOKEN
 DARKWEB_XSS_CONNECTOR_URL
+DARKWEB_XSS_CONNECTOR_TOKEN
 DARKWEB_BREACHFORUMS_CONNECTOR_URL
-DARKWEB_TELEGRAM_CONNECTOR_URL
+DARKWEB_BREACHFORUMS_CONNECTOR_TOKEN
 ```
 
-如连接器启用 Bearer Token，可分别配置同名前缀的 `*_CONNECTOR_TOKEN`。接口返回格式：
-
-```json
-{
-  "findings": [
-    {
-      "event_id": "source-stable-id",
-      "title": "线索标题",
-      "source_url": "https://source.example/thread/1",
-      "threat_type": "数据售卖",
-      "target_name": "关联单位",
-      "target_industry": "关联行业",
-      "discovered_at": "2026-07-10T10:00:00+00:00",
-      "content_excerpt": "合规截取的原始内容摘要",
-      "screenshot_url": "/collector-output/source/thread-1.png",
-      "confidence_level": "medium"
-    }
-  ]
-}
-```
-
-Windows 和 WSL 启动脚本中的调度器会定期轮询连接器、检查 30 分钟 SLA、生成已结束日期的日报，并在月初归档上月月报。默认连接器轮询间隔为 300 秒，可通过 `DARKWEB_CONNECTOR_POLL_INTERVAL_SECONDS` 调整。
+连接器返回 JSON 数组，或包含 `findings`、`items`、`results` 数组的对象。每条记录必须提供 `title`，并提供稳定的 `source_url` 或 `event_id`。配置连接器后，在采集控制页启用对应站点；采集结果会写入现有论坛数据表并显示在“数据泄露情报”页面。
 
 ## 项目结构
 
@@ -169,12 +146,12 @@ Windows 脚本会优先复用本机已有环境。缺少 Python、Node.js 或 Re
 
 登录系统后，侧边栏的版本信息区域提供“一键更新”按钮。点击后系统会：
 
-1. 获取当前分支在 GitHub 上的最新提交。
+1. 获取 GitHub `main` 分支的最新提交。
 2. 仅在工作区没有未提交修改且可以 fast-forward 时更新代码。
 3. 通过对应的 Windows 或 Linux 启动脚本同步依赖。
 4. 重启 API、前端和后台任务服务。
 
-更新完成后需要重新登录。在线更新要求项目通过 Git 克隆部署；源码压缩包、容器只读文件系统或存在本地未提交修改时，系统会停止更新并显示原因。默认更新当前检出的分支，也可以通过 `DARKWEB_UPDATE_BRANCH` 指定分支，通过 `DARKWEB_SELF_UPDATE_ENABLED=0` 禁用在线更新。
+更新完成后需要重新登录。在线更新目标固定为 `origin/main`，并要求部署工作区当前检出 `main`。源码压缩包、容器只读文件系统、其他分支或存在本地未提交修改时，系统会停止更新并显示原因。可通过 `DARKWEB_SELF_UPDATE_ENABLED=0` 禁用在线更新。
 
 ## Tor 网桥
 
