@@ -25,6 +25,8 @@ darkweb_collector/output/
 darkweb_collector/logs/
 darkweb_collector/*.log
 darkweb_collector/C*/
+darkweb_collector/samples/dragonforceblog/results/
+darkweb_collector/samples/dragonforceblog/test_*_parsed.json
 threat-intelligence-dashboard/.npm-cache/
 threat-intelligence-dashboard/.codex*.log
 **/storage_state.json
