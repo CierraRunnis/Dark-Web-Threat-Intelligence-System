@@ -26,6 +26,7 @@ from darkweb_collector.job_diagnostics import (
 )
 from darkweb_collector.normalized_intelligence import (
     _build_vulnerability_base_event,
+    _label_source as _normalized_source_label,
     build_display_title,
     ensure_normalized_intelligence,
     load_normalized_event_detail,
@@ -35,6 +36,7 @@ from darkweb_collector.normalized_intelligence import (
 )
 from darkweb_collector.runtime import default_db_path, output_root, project_root
 from darkweb_collector.sites.darkforums import normalize_darkforums_timestamp
+from darkweb_collector.site_auth import site_auth_readiness, site_display_name
 from darkweb_collector.utils import safe_stem
 
 
@@ -100,6 +102,7 @@ JOB_STATUS_LABELS = {
     "running": "运行中",
     "enqueued": "已入队",
     "stale": "异常挂起",
+    "skipped": "已跳过",
 }
 
 RECENT_FAILURE_WINDOW_HOURS = 24
@@ -201,7 +204,7 @@ def _label_region(value: str | None) -> str:
 
 
 def _label_source(value: str | None) -> str:
-    return (value or "").strip() or "未知"
+    return _normalized_source_label(value)
 
 
 def _label_job_status(value: str | None) -> str:
@@ -1836,6 +1839,14 @@ def build_jobs_payload() -> dict[str, Any]:
             latest_unresolved_problem.get("error_message") if latest_unresolved_problem else ""
         )
         config = config_map.get(site_name)
+        auth = site_auth_readiness(config) if config is not None else {
+            "auth_required": False,
+            "auth_status": "not_required",
+            "auth_platform": "",
+            "auth_message": "",
+        }
+        auth_required = bool(auth["auth_required"])
+        auth_waiting = auth["auth_status"] in {"missing", "login_in_progress", "login_required"}
         failure_count = consecutive_failures(seed_rows)
         threshold = failure_threshold(config) if config is not None else 3
         cooldown_until_dt = failure_cooldown_until(config, seed_rows) if config is not None else None
@@ -1878,9 +1889,14 @@ def build_jobs_payload() -> dict[str, Any]:
         site_health.append(
             {
                 "site_name": site_name,
+                "display_name": site_display_name(config) if config is not None else site_name,
                 "enabled": enabled_map.get(site_name, True),
                 "overall_status": (
-                    "异常"
+                    "待登录"
+                    if auth_required and auth_waiting
+                    else "会话失效"
+                    if auth_required
+                    else "异常"
                     if latest_unresolved_problem
                     else "陈旧任务"
                     if effective_seed_status == "stale"
@@ -1901,6 +1917,10 @@ def build_jobs_payload() -> dict[str, Any]:
                     (latest_unresolved_problem.get("error_message") if latest_unresolved_problem else "")
                     or ("stale seed task auto-cleared" if effective_seed_status == "stale" else "")
                 ),
+                "auth_required": auth_required,
+                "auth_status": auth["auth_status"],
+                "auth_platform": auth["auth_platform"],
+                "auth_message": auth["auth_message"],
                 "error_category": error_category,
                 "forum_details_count": forum_detail_counts.get(site_name, 0),
                 "victims_count": victim_counts.get(site_name, 0),
@@ -1913,7 +1933,9 @@ def build_jobs_payload() -> dict[str, Any]:
                 "staleSeedDetected": effective_seed_status == "stale",
                 "latestSeedJobAgeMinutes": seed_age_minutes,
                 "blockingReason": (
-                    "failure_cooldown"
+                    "auth_required"
+                    if auth_required
+                    else "failure_cooldown"
                     if circuit_breaker_open
                     else "stale_seed_job"
                     if effective_seed_status == "stale"

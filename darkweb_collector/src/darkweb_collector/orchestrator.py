@@ -19,6 +19,7 @@ from darkweb_collector.db import (
 from darkweb_collector.job_diagnostics import is_in_failure_cooldown
 from darkweb_collector.models import DetailTask, RunContext, SiteConfig
 from darkweb_collector.queueing import queue_for_detail, queue_for_seed
+from darkweb_collector.site_auth import SiteAuthenticationRequired, site_auth_readiness
 from darkweb_collector.state_store import StateStore
 from darkweb_collector.utils import utc_now_iso
 
@@ -203,6 +204,19 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
             job_id=job_id,
             config_path=config_path,
         )
+    except SiteAuthenticationRequired as exc:
+        duration_ms = int((time.perf_counter() - start_perf) * 1000)
+        mark_job_finished(
+            job_id=job_id,
+            site_name=site_name,
+            job_type="detail",
+            queue_name=queue_name,
+            target=detail_task.target_url,
+            status="skipped",
+            duration_ms=duration_ms,
+            error_message=str(exc),
+        )
+        return job_id
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
@@ -263,6 +277,27 @@ def run_site_once(
             job_id=selected_job_id,
             config_path=config_path,
         )
+    except SiteAuthenticationRequired as exc:
+        duration_ms = int((time.perf_counter() - start_perf) * 1000)
+        mark_job_finished(
+            job_id=selected_job_id,
+            site_name=site_name,
+            job_type="seed",
+            queue_name=seed_queue,
+            target=site_name,
+            status="skipped",
+            duration_ms=duration_ms,
+            error_message=str(exc),
+        )
+        return {
+            "site_name": site_name,
+            "seed_job_id": selected_job_id,
+            "detail_job_ids": [],
+            "detail_task_count": 0,
+            "detail_failed_count": 0,
+            "reason": "auth_required",
+            "auth_platform": exc.platform,
+        }
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
@@ -299,6 +334,8 @@ def enqueue_due_sites(
     with get_db_connection() as connection:
         for config in load_site_configs(config_path):
             if not config.enabled:
+                continue
+            if not site_auth_readiness(config)["ready"]:
                 continue
             if get_active_crawl_job(connection, site_name=config.site_name, job_type="seed"):
                 continue

@@ -22,6 +22,7 @@ from darkweb_collector.document_exposure_sessions import (
     platform_storage_state_path,
     platform_user_data_dir,
 )
+from darkweb_collector.tor_fetch import browser_proxy_server_for_url, is_onion_url
 
 
 REMOTE_LOGIN_VIEWPORT = {"width": 1366, "height": 900}
@@ -276,7 +277,7 @@ def _save_platform_session(session: RemoteBrowserSession, account_label: str) ->
                 "login_url": session.login_url,
                 "homepage_url": session.homepage_url,
                 "requires_login": session.requires_login,
-                "status": "configured",
+                "status": "valid" if session.platform == "changan" else "configured",
                 "storage_state_path": session.storage_state_path,
                 "last_verified_at": updated_at,
                 "last_error": "",
@@ -287,12 +288,53 @@ def _save_platform_session(session: RemoteBrowserSession, account_label: str) ->
         connection.commit()
     return {
         "platform": session.platform,
-        "status": "configured",
+        "status": "valid" if session.platform == "changan" else "configured",
         "valid": True,
         "storage_state_path": session.storage_state_path,
         "last_verified_at": updated_at,
         "metadata": metadata,
     }
+
+
+def _validate_session_before_save(session: RemoteBrowserSession, page: Any) -> None:
+    if session.platform != "changan":
+        return
+    probe = page.evaluate(
+        """
+        async () => {
+          const token = String(localStorage.getItem('token') || '').trim();
+          if (!token || token.startsWith('noLogin_')) {
+            return { valid: false, code: 0, message: '尚未完成账号登录' };
+          }
+          try {
+            const response = await fetch(
+              '/api/category/goods?cid=0&page_num=1&page_size=1&order=&order_by=',
+              {
+                method: 'GET',
+                headers: {
+                  Accept: 'application/json',
+                  Authorization: `Bearer ${token}`,
+                },
+              },
+            );
+            const payload = await response.json();
+            const code = Number(payload?.code || 0);
+            return {
+              valid: response.ok && code === 2000,
+              code,
+              message: String(payload?.msg || ''),
+            };
+          } catch (error) {
+            return { valid: false, code: 0, message: String(error || '会话校验失败') };
+          }
+        }
+        """
+    )
+    if not isinstance(probe, dict) or not probe.get("valid"):
+        code = int((probe or {}).get("code") or 0) if isinstance(probe, dict) else 0
+        message = str((probe or {}).get("message") or "尚未进入登录后的站内页面") if isinstance(probe, dict) else "尚未进入登录后的站内页面"
+        suffix = f"（接口代码 {code}）" if code else ""
+        raise ValueError(f"长安不夜城登录会话校验失败：{message}{suffix}")
 
 
 def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) -> None:
@@ -305,21 +347,25 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
         browser_env = os.environ.copy()
         if session.display:
             browser_env["DISPLAY"] = session.display
-        context = playwright.chromium.launch_persistent_context(
-            session.user_data_dir,
-            headless=not bool(session.display),
-            viewport=dict(REMOTE_LOGIN_VIEWPORT),
-            screen=dict(REMOTE_LOGIN_VIEWPORT),
-            env=browser_env,
-            ignore_https_errors=True,
-            args=[
+        launch_kwargs: dict[str, Any] = {
+            "headless": not bool(session.display),
+            "viewport": dict(REMOTE_LOGIN_VIEWPORT),
+            "screen": dict(REMOTE_LOGIN_VIEWPORT),
+            "env": browser_env,
+            "ignore_https_errors": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
                 "--window-position=0,0",
                 f"--window-size={REMOTE_LOGIN_VIEWPORT['width']},{REMOTE_LOGIN_VIEWPORT['height']}",
             ],
-        )
+        }
+        if is_onion_url(session.login_url or session.homepage_url):
+            proxy_server = browser_proxy_server_for_url(session.login_url or session.homepage_url)
+            if proxy_server:
+                launch_kwargs["proxy"] = {"server": proxy_server}
+        context = playwright.chromium.launch_persistent_context(session.user_data_dir, **launch_kwargs)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(session.login_url or session.homepage_url, wait_until="domcontentloaded", timeout=45000)
         startup_queue.put(("ok", _state_payload(session, page)))
@@ -336,6 +382,7 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
                 elif op == "control":
                     result = _apply_remote_action(session, page, payload)
                 elif op == "finish":
+                    _validate_session_before_save(session, page)
                     context.storage_state(path=session.storage_state_path)
                     result = _save_platform_session(session, str(payload.get("account_label") or ""))
                     should_stop = True
@@ -544,10 +591,9 @@ def control_remote_browser(session_id: str, action: str, payload: dict[str, Any]
 
 def finish_remote_browser_login(session_id: str, account_label: str = "") -> dict[str, Any]:
     session = _get_remote_session(session_id)
-    try:
-        return _call_session(session, "finish", {"account_label": account_label})
-    finally:
-        _remove_session_keys(session)
+    result = _call_session(session, "finish", {"account_label": account_label})
+    _remove_session_keys(session)
+    return result
 
 
 def close_remote_browser_login(session_id: str) -> dict[str, Any]:

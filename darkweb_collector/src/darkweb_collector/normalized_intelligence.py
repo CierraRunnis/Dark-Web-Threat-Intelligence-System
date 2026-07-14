@@ -55,6 +55,7 @@ DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\
 WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 SOURCE_LABELS = {
+    "changan": "长安不夜城",
     "darkforums": "DarkForums",
     "dragonforce": "DragonForce",
     "dragonforceblog": "DragonForce",
@@ -512,7 +513,7 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-04-10-darkforums-artifacts-industry-v1"
+NORMALIZATION_VERSION = "2026-07-13-changan-source-v1"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -749,7 +750,7 @@ def _normalize_domain(value: str | None) -> str:
 
 def _canonical_key(value: str | None) -> str:
     cleaned = _normalize_label(value).lower()
-    return re.sub(r"[^a-z0-9.]+", "-", cleaned).strip("-")
+    return re.sub(r"[\W_]+", "-", cleaned, flags=re.UNICODE).strip("-")
 
 
 def _label_industry(value: str | None) -> str:
@@ -3159,7 +3160,7 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "disclosure_url": event.get("source_url") or "",
         "detail_text": event.get("detail_text") or "",
         "category": event["category"],
-        "source": event["source"],
+        "source": _label_source(event["source"]),
         "industry": _label_industry(event["industry"]),
         "country": event.get("country") or "未知",
         "country_code": event.get("country_code") or "",

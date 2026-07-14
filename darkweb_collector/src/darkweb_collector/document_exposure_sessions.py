@@ -22,6 +22,7 @@ from darkweb_collector.document_exposure_platforms import (
     list_session_manageable_platforms,
 )
 from darkweb_collector.runtime import output_root
+from darkweb_collector.tor_fetch import browser_proxy_server_for_url, is_onion_url
 
 
 LOGIN_WORKER_MODULE = "darkweb_collector.platform_session_login"
@@ -552,7 +553,12 @@ def verify_platform_session(platform_name: str) -> dict[str, Any]:
     last_error = ""
     valid = False
     with sync_playwright() as playwright:  # pragma: no cover - browser runtime
-        browser = playwright.chromium.launch(headless=True)
+        launch_kwargs: dict[str, Any] = {"headless": True}
+        if is_onion_url(verification_url):
+            proxy_server = browser_proxy_server_for_url(verification_url)
+            if proxy_server:
+                launch_kwargs["proxy"] = {"server": proxy_server}
+        browser = playwright.chromium.launch(**launch_kwargs)
         context_kwargs: dict[str, Any] = {
             "viewport": {"width": 1440, "height": 960},
             "user_agent": (

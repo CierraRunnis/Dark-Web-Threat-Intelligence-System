@@ -53,18 +53,22 @@ class BrowserClient:
         screenshot_selector: str | None = None,
         screenshot_selectors: tuple[str, ...] = (),
         hide_selectors: tuple[str, ...] = (),
+        storage_state_path: str | None = None,
     ) -> tuple[str, bytes]:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         self._ensure_browser()
         assert self._browser is not None
-        context = self._browser.new_context(
-            user_agent=(
+        context_kwargs = {
+            "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) "
                 "Gecko/20100101 Firefox/123.0"
             ),
-            viewport={"width": 1440, "height": 960},
-        )
+            "viewport": {"width": 1440, "height": 960},
+        }
+        if storage_state_path:
+            context_kwargs["storage_state"] = storage_state_path
+        context = self._browser.new_context(**context_kwargs)
         page = context.new_page()
         try:
             try:
@@ -353,6 +357,7 @@ def fetch_page_artifacts_with_browser(
     screenshot_selector: str | None = None,
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
+    storage_state_path: str | None = None,
 ) -> tuple[str, bytes]:
     requested_proxy = BrowserProxyConfig(server=proxy_server)
     client = _get_or_create_client(requested_proxy)
@@ -364,6 +369,7 @@ def fetch_page_artifacts_with_browser(
             screenshot_selector=screenshot_selector,
             screenshot_selectors=screenshot_selectors,
             hide_selectors=hide_selectors,
+            storage_state_path=storage_state_path,
         )
     except Exception:
         close_browser_client()

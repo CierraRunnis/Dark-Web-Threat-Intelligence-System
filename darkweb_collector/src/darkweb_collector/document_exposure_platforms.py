@@ -20,6 +20,18 @@ class ExposurePlatform:
 
 
 PLATFORMS: dict[str, ExposurePlatform] = {
+    "changan": ExposurePlatform(
+        key="changan",
+        label="长安不夜城",
+        module="collector",
+        platform_type="darkweb_marketplace",
+        homepage_url="http://cabyceogpsji73sske5nvo45mdrkbz4m3qd3iommf3zaaa6izg3j2cqd.onion/#/home",
+        login_url="http://cabyceogpsji73sske5nvo45mdrkbz4m3qd3iommf3zaaa6izg3j2cqd.onion/#/checking",
+        domains=("cabyceogpsji73sske5nvo45mdrkbz4m3qd3iommf3zaaa6izg3j2cqd.onion",),
+        requires_login=True,
+        success_indicators=("商品列表", "商品搜索", "个人中心"),
+        login_indicators=("账号登录", "请输入验证码", "预注册用户名"),
+    ),
     "baidu_wenku": ExposurePlatform(
         key="baidu_wenku",
         label="百度文库",

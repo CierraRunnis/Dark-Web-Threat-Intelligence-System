@@ -100,15 +100,23 @@
         <div class="tor-bridge-runtime">
           <div class="tor-bridge-runtime__item">
             <span>连接状态</span>
-            <strong>{{ torBridgeStatusLabel }}</strong>
+            <strong :class="{ 'tor-bridge-runtime__connected': torBridgeConfig.connected }">{{ torBridgeStatusLabel }}</strong>
+          </div>
+          <div class="tor-bridge-runtime__item">
+            <span>Tor 出口 IP</span>
+            <strong class="tor-bridge-runtime__ip">{{ torBridgeExitIpLabel }}</strong>
+          </div>
+          <div class="tor-bridge-runtime__item tor-bridge-runtime__progress">
+            <div class="tor-bridge-runtime__progress-head">
+              <span>连接进度</span>
+              <strong>{{ torBridgeProgress }}%</strong>
+            </div>
+            <el-progress :percentage="torBridgeProgress" :status="torBridgeProgressStatus" :stroke-width="8" :show-text="false" />
+            <p>{{ torBridgeProgressSummary }}</p>
           </div>
           <div class="tor-bridge-runtime__item">
             <span>采集代理</span>
             <strong>{{ torBridgeConfig.collector_proxy || `socks5h://${torBridgeConfig.socks_host}:${torBridgeConfig.socks_port}` }}</strong>
-          </div>
-          <div class="tor-bridge-runtime__item">
-            <span>检测方式</span>
-            <strong>自动检测</strong>
           </div>
         </div>
       </div>
@@ -411,7 +419,9 @@
       <div class="ti-card-body">
         <div class="ti-table-shell site-health-table-shell">
           <el-table :data="siteHealth" style="width: 100%" table-layout="fixed">
-            <el-table-column prop="site_name" label="站点" :min-width="siteHealthSiteMinWidth" show-overflow-tooltip />
+            <el-table-column label="站点" :min-width="siteHealthSiteMinWidth" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.display_name || row.site_name }}</template>
+            </el-table-column>
             <el-table-column prop="overall_status" label="总体状态" :width="siteHealthStatusWidth" />
             <el-table-column v-if="showSiteHealthWide" prop="seed_status" label="种子页状态" :width="siteHealthWideStatusWidth" />
             <el-table-column v-if="showSiteHealthWide" prop="detail_status" label="详情页状态" :width="siteHealthWideStatusWidth" />
@@ -438,6 +448,9 @@
             <el-table-column label="操作" :width="siteHealthActionWidth">
               <template #default="{ row }">
                 <div class="row-actions site-health-actions">
+                  <el-button v-if="row.auth_platform" size="small" type="warning" plain @click="launchSiteLogin(row)">
+                    {{ row.auth_required ? '登录' : '更新登录' }}
+                  </el-button>
                   <el-button size="small" type="primary" :loading="!!runningSiteMap[row.site_name]" :disabled="isSiteRunBlocked(row) || !row.enabled" @click="runSiteOnce(row.site_name)">运行一次</el-button>
                   <el-button size="small" :type="row.enabled ? 'danger' : 'success'" plain :loading="!!togglingSiteMap[row.site_name]" @click="toggleSite(row.site_name, !row.enabled)">
                     {{ row.enabled ? '停用采集' : '启用采集' }}
@@ -477,12 +490,14 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
 import { useJobsData } from '@/composables/useJobsData'
 import { useContinuousJobs } from '@/composables/useContinuousJobs'
 
 const { refresh: refreshIntelligence } = useIntelligenceData()
+const router = useRouter()
 const { data: jobsState, refresh: refreshJobs } = useJobsData()
 const { data: continuousState, refresh: refreshContinuous } = useContinuousJobs()
 
@@ -510,7 +525,7 @@ const siteHealthCooldownWidth = computed(() => 104)
 const siteHealthErrorCategoryWidth = computed(() => 82)
 const siteHealthLastSuccessMinWidth = computed(() => viewportWidth.value < 1500 ? 106 : 112)
 const siteHealthLastErrorMinWidth = computed(() => 140)
-const siteHealthActionWidth = computed(() => viewportWidth.value < 1500 ? 150 : 168)
+const siteHealthActionWidth = computed(() => viewportWidth.value < 1500 ? 252 : 260)
 const recentFailures = computed(() => jobsData.value.recent_failures || [])
 const vulnerabilitySync = computed(() => jobsData.value.vulnerability_sync || {})
 const ransomwareSync = computed(() => jobsData.value.ransomware_sync || {})
@@ -586,8 +601,51 @@ const torBridgeDescription = computed(() => {
   return '通过内置网桥连接，Tor 和传输插件会自动检测。'
 })
 const torBridgeStatusLabel = computed(() => {
-  if (!torBridgeConfig.value.process_running) return '未运行'
-  return torBridgeConfig.value.process_pid ? `运行中 #${torBridgeConfig.value.process_pid}` : '运行中'
+  const state = torBridgeConfig.value.connection_state
+  if (state === 'disabled') return '未启用'
+  if (state === 'connected' || torBridgeConfig.value.connected) return '已连接'
+  if (state === 'connecting' || torBridgeConfig.value.process_running) return `连接中 ${torBridgeProgress.value}%`
+  if (state === 'error') return '连接失败'
+  return '未运行'
+})
+const torBridgeProgress = computed(() => {
+  const value = Number(torBridgeConfig.value.bootstrap_percent || 0)
+  return Math.min(100, Math.max(0, Number.isFinite(value) ? Math.round(value) : 0))
+})
+const torBridgeProgressStatus = computed(() => {
+  if (torBridgeConfig.value.connected) return 'success'
+  if (torBridgeConfig.value.connection_state === 'error') return 'exception'
+  return undefined
+})
+const torBridgeExitIpLabel = computed(() => {
+  if (torBridgeConfig.value.exit_ip) return torBridgeConfig.value.exit_ip
+  if (torBridgeConfig.value.exit_ip_checking) return '检测中...'
+  if (torBridgeConfig.value.connected && torBridgeConfig.value.exit_ip_error) return '检测失败'
+  return '连接成功后显示'
+})
+const torBridgeProgressSummary = computed(() => {
+  const labels = {
+    starting: '正在启动 Tor',
+    conn_pt: '正在连接网桥',
+    conn_done: '已连接网桥',
+    handshake: '正在建立加密握手',
+    handshake_done: '加密握手已完成',
+    onehop_create: '正在建立目录线路',
+    requesting_status: '正在请求网络状态',
+    loading_status: '正在加载网络状态',
+    loading_keys: '正在加载授权密钥',
+    requesting_descriptors: '正在请求中继信息',
+    loading_descriptors: '正在加载中继信息',
+    enough_dirinfo: '目录信息已就绪',
+    ap_conn_pt: '正在连接 Tor 中继',
+    ap_conn_done: '已连接 Tor 中继',
+    ap_handshake: '正在与 Tor 中继握手',
+    ap_handshake_done: '中继握手已完成',
+    circuit_create: '正在创建 Tor 线路',
+    done: 'Tor 网络连接完成',
+    not_running: torBridgeConfig.value.enabled ? '等待连接' : '网桥未启用',
+  }
+  return labels[torBridgeConfig.value.bootstrap_stage] || torBridgeConfig.value.bootstrap_summary || '等待连接'
 })
 
 const runningAllSites = ref(false)
@@ -616,6 +674,16 @@ const torBridgeConfig = ref({
   bridge_count: 0,
   process_running: false,
   process_pid: null,
+  bootstrap_status: 'not_running',
+  bootstrap_percent: 0,
+  bootstrap_stage: 'not_running',
+  bootstrap_summary: '',
+  connection_state: 'not_running',
+  connected: false,
+  exit_ip: '',
+  exit_ip_checked_at: '',
+  exit_ip_error: '',
+  exit_ip_checking: false,
   collector_proxy: '',
   settings_path: '',
   torrc_path: '',
@@ -667,7 +735,15 @@ const monitoringStatus = ref({ keywordCount: 0, enabledKeywordCount: 0, highPrio
 const monitoringKeywords = ref([])
 
 function isSiteRunBlocked(row) {
-  return row?.blockingReason === 'active_seed_job' || row?.activeSeedJobStatus === 'running' || row?.activeSeedJobStatus === 'enqueued'
+  return row?.auth_required || row?.blockingReason === 'active_seed_job' || row?.activeSeedJobStatus === 'running' || row?.activeSeedJobStatus === 'enqueued'
+}
+
+function launchSiteLogin(row) {
+  if (!row?.auth_platform) return
+  router.push({
+    name: 'RemotePlatformLogin',
+    query: { platform: row.auth_platform, return_to: '/collector-control' },
+  })
 }
 
 function errorCategoryLabel(category) {
@@ -777,16 +853,51 @@ function applyTorBridgeStatus(payload) {
   torBridgeLinesText.value = torBridgeConfig.value.bridge_lines.join('\n')
 }
 
-async function loadTorBridgeStatus() {
-  torBridgeLoading.value = true
+let torBridgePollTimer = null
+let torBridgePollInFlight = false
+
+function clearTorBridgePoll() {
+  if (torBridgePollTimer) window.clearTimeout(torBridgePollTimer)
+  torBridgePollTimer = null
+}
+
+function shouldPollTorBridge() {
+  return Boolean(
+    torBridgeConfig.value.process_running
+      && (!torBridgeConfig.value.connected || !torBridgeConfig.value.exit_ip || torBridgeConfig.value.exit_ip_checking)
+  )
+}
+
+function scheduleTorBridgePoll(delay = 1500) {
+  clearTorBridgePoll()
+  if (!shouldPollTorBridge()) return
+  torBridgePollTimer = window.setTimeout(async () => {
+    if (torBridgePollInFlight) {
+      scheduleTorBridgePoll()
+      return
+    }
+    torBridgePollInFlight = true
+    try {
+      await loadTorBridgeStatus({ silent: true, schedule: false })
+    } finally {
+      torBridgePollInFlight = false
+      scheduleTorBridgePoll()
+    }
+  }, delay)
+}
+
+async function loadTorBridgeStatus(options = {}) {
+  const silent = Boolean(options?.silent)
+  if (!silent) torBridgeLoading.value = true
   try {
     const response = await fetch('/api/tor-bridge/status')
     if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
     applyTorBridgeStatus(await response.json())
+    if (options?.schedule !== false) scheduleTorBridgePoll()
   } catch (error) {
-    ElMessage.error(error.message || '读取 Tor 网桥状态失败')
+    if (!silent) ElMessage.error(error.message || '读取 Tor 网桥状态失败')
   } finally {
-    torBridgeLoading.value = false
+    if (!silent) torBridgeLoading.value = false
   }
 }
 
@@ -829,7 +940,8 @@ async function startTorBridge() {
     const response = await fetch('/api/tor-bridge/start', { method: 'POST' })
     if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
     applyTorBridgeStatus(await response.json())
-    ElMessage.success('Tor 网桥已启动')
+    scheduleTorBridgePoll(300)
+    ElMessage.success('正在连接 Tor 网桥')
   } catch (error) {
     ElMessage.error(error.message || '启动 Tor 网桥失败')
   } finally {
@@ -838,6 +950,7 @@ async function startTorBridge() {
 }
 
 async function stopTorBridge() {
+  clearTorBridgePoll()
   torBridgeStopLoading.value = true
   try {
     const response = await fetch('/api/tor-bridge/stop', { method: 'POST' })
@@ -1033,8 +1146,13 @@ async function runSiteOnce(siteName) {
       body: JSON.stringify({ site_name: siteName, force: true }),
     })
     if (!response.ok) throw new Error(`请求失败: ${response.status}`)
+    const payload = await response.json()
     await refreshJobs()
-    ElMessage.success(`已触发 ${siteName} 运行一次`)
+    if (payload.reason === 'auth_required') {
+      ElMessage.warning(payload.message || '请先完成站点登录')
+    } else {
+      ElMessage.success(`已触发 ${siteName} 运行一次`)
+    }
   } catch (error) {
     ElMessage.error(error.message || '触发站点运行失败')
   } finally {
@@ -1249,6 +1367,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearTorBridgePoll()
   window.removeEventListener('resize', updateViewportWidth)
 })
 </script>
@@ -1514,6 +1633,38 @@ onBeforeUnmount(() => {
   line-height: 1.45;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+.tor-bridge-runtime__connected {
+  color: var(--el-color-success) !important;
+}
+
+.tor-bridge-runtime__ip {
+  font-variant-numeric: tabular-nums;
+}
+
+.tor-bridge-runtime__progress {
+  grid-column: 1 / -1;
+}
+
+.tor-bridge-runtime__progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.tor-bridge-runtime__progress-head strong {
+  margin-top: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.tor-bridge-runtime__progress p {
+  margin: 8px 0 0;
+  color: var(--ti-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .builtin-bridge-dialog__intro {

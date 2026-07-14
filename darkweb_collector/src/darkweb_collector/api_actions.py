@@ -20,6 +20,7 @@ from darkweb_collector.orchestrator import new_job_id, run_site_once
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
 from darkweb_collector.queueing import BROWSER_RENDER_QUEUE, browser_concurrency, queue_for_seed
 from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
+from darkweb_collector.site_auth import site_auth_readiness
 from darkweb_collector.utils import utc_now_iso
 
 
@@ -268,6 +269,17 @@ def _dispatch_browser_process(site_name: str, queue_name: str, message: str) -> 
 
 def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
     config = get_site_config(site_name)
+    auth = site_auth_readiness(config)
+    if not auth["ready"]:
+        return {
+            "site_name": site_name,
+            "dispatch_mode": "skipped",
+            "message": auth["auth_message"],
+            "job_id": "",
+            "reason": "auth_required",
+            "auth_platform": auth["auth_platform"],
+            "auth_status": auth["auth_status"],
+        }
     with get_db_connection() as connection:
         active_job = get_active_crawl_job(connection, site_name=site_name, job_type="seed")
         queue_has_recent_running = _has_recent_running_job_in_queue(

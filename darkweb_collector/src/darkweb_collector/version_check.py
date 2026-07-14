@@ -63,26 +63,9 @@ def _git_commit() -> str:
     return result.stdout.strip()
 
 
-def _git_branch() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(_project_root()), "branch", "--show-current"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
 def current_version_payload() -> dict[str, Any]:
     version_file = _load_version_file()
     git_commit = _git_commit()
-    git_branch = _git_branch()
     commit = (
         os.environ.get("DARKWEB_APP_COMMIT", "").strip()
         or git_commit
@@ -93,7 +76,7 @@ def current_version_payload() -> dict[str, Any]:
         "version": version or "local",
         "commit": commit,
         "short_commit": _short_commit(commit),
-        "branch": os.environ.get("DARKWEB_UPDATE_BRANCH", "").strip() or git_branch or str(version_file.get("branch") or "").strip() or DEFAULT_BRANCH,
+        "branch": os.environ.get("DARKWEB_UPDATE_BRANCH", "").strip() or str(version_file.get("branch") or "").strip() or DEFAULT_BRANCH,
         "repository": os.environ.get("DARKWEB_UPDATE_REPO", "").strip() or str(version_file.get("repository") or "").strip() or DEFAULT_REPOSITORY,
         "updated_at": str(version_file.get("updated_at") or "").strip(),
         "source": "git" if git_commit else "version_file" if version_file else "unknown",

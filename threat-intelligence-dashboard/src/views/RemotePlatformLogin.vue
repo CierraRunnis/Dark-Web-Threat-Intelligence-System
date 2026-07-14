@@ -7,7 +7,7 @@
         <p>在服务器 Linux 环境中启动真实 Chromium，通过页面内浏览器完成登录和安全验证。</p>
       </div>
       <div class="embedded-browser-header__actions">
-        <el-button plain @click="router.back()">返回</el-button>
+        <el-button plain @click="returnToPrevious">返回</el-button>
         <el-button type="primary" :loading="saving" :disabled="!sessionId" @click="finishSession">保存会话</el-button>
         <el-button type="danger" plain :loading="closing" :disabled="!sessionId" @click="closeSession">关闭会话</el-button>
       </div>
@@ -105,6 +105,10 @@ let rfb = null
 
 const platform = computed(() => String(route.query.platform || state.value?.platform || '').trim())
 const platformLabel = computed(() => state.value?.label || platform.value || '代码平台')
+const returnTo = computed(() => {
+  const value = String(route.query.return_to || '').trim()
+  return value.startsWith('/') && !value.startsWith('//') ? value : '/document-exposure/code-monitoring/settings'
+})
 
 const viewportText = computed(() => {
   const viewport = state.value?.viewport || {}
@@ -204,7 +208,7 @@ async function ensureSession() {
     applyState(payload)
     router.replace({
       name: 'RemotePlatformLogin',
-      query: { platform: platform.value, session_id: sessionId.value },
+      query: { platform: platform.value, session_id: sessionId.value, return_to: returnTo.value },
     })
     await connectRfb()
   } catch (error) {
@@ -233,7 +237,7 @@ async function finishSession() {
     await api.finishRemoteLogin(sessionId.value, accountLabel.value || platform.value)
     disconnectRfb()
     ElMessage.success('内置浏览器会话已保存')
-    router.push('/document-exposure/code-monitoring/settings')
+    router.push(returnTo.value)
   } catch (error) {
     ElMessage.error(error.message || '保存内置浏览器会话失败')
   } finally {
@@ -248,12 +252,16 @@ async function closeSession() {
     disconnectRfb()
     await api.closeRemoteLogin(sessionId.value)
     ElMessage.success('内置浏览器会话已关闭')
-    router.push('/document-exposure/code-monitoring/settings')
+    router.push(returnTo.value)
   } catch (error) {
     ElMessage.error(error.message || '关闭内置浏览器会话失败')
   } finally {
     closing.value = false
   }
+}
+
+function returnToPrevious() {
+  router.push(returnTo.value)
 }
 
 watch(

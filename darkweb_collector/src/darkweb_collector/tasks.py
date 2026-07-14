@@ -6,6 +6,7 @@ from darkweb_collector.celery_app import app
 from darkweb_collector.models import DetailTask, SiteConfig
 from darkweb_collector.orchestrator import execute_detail_job, execute_seed_job, mark_job_finished, mark_job_running
 from darkweb_collector.queueing import MAX_RETRIES, queue_for_detail, retry_backoff_seconds
+from darkweb_collector.site_auth import SiteAuthenticationRequired
 from darkweb_collector.state_store import get_state_store
 
 
@@ -50,6 +51,24 @@ def crawl_seed(self, site_name: str, force: bool = False) -> dict[str, object]:
             attempt=self.request.retries,
             job_id=self.request.id,
         )
+    except SiteAuthenticationRequired as exc:
+        duration_ms = int((time.perf_counter() - start_perf) * 1000)
+        mark_job_finished(
+            job_id=self.request.id,
+            site_name=site_name,
+            job_type="seed",
+            queue_name=queue_name,
+            target=site_name,
+            status="skipped",
+            duration_ms=duration_ms,
+            error_message=str(exc),
+        )
+        return {
+            "site_name": site_name,
+            "seed_job_id": self.request.id,
+            "reason": "auth_required",
+            "auth_platform": exc.platform,
+        }
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         if self.request.retries < MAX_RETRIES:
@@ -98,6 +117,25 @@ def crawl_detail(self, site_name: str, detail_task_payload: dict[str, object]) -
             attempt=self.request.retries,
             job_id=self.request.id,
         )
+    except SiteAuthenticationRequired as exc:
+        duration_ms = int((time.perf_counter() - start_perf) * 1000)
+        mark_job_finished(
+            job_id=self.request.id,
+            site_name=site_name,
+            job_type="detail",
+            queue_name=queue_name,
+            target=detail_task.target_url,
+            status="skipped",
+            duration_ms=duration_ms,
+            error_message=str(exc),
+        )
+        return {
+            "site_name": site_name,
+            "detail_job_id": self.request.id,
+            "target_url": detail_task.target_url,
+            "reason": "auth_required",
+            "auth_platform": exc.platform,
+        }
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         if self.request.retries < MAX_RETRIES:
