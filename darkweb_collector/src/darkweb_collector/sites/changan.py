@@ -72,7 +72,12 @@ def parse_changan_list(
     base_url: str,
     collected_at_utc: str,
     max_topics: int,
+    excluded_categories: Any = (),
 ) -> dict[str, Any]:
+    excluded_values = [excluded_categories] if isinstance(excluded_categories, str) else excluded_categories
+    if not isinstance(excluded_values, (list, tuple, set)):
+        excluded_values = ()
+    excluded = {_text(value).casefold() for value in excluded_values if _text(value)}
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
     goods = data.get("goods") or data.get("list") or []
     if not isinstance(goods, list):
@@ -88,6 +93,8 @@ def parse_changan_list(
         intro = _clean_html(_first(item, "intro", "summary", "description"))
         author = _named_value(_first(item, "owner", "publisher", "seller", "user"))
         category = _named_value(_first(item, "category", "category_name", "cid"))
+        if category.casefold() in excluded:
+            continue
         published_at = _timestamp(_first(item, "ctime", "created_at", "created", "publish_time"))
         views = _text(_first(item, "read_count", "read", "views"))
         price = _text(_first(item, "price", "amount"))
@@ -123,7 +130,7 @@ def parse_changan_list(
         "section": "sellers_place",
         "collected_at_utc": collected_at_utc,
         "topic_count": len(topics),
-        "total": int(data.get("total") or len(topics)),
+        "total": len(topics) if excluded else int(data.get("total") or len(topics)),
         "topics": topics,
     }
 

@@ -119,7 +119,20 @@ class ChanganAdapter(SiteAdapter):
             base_url=base_url,
             collected_at_utc=collected_at_utc,
             max_topics=config.max_topics_per_run,
+            excluded_categories=config.extras.get("excluded_categories"),
         )
+        stored_raw = dict(raw)
+        stored_items = [topic["raw"] for topic in section["topics"]]
+        if isinstance(raw.get("data"), dict):
+            stored_data = dict(raw["data"])
+            stored_data.pop("list", None)
+            stored_data["goods"] = stored_items
+            stored_data["total"] = section["total"]
+            stored_raw["data"] = stored_data
+        else:
+            stored_raw.pop("list", None)
+            stored_raw["goods"] = stored_items
+            stored_raw["total"] = section["total"]
         payload = {
             "site_name": self.site_name,
             "source_url": section["source_url"],
@@ -132,7 +145,7 @@ class ChanganAdapter(SiteAdapter):
             site_name=self.site_name,
             collected_at_utc=collected_at_utc,
             payload=payload,
-            raw_html_by_url={config.seed_urls[0]: json.dumps(raw, ensure_ascii=False, indent=2)},
+            raw_html_by_url={config.seed_urls[0]: json.dumps(stored_raw, ensure_ascii=False, indent=2)},
         )
 
     def plan_details(self, seed_result: SeedResult, config: SiteConfig) -> list[DetailTask]:

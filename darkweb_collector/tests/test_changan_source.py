@@ -49,6 +49,7 @@ def _config(output_dir: Path, *, max_details: int = 15) -> SiteConfig:
             "auth_platform": "changan",
             "auth_origin": BASE_URL,
             "auth_storage_key": "token",
+            "excluded_categories": ["影视音像"],
         },
     )
 
@@ -105,6 +106,29 @@ class ChanganParserTests(unittest.TestCase):
             max_topics=30,
         )
         self.assertEqual(parsed["topics"], [])
+
+    def test_excluded_category_is_removed_before_detail_planning(self):
+        payload = _fixture("changan_list.json")
+        payload["data"]["goods"].append(
+            {
+                "id": "goods-excluded",
+                "name": "不应保存的示例商品",
+                "category": {"name": "影视音像"},
+            }
+        )
+        payload["data"]["total"] = 4
+
+        parsed = parse_changan_list(
+            payload,
+            base_url=BASE_URL,
+            collected_at_utc="2026-07-13T00:00:00+00:00",
+            max_topics=30,
+            excluded_categories=["影视音像"],
+        )
+
+        self.assertEqual(parsed["topic_count"], 3)
+        self.assertEqual(parsed["total"], 3)
+        self.assertNotIn("goods-excluded", {topic["goods_id"] for topic in parsed["topics"]})
 
     def test_unix_timestamps_and_source_label_are_normalized(self):
         list_payload = _fixture("changan_list.json")
@@ -222,6 +246,27 @@ class ChanganAuthTests(unittest.TestCase):
 
 
 class ChanganSchedulingTests(unittest.TestCase):
+    def test_excluded_category_is_not_written_to_seed_artifacts(self):
+        payload = _fixture("changan_list.json")
+        payload["data"]["goods"].append(
+            {
+                "id": "goods-excluded",
+                "name": "不应保存的示例商品",
+                "category": {"name": "影视音像"},
+            }
+        )
+        payload["data"]["total"] = 4
+        adapter = ChanganAdapter()
+
+        with patch.object(adapter, "_api_get", return_value=payload):
+            result = adapter.collect_seed(_config(Path("output/changan")), Mock())
+
+        serialized_payload = json.dumps(result.payload, ensure_ascii=False)
+        serialized_raw = "\n".join(result.raw_html_by_url.values())
+        self.assertNotIn("goods-excluded", serialized_payload)
+        self.assertNotIn("goods-excluded", serialized_raw)
+        self.assertNotIn("不应保存的示例商品", serialized_raw)
+
     def test_detail_screenshot_keeps_product_image_and_information(self):
         adapter = ChanganAdapter()
         config = _config(Path("output/changan"))
@@ -319,6 +364,7 @@ class ChanganSchedulingTests(unittest.TestCase):
         self.assertEqual(config.effective_interval_seconds, 1800)
         self.assertEqual(config.max_topics_per_run, 30)
         self.assertEqual(config.max_detail_pages_per_run, 15)
+        self.assertEqual(config.extras["excluded_categories"], ["影视音像"])
         forbidden = {"username", "password", "account", "credentials", "monitoring_keywords"}
         self.assertFalse(forbidden.intersection(config.extras))
 

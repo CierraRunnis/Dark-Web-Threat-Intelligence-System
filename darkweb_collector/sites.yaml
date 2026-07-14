@@ -18,6 +18,9 @@
       "auth_platform": "changan",
       "auth_origin": "http://cabyceogpsji73sske5nvo45mdrkbz4m3qd3iommf3zaaa6izg3j2cqd.onion",
       "auth_storage_key": "token",
+      "excluded_categories": [
+        "影视音像"
+      ],
       "fetch_timeout_seconds": 120,
       "render_wait_seconds": 12
     },
