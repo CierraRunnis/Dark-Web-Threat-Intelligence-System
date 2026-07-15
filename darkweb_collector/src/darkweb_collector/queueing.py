@@ -9,11 +9,13 @@ import sys
 SEED_HTTP_QUEUE = "seed_http"
 DETAIL_HTTP_QUEUE = "detail_http"
 BROWSER_RENDER_QUEUE = "browser_render"
+SOCIAL_API_QUEUE = "social_api"
 
 QUEUE_CONCURRENCY = {
     SEED_HTTP_QUEUE: 1,
     DETAIL_HTTP_QUEUE: 2,
     BROWSER_RENDER_QUEUE: 2,
+    SOCIAL_API_QUEUE: 4,
 }
 
 QUEUE_MAX_TASKS_PER_CHILD = {

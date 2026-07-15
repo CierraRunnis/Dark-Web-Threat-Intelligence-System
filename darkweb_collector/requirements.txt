@@ -1,7 +1,10 @@
 celery>=5.3,<6
 redis>=5.0,<6
 playwright>=1.42,<2
+telethon>=1.36,<2
 fastapi>=0.115,<1
+Pillow>=10.4,<12
+python-multipart>=0.0.9,<1
 uvicorn>=0.30,<1
 pycountry>=24.6,<25
 Babel>=2.11,<3

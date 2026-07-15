@@ -604,6 +604,193 @@ ON monitoring_keyword_notifications(status, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event_key
 ON monitoring_keyword_notifications(event_key, status, dry_run);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'analyst',
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    session_version INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_login_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS social_campaigns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at TEXT,
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    anchor_at TEXT NOT NULL,
+    platforms_json TEXT NOT NULL DEFAULT '[]',
+    created_by INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_campaigns_active
+ON social_campaigns(enabled, start_at, end_at);
+
+CREATE TABLE IF NOT EXISTS social_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    term TEXT NOT NULL,
+    term_type TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    UNIQUE(campaign_id, term, term_type),
+    FOREIGN KEY (campaign_id) REFERENCES social_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS social_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'account',
+    source_value TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cursor TEXT NOT NULL DEFAULT '',
+    health_status TEXT NOT NULL DEFAULT 'unconfigured',
+    last_success_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(campaign_id, platform, source_type, source_value),
+    FOREIGN KEY (campaign_id) REFERENCES social_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS social_scan_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    new_event_count INTEGER NOT NULL DEFAULT 0,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT NOT NULL DEFAULT '',
+    cursor_before TEXT NOT NULL DEFAULT '',
+    cursor_after TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(campaign_id, platform, scheduled_at),
+    FOREIGN KEY (campaign_id) REFERENCES social_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_scan_runs_campaign_platform
+ON social_scan_runs(campaign_id, platform, scheduled_at);
+
+CREATE TABLE IF NOT EXISTS social_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL,
+    scan_run_id INTEGER,
+    platform TEXT NOT NULL,
+    platform_post_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    original_text TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL,
+    published_at TEXT,
+    source_deleted_at TEXT,
+    discovered_at TEXT NOT NULL,
+    matched_terms_json TEXT NOT NULL DEFAULT '[]',
+    threat_type TEXT NOT NULL DEFAULT '',
+    target_unit TEXT NOT NULL DEFAULT '',
+    target_industry TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    verification_result TEXT NOT NULL DEFAULT '',
+    evidence_note TEXT NOT NULL DEFAULT '',
+    disposal_direction TEXT NOT NULL DEFAULT '',
+    severity TEXT NOT NULL DEFAULT 'normal',
+    assigned_to INTEGER,
+    claimed_at TEXT,
+    verified_by INTEGER,
+    verified_at TEXT,
+    verification_duration_seconds INTEGER,
+    published_at_internal TEXT,
+    closed_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform, platform_post_id),
+    FOREIGN KEY (campaign_id) REFERENCES social_campaigns(id),
+    FOREIGN KEY (scan_run_id) REFERENCES social_scan_runs(id),
+    FOREIGN KEY (assigned_to) REFERENCES users(id),
+    FOREIGN KEY (verified_by) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_events_status_discovered
+ON social_events(status, discovered_at);
+
+CREATE TABLE IF NOT EXISTS social_event_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    original_text TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    published_at TEXT,
+    captured_at TEXT NOT NULL,
+    UNIQUE(event_id, content_hash),
+    FOREIGN KEY (event_id) REFERENCES social_events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS social_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    evidence_type TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    source_evidence_id INTEGER,
+    redaction_json TEXT NOT NULL DEFAULT '[]',
+    approved INTEGER NOT NULL DEFAULT 0,
+    created_by INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES social_events(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_evidence_id) REFERENCES social_evidence(id),
+    FOREIGN KEY (created_by) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS social_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER,
+    action_type TEXT NOT NULL,
+    actor_user_id INTEGER NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES social_events(id) ON DELETE CASCADE,
+    FOREIGN KEY (actor_user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS social_publications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL UNIQUE,
+    card_json TEXT NOT NULL,
+    published_by INTEGER NOT NULL,
+    published_at TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES social_events(id),
+    FOREIGN KEY (published_by) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS social_publication_reads (
+    publication_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    read_at TEXT NOT NULL,
+    PRIMARY KEY (publication_id, user_id),
+    FOREIGN KEY (publication_id) REFERENCES social_publications(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 
@@ -626,6 +813,10 @@ LEGACY_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
     },
     "exposure_scan_runs": {
         "scan_stats_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "social_events": {
+        "verification_duration_seconds": "INTEGER",
+        "source_deleted_at": "TEXT",
     },
 }
 
@@ -689,6 +880,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA foreign_keys=ON")
             skip_wsl_checks = _should_skip_wal(resolved)
             if not skip_wsl_checks:
                 try:
@@ -2978,3 +3170,503 @@ def upsert_code_search_state(connection: sqlite3.Connection, payload: dict) -> i
         ),
     )
     return int(cursor.lastrowid)
+
+
+# Social monitoring persistence.  These helpers deliberately keep policy in
+# social_monitoring.py so the scheduler and API share one workflow.
+def create_user(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO users (
+            username, display_name, role, password_hash, password_salt,
+            session_version, enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+        """,
+        (
+            str(payload["username"]).strip(),
+            str(payload.get("display_name") or payload["username"]).strip(),
+            str(payload.get("role") or "analyst"),
+            str(payload["password_hash"]),
+            str(payload["password_salt"]),
+            1 if payload.get("enabled", True) else 0,
+            str(payload["created_at"]),
+            str(payload["updated_at"]),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_user(connection: sqlite3.Connection, user_id: int) -> dict | None:
+    row = connection.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_user_by_username(connection: sqlite3.Connection, username: str) -> dict | None:
+    row = connection.execute(
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+        (str(username).strip(),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_users(connection: sqlite3.Connection) -> list[dict]:
+    rows = connection.execute("SELECT * FROM users ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_user(connection: sqlite3.Connection, user_id: int, payload: dict) -> int:
+    allowed = {"display_name", "role", "enabled", "last_login_at", "updated_at"}
+    values = {key: payload[key] for key in allowed if key in payload}
+    if "enabled" in values:
+        values["enabled"] = 1 if values["enabled"] else 0
+    if not values:
+        return 0
+    assignments = ", ".join(f"{key} = ?" for key in values)
+    cursor = connection.execute(
+        f"UPDATE users SET {assignments} WHERE id = ?",
+        (*values.values(), int(user_id)),
+    )
+    return int(cursor.rowcount)
+
+
+def update_user_password(
+    connection: sqlite3.Connection,
+    user_id: int,
+    password_hash: str,
+    password_salt: str,
+    updated_at: str,
+) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE users
+        SET password_hash = ?, password_salt = ?, session_version = session_version + 1, updated_at = ?
+        WHERE id = ?
+        """,
+        (password_hash, password_salt, updated_at, int(user_id)),
+    )
+    return int(cursor.rowcount)
+
+
+def delete_user(connection: sqlite3.Connection, user_id: int) -> int:
+    cursor = connection.execute("DELETE FROM users WHERE id = ?", (int(user_id),))
+    return int(cursor.rowcount)
+
+
+def create_social_campaign(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO social_campaigns (
+            name, start_at, end_at, timezone, enabled, anchor_at,
+            platforms_json, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["name"], payload["start_at"], payload.get("end_at"),
+            payload.get("timezone") or "Asia/Shanghai", 1 if payload.get("enabled", True) else 0,
+            payload["anchor_at"], payload.get("platforms_json") or "[]", payload.get("created_by"),
+            payload["created_at"], payload["updated_at"],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_social_campaign(connection: sqlite3.Connection, campaign_id: int) -> dict | None:
+    row = connection.execute(
+        "SELECT * FROM social_campaigns WHERE id = ?", (int(campaign_id),)
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_social_campaigns(connection: sqlite3.Connection) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM social_campaigns ORDER BY datetime(start_at) DESC, id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_social_campaign(connection: sqlite3.Connection, campaign_id: int, payload: dict) -> int:
+    allowed = {"name", "start_at", "end_at", "timezone", "enabled", "anchor_at", "platforms_json", "updated_at"}
+    values = {key: payload[key] for key in allowed if key in payload}
+    if "enabled" in values:
+        values["enabled"] = 1 if values["enabled"] else 0
+    if not values:
+        return 0
+    cursor = connection.execute(
+        f"UPDATE social_campaigns SET {', '.join(f'{key} = ?' for key in values)} WHERE id = ?",
+        (*values.values(), int(campaign_id)),
+    )
+    return int(cursor.rowcount)
+
+
+def delete_social_campaign(connection: sqlite3.Connection, campaign_id: int) -> int:
+    cursor = connection.execute("DELETE FROM social_campaigns WHERE id = ?", (int(campaign_id),))
+    return int(cursor.rowcount)
+
+
+def replace_social_terms(connection: sqlite3.Connection, campaign_id: int, terms: list[dict], created_at: str) -> None:
+    connection.execute("DELETE FROM social_terms WHERE campaign_id = ?", (int(campaign_id),))
+    connection.executemany(
+        """
+        INSERT INTO social_terms (campaign_id, term, term_type, enabled, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (int(campaign_id), str(item["term"]).strip(), str(item["term_type"]), 1, created_at)
+            for item in terms if str(item.get("term") or "").strip()
+        ],
+    )
+
+
+def list_social_terms(connection: sqlite3.Connection, campaign_id: int) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM social_terms WHERE campaign_id = ? AND enabled = 1 ORDER BY id",
+        (int(campaign_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def replace_social_sources(connection: sqlite3.Connection, campaign_id: int, sources: list[dict], now: str) -> None:
+    connection.execute("DELETE FROM social_sources WHERE campaign_id = ?", (int(campaign_id),))
+    connection.executemany(
+        """
+        INSERT INTO social_sources (
+            campaign_id, platform, source_type, source_value, label, enabled,
+            cursor, health_status, last_error, metadata_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 1, '', 'unconfigured', '', ?, ?, ?)
+        """,
+        [
+            (
+                int(campaign_id), str(item["platform"]), str(item.get("source_type") or "account"),
+                str(item["source_value"]).strip(), str(item.get("label") or ""),
+                str(item.get("metadata_json") or "{}"), now, now,
+            )
+            for item in sources if str(item.get("source_value") or "").strip()
+        ],
+    )
+
+
+def list_social_sources(connection: sqlite3.Connection, campaign_id: int | None = None) -> list[dict]:
+    if campaign_id is None:
+        rows = connection.execute("SELECT * FROM social_sources ORDER BY id").fetchall()
+    else:
+        rows = connection.execute(
+            "SELECT * FROM social_sources WHERE campaign_id = ? ORDER BY id", (int(campaign_id),)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_social_source(connection: sqlite3.Connection, source_id: int, payload: dict) -> int:
+    allowed = {"cursor", "health_status", "last_success_at", "last_error", "metadata_json", "updated_at"}
+    values = {key: payload[key] for key in allowed if key in payload}
+    if not values:
+        return 0
+    cursor = connection.execute(
+        f"UPDATE social_sources SET {', '.join(f'{key} = ?' for key in values)} WHERE id = ?",
+        (*values.values(), int(source_id)),
+    )
+    return int(cursor.rowcount)
+
+
+def create_social_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO social_scan_runs (
+            campaign_id, platform, scheduled_at, started_at, status,
+            cursor_before, created_at
+        ) VALUES (?, ?, ?, ?, 'running', ?, ?)
+        """,
+        (
+            int(payload["campaign_id"]), payload["platform"], payload["scheduled_at"],
+            payload["started_at"], payload.get("cursor_before") or "", payload["created_at"],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_active_social_scan_run(connection: sqlite3.Connection, campaign_id: int, platform: str) -> dict | None:
+    row = connection.execute(
+        """
+        SELECT * FROM social_scan_runs
+        WHERE campaign_id = ? AND platform = ? AND status = 'running'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (int(campaign_id), str(platform)),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def finish_social_scan_run(connection: sqlite3.Connection, scan_run_id: int, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE social_scan_runs SET
+            finished_at = ?, status = ?, candidate_count = ?, new_event_count = ?,
+            duplicate_count = ?, error_message = ?, cursor_after = ?
+        WHERE id = ?
+        """,
+        (
+            payload["finished_at"], payload.get("status") or "succeeded",
+            int(payload.get("candidate_count") or 0), int(payload.get("new_event_count") or 0),
+            int(payload.get("duplicate_count") or 0), str(payload.get("error_message") or ""),
+            str(payload.get("cursor_after") or ""), int(scan_run_id),
+        ),
+    )
+    return int(cursor.rowcount)
+
+
+def list_social_scan_runs(connection: sqlite3.Connection, campaign_id: int | None = None, limit: int = 100) -> list[dict]:
+    params: list[object] = []
+    where = ""
+    if campaign_id is not None:
+        where = "WHERE r.campaign_id = ?"
+        params.append(int(campaign_id))
+    params.append(max(1, min(int(limit), 500)))
+    rows = connection.execute(
+        f"""
+        SELECT r.*, c.name AS campaign_name FROM social_scan_runs r
+        JOIN social_campaigns c ON c.id = r.campaign_id
+        {where} ORDER BY datetime(r.scheduled_at) DESC, r.id DESC LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_social_event(connection: sqlite3.Connection, payload: dict) -> tuple[int, bool]:
+    row = connection.execute(
+        "SELECT id, content_hash FROM social_events WHERE platform = ? AND platform_post_id = ?",
+        (payload["platform"], payload["platform_post_id"]),
+    ).fetchone()
+    if row is not None:
+        if str(row["content_hash"]) != str(payload["content_hash"]):
+            connection.execute(
+                """
+                UPDATE social_events SET title = ?, original_text = ?, content_hash = ?,
+                    source_url = ?, author = ?, published_at = ?, updated_at = ? WHERE id = ?
+                """,
+                (
+                    payload.get("title") or "", payload.get("original_text") or "", payload["content_hash"],
+                    payload["source_url"], payload.get("author") or "", payload.get("published_at"),
+                    payload["updated_at"], int(row["id"]),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO social_event_snapshots (
+                    event_id, content_hash, title, original_text, source_url,
+                    author, published_at, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(row["id"]), payload["content_hash"], payload.get("title") or "",
+                    payload.get("original_text") or "", payload["source_url"],
+                    payload.get("author") or "", payload.get("published_at"), payload["updated_at"],
+                ),
+            )
+        if payload.get("source_deleted_at"):
+            connection.execute(
+                "UPDATE social_events SET source_deleted_at = ?, updated_at = ? WHERE id = ?",
+                (payload["source_deleted_at"], payload["updated_at"], int(row["id"])),
+            )
+        return int(row["id"]), False
+    cursor = connection.execute(
+        """
+        INSERT INTO social_events (
+            campaign_id, scan_run_id, platform, platform_post_id, source_url,
+            author, title, original_text, content_hash, published_at, source_deleted_at, discovered_at,
+            matched_terms_json, threat_type, target_unit, target_industry, severity, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload["campaign_id"]), payload.get("scan_run_id"), payload["platform"],
+            payload["platform_post_id"], payload["source_url"], payload.get("author") or "",
+            payload.get("title") or "", payload.get("original_text") or "", payload["content_hash"],
+            payload.get("published_at"), payload.get("source_deleted_at"), payload["discovered_at"],
+            payload.get("matched_terms_json") or "[]",
+            payload.get("threat_type") or "", payload.get("target_unit") or "",
+            payload.get("target_industry") or "", payload.get("severity") or "normal", payload["updated_at"],
+        ),
+    )
+    event_id = int(cursor.lastrowid)
+    connection.execute(
+        """
+        INSERT INTO social_event_snapshots (
+            event_id, content_hash, title, original_text, source_url,
+            author, published_at, captured_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_id, payload["content_hash"], payload.get("title") or "",
+            payload.get("original_text") or "", payload["source_url"],
+            payload.get("author") or "", payload.get("published_at"), payload["updated_at"],
+        ),
+    )
+    return event_id, True
+
+
+def list_social_events(
+    connection: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    platform: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if status:
+        clauses.append("e.status = ?")
+        params.append(status)
+    if platform:
+        clauses.append("e.platform = ?")
+        params.append(platform)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(int(limit), 1000)))
+    rows = connection.execute(
+        f"""
+        SELECT e.*, c.name AS campaign_name, u.username AS assigned_username
+        FROM social_events e JOIN social_campaigns c ON c.id = e.campaign_id
+        LEFT JOIN users u ON u.id = e.assigned_to
+        {where} ORDER BY datetime(e.discovered_at) DESC, e.id DESC LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_social_event(connection: sqlite3.Connection, event_id: int) -> dict | None:
+    row = connection.execute(
+        """
+        SELECT e.*, c.name AS campaign_name, u.username AS assigned_username,
+               v.username AS verified_username
+        FROM social_events e JOIN social_campaigns c ON c.id = e.campaign_id
+        LEFT JOIN users u ON u.id = e.assigned_to
+        LEFT JOIN users v ON v.id = e.verified_by
+        WHERE e.id = ?
+        """,
+        (int(event_id),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_social_event_snapshots(connection: sqlite3.Connection, event_id: int) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM social_event_snapshots WHERE event_id = ? ORDER BY id",
+        (int(event_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_social_event(connection: sqlite3.Connection, event_id: int, user_id: int, claimed_at: str) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE social_events SET assigned_to = ?, claimed_at = ?, status = 'verifying', updated_at = ?
+        WHERE id = ? AND status = 'pending' AND assigned_to IS NULL
+        """,
+        (int(user_id), claimed_at, claimed_at, int(event_id)),
+    )
+    return int(cursor.rowcount)
+
+
+def update_social_event(connection: sqlite3.Connection, event_id: int, payload: dict) -> int:
+    allowed = {
+        "title", "threat_type", "target_unit", "target_industry", "status",
+        "verification_result", "evidence_note", "disposal_direction", "severity",
+        "verified_by", "verified_at", "verification_duration_seconds",
+        "published_at_internal", "closed_at", "updated_at",
+    }
+    values = {key: payload[key] for key in allowed if key in payload}
+    if not values:
+        return 0
+    cursor = connection.execute(
+        f"UPDATE social_events SET {', '.join(f'{key} = ?' for key in values)} WHERE id = ?",
+        (*values.values(), int(event_id)),
+    )
+    return int(cursor.rowcount)
+
+
+def create_social_evidence(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO social_evidence (
+            event_id, evidence_type, original_filename, storage_path, mime_type, sha256,
+            source_evidence_id, redaction_json, approved, created_by, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(payload["event_id"]), payload["evidence_type"], payload["original_filename"],
+            payload["storage_path"], payload["mime_type"], payload["sha256"],
+            payload.get("source_evidence_id"), payload.get("redaction_json") or "[]",
+            1 if payload.get("approved") else 0, int(payload["created_by"]), payload["created_at"],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_social_evidence(connection: sqlite3.Connection, evidence_id: int) -> dict | None:
+    row = connection.execute("SELECT * FROM social_evidence WHERE id = ?", (int(evidence_id),)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_social_evidence(connection: sqlite3.Connection, event_id: int) -> list[dict]:
+    rows = connection.execute(
+        "SELECT * FROM social_evidence WHERE event_id = ? ORDER BY id", (int(event_id),)
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_social_action(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO social_actions (event_id, action_type, actor_user_id, detail_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            payload.get("event_id"), payload["action_type"], int(payload["actor_user_id"]),
+            payload.get("detail_json") or "{}", payload["created_at"],
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_social_actions(connection: sqlite3.Connection, event_id: int) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT a.*, u.username AS actor_username FROM social_actions a
+        JOIN users u ON u.id = a.actor_user_id WHERE a.event_id = ? ORDER BY a.id
+        """,
+        (int(event_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_social_publication(connection: sqlite3.Connection, payload: dict) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO social_publications (event_id, card_json, published_by, published_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (int(payload["event_id"]), payload["card_json"], int(payload["published_by"]), payload["published_at"]),
+    )
+    return int(cursor.lastrowid)
+
+
+def list_social_publications(connection: sqlite3.Connection, user_id: int, limit: int = 100) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT p.*, r.read_at FROM social_publications p
+        LEFT JOIN social_publication_reads r ON r.publication_id = p.id AND r.user_id = ?
+        ORDER BY datetime(p.published_at) DESC, p.id DESC LIMIT ?
+        """,
+        (int(user_id), max(1, min(int(limit), 500))),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_social_publication_read(connection: sqlite3.Connection, publication_id: int, user_id: int, read_at: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO social_publication_reads (publication_id, user_id, read_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(publication_id, user_id) DO UPDATE SET read_at = excluded.read_at
+        """,
+        (int(publication_id), int(user_id), read_at),
+    )

@@ -114,6 +114,13 @@ from darkweb_collector.self_update import (
     read_public_update_status,
     start_self_update,
 )
+from darkweb_collector.social_api import router as social_router
+from darkweb_collector.social_monitoring import (
+    authenticate_user,
+    change_user_password,
+    ensure_initial_admin,
+    validate_session_user,
+)
 
 
 app = FastAPI(title="Darkweb Collector API", version="v.11.0")
@@ -172,27 +179,11 @@ def _auth_password() -> str:
     return password or DEFAULT_AUTH_PASSWORD
 
 
-def _write_auth_password(password: str) -> None:
-    if os.environ.get("DARKWEB_AUTH_PASSWORD", "").strip():
-        raise HTTPException(status_code=409, detail="DARKWEB_AUTH_PASSWORD is controlled by environment")
-
-    password_path = _auth_password_file_path()
-    password_path.parent.mkdir(parents=True, exist_ok=True)
-    password_path.write_text(password, encoding="utf-8")
-
-
 def _auth_session_ttl_seconds() -> int:
     try:
         return max(60, int(os.environ.get("DARKWEB_AUTH_TTL_SECONDS", "43200")))
     except ValueError:
         return 43200
-
-
-def _auth_user_payload(username: str) -> dict[str, str]:
-    return {
-        "username": username,
-        "display_name": "个人用户" if username == "admin" else username,
-    }
 
 
 def _extract_bearer_token(authorization: str) -> str:
@@ -202,20 +193,21 @@ def _extract_bearer_token(authorization: str) -> str:
     return token.strip()
 
 
-def _create_auth_session(username: str) -> tuple[str, float]:
+def _create_auth_session(user: dict) -> tuple[str, float]:
     now = time.time()
     expires_at = now + _auth_session_ttl_seconds()
     token = secrets.token_urlsafe(32)
     with _auth_lock:
         _auth_sessions[token] = {
-            "username": username,
+            "user_id": int(user["id"]),
+            "session_version": int(user["sessionVersion"]),
             "created_at": now,
             "expires_at": expires_at,
         }
     return token, expires_at
 
 
-def _get_auth_user(token: str) -> dict[str, str] | None:
+def _get_auth_user(token: str) -> dict | None:
     if not token:
         return None
     now = time.time()
@@ -227,7 +219,12 @@ def _get_auth_user(token: str) -> dict[str, str] | None:
         if expires_at < now:
             _auth_sessions.pop(token, None)
             return None
-        return _auth_user_payload(str(session.get("username") or ""))
+        user_id = int(session.get("user_id") or 0)
+        session_version = int(session.get("session_version") or 0)
+    user = validate_session_user(user_id, session_version)
+    if user is None:
+        _revoke_auth_session(token)
+    return user
 
 
 def _revoke_auth_session(token: str) -> None:
@@ -267,11 +264,14 @@ app.mount(
     StaticFiles(directory=str(collector_output_dir), html=False),
     name="collector-output",
 )
+app.include_router(social_router)
 
 
 @app.middleware("http")
 async def require_api_auth(request: Request, call_next):
     if not _requires_auth(request):
+        if not _auth_enabled() and request.url.path.startswith("/api/"):
+            request.state.current_user = ensure_initial_admin(_auth_username(), _auth_password())
         return await call_next(request)
     token = _extract_bearer_token(request.headers.get("authorization", ""))
     user = _get_auth_user(token)
@@ -293,6 +293,10 @@ def _run_payload_warmup() -> None:
 
 @app.on_event("startup")
 def warm_payloads_on_startup() -> None:
+    try:
+        ensure_initial_admin(_auth_username(), _auth_password())
+    except Exception:
+        logger.exception("failed to initialize admin user")
     try:
         ensure_wecom_aibot_listener()
     except Exception:
@@ -350,24 +354,23 @@ class AuthPasswordChangeRequest(BaseModel):
 def auth_login(payload: AuthLoginRequest) -> dict:
     username = (payload.username or payload.account).strip()
     password = payload.password
-    expected_password = _auth_password()
-    username_matches = secrets.compare_digest(username, _auth_username())
-    password_matches = secrets.compare_digest(password, expected_password)
-    if not username_matches or not password_matches:
+    ensure_initial_admin(_auth_username(), _auth_password())
+    user = authenticate_user(username, password)
+    if user is None:
         raise HTTPException(status_code=401, detail="账号或密码错误")
 
-    token, expires_at = _create_auth_session(username)
+    token, expires_at = _create_auth_session(user)
     return {
         "access_token": token,
         "token_type": "bearer",
         "expires_at": int(expires_at),
-        "user": _auth_user_payload(username),
+        "user": user,
     }
 
 
 @app.get("/api/auth/me")
-def auth_me(request: Request) -> dict[str, str]:
-    return getattr(request.state, "current_user", _auth_user_payload(_auth_username()))
+def auth_me(request: Request) -> dict:
+    return getattr(request.state, "current_user", ensure_initial_admin(_auth_username(), _auth_password()))
 
 
 @app.post("/api/auth/logout")
@@ -378,15 +381,16 @@ def auth_logout(request: Request) -> dict[str, bool]:
 
 
 @app.post("/api/auth/change-password")
-def auth_change_password(payload: AuthPasswordChangeRequest) -> dict[str, bool]:
+def auth_change_password(request: Request, payload: AuthPasswordChangeRequest) -> dict[str, bool]:
     current_password = payload.current_password
     new_password = payload.new_password.strip()
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="new password must be at least 6 characters")
-    if not secrets.compare_digest(current_password, _auth_password()):
+    actor = getattr(request.state, "current_user", None)
+    if actor is None or authenticate_user(str(actor["username"]), current_password) is None:
         raise HTTPException(status_code=400, detail="current password is incorrect")
 
-    _write_auth_password(new_password)
+    change_user_password(actor, int(actor["id"]), new_password)
     return {"ok": True}
 
 

@@ -8,6 +8,7 @@ from darkweb_collector.orchestrator import execute_detail_job, execute_seed_job,
 from darkweb_collector.queueing import MAX_RETRIES, queue_for_detail, retry_backoff_seconds
 from darkweb_collector.site_auth import SiteAuthenticationRequired
 from darkweb_collector.state_store import get_state_store
+from darkweb_collector.social_scheduler import execute_claimed_social_scan
 
 
 def _queue_name_from_request(task) -> str:
@@ -162,3 +163,13 @@ def crawl_detail(self, site_name: str, detail_task_payload: dict[str, object]) -
         duration_ms=duration_ms,
     )
     return result
+
+
+@app.task(bind=True, name="darkweb_collector.tasks.collect_social_platform")
+def collect_social_platform(self, scan_payload: dict[str, object]) -> dict[str, object]:
+    try:
+        return execute_claimed_social_scan(scan_payload)
+    except Exception as exc:
+        if self.request.retries < MAX_RETRIES:
+            raise self.retry(exc=exc, countdown=retry_backoff_seconds(self.request.retries))
+        raise

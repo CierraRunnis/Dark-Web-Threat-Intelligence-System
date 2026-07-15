@@ -20,6 +20,7 @@ from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_f
 from darkweb_collector.queueing import build_worker_command, queue_for_seed
 from darkweb_collector.ransomware_live import sync_ransomware_live_victims
 from darkweb_collector.state_store import get_state_store
+from darkweb_collector.social_scheduler import enqueue_due_social_scans
 
 
 def build_parser() -> ArgumentParser:
@@ -108,7 +109,7 @@ def _run_site_continuous(site_name: str, interval_seconds: int | None) -> int:
 
 def _enqueue_due() -> int:
     try:
-        from darkweb_collector.tasks import crawl_seed
+        from darkweb_collector.tasks import collect_social_platform, crawl_seed
     except ImportError as exc:
         raise RuntimeError("Celery is required to enqueue queued crawl jobs") from exc
 
@@ -121,7 +122,16 @@ def _enqueue_due() -> int:
         return str(async_result.id)
 
     dispatched = enqueue_due_sites(seed_dispatcher=seed_dispatcher, state_store=get_state_store(prefer_redis=True))
-    print(json.dumps(dispatched, ensure_ascii=False, indent=2))
+
+    def social_dispatcher(payload: dict[str, object]) -> str | None:
+        async_result = collect_social_platform.apply_async(
+            kwargs={"scan_payload": payload},
+            queue="social_api",
+        )
+        return str(async_result.id)
+
+    social_dispatched = enqueue_due_social_scans(dispatcher=social_dispatcher)
+    print(json.dumps({"sites": dispatched, "social": social_dispatched}, ensure_ascii=False, indent=2))
     return 0
 
 
