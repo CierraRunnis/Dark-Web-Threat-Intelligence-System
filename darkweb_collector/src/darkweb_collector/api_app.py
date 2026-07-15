@@ -269,8 +269,16 @@ app.mount(
 )
 
 
+def _is_private_collector_output_path(path: str) -> bool:
+    normalized = "/" + str(path or "").strip().lstrip("/")
+    private_prefix = "/collector-output/platform_sessions"
+    return normalized == private_prefix or normalized.startswith(f"{private_prefix}/")
+
+
 @app.middleware("http")
 async def require_api_auth(request: Request, call_next):
+    if _is_private_collector_output_path(request.url.path):
+        return JSONResponse(status_code=404, content={"detail": "not found"})
     if not _requires_auth(request):
         return await call_next(request)
     token = _extract_bearer_token(request.headers.get("authorization", ""))

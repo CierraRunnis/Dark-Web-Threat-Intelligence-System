@@ -143,11 +143,18 @@ def _terminate_process(process: subprocess.Popen | None) -> None:
             pass
 
 
+def _browser_child_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in ("DARKWEB_GITHUB_TOKEN", "DARKWEB_GITHUB_TOKEN_FILE", "GITHUB_TOKEN", "GH_TOKEN"):
+        env.pop(name, None)
+    return env
+
+
 def _start_embedded_display(session: "RemoteBrowserSession") -> None:
     _require_linux_embedded_runtime()
     session.display = _find_free_display()
     session.vnc_port = _find_free_tcp_port()
-    env = os.environ.copy()
+    env = _browser_child_environment()
     env["DISPLAY"] = session.display
 
     session.xvfb_process = subprocess.Popen(
@@ -344,7 +351,7 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
         from playwright.sync_api import sync_playwright
 
         playwright = sync_playwright().start()
-        browser_env = os.environ.copy()
+        browser_env = _browser_child_environment()
         if session.display:
             browser_env["DISPLAY"] = session.display
         launch_kwargs: dict[str, Any] = {

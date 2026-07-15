@@ -6,7 +6,11 @@ import time
 from typing import Any
 
 from darkweb_collector.browser_process_pool import browser_process_pool_status, submit_browser_site
-from darkweb_collector.code_monitoring import list_code_watchlists_payload, scan_code_watchlist_once
+from darkweb_collector.code_monitoring import (
+    github_code_search_status_payload,
+    list_code_watchlists_payload,
+    scan_code_watchlist_once,
+)
 from darkweb_collector.config import get_site_config, load_site_configs, set_site_enabled
 from darkweb_collector.db import (
     get_active_crawl_job,
@@ -831,6 +835,7 @@ def _code_monitoring_task_status_payload(watchlist_id: int, task: dict[str, Any]
         "target_watchlist_id": int(task.get("target_watchlist_id") or 0),
         "target_watchlist_name": str(task.get("target_watchlist_name") or ""),
         "active_watchlist_count": _active_code_monitoring_task_count(),
+        "github_search": github_code_search_status_payload(),
     }
 
 

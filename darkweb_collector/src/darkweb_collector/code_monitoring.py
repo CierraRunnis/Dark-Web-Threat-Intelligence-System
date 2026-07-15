@@ -8,6 +8,7 @@ from html.parser import HTMLParser
 from hashlib import sha1
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -15,6 +16,7 @@ import ssl
 from threading import Lock
 import time
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
@@ -55,6 +57,24 @@ _CODE_HITS_PAYLOAD_CACHE_LOCK = Lock()
 _CODE_HITS_PAYLOAD_CACHE_TTL_SECONDS = 3600.0
 _CODE_HITS_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
 _SQLITE_LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0, 4.0)
+_GITHUB_API_REQUEST_LOCK = Lock()
+_GITHUB_API_STATE_LOCK = Lock()
+_GITHUB_API_CACHE_LOCK = Lock()
+_GITHUB_API_LAST_REQUEST_MONOTONIC = 0.0
+_GITHUB_API_QUERY_CACHE: dict[tuple[str, str, int], tuple[float, list[dict[str, Any]], dict[str, Any]]] = {}
+_GITHUB_API_STATE: dict[str, Any] = {
+    "last_request_at": "",
+    "last_success_at": "",
+    "last_error": "",
+    "limit": None,
+    "remaining": None,
+    "reset_at": "",
+    "cooldown_until": 0.0,
+    "cache_hits": 0,
+    "last_used_channel": "",
+    "fallback_used": False,
+    "degraded": False,
+}
 
 DEFAULT_CODE_PLATFORMS = ["github", "gitlab", "gitee"]
 DEFAULT_FILE_EXTENSIONS = ["env", "yaml", "yml", "json", "ini", "conf", "properties", "py", "js", "ts", "java"]
@@ -106,6 +126,12 @@ SEARCH_CHALLENGE_MARKERS: tuple[str, ...] = (
     "just a moment",
 )
 GITEE_WIDGET_MAX_OFFSET = 180
+GITHUB_CODE_SEARCH_API = "https://api.github.com/search/code"
+GITHUB_CODE_SEARCH_PER_PAGE = 100
+GITHUB_CODE_SEARCH_MAX_PAGES = 10
+GITHUB_CODE_SEARCH_DEFAULT_PAGES = 2
+GITHUB_CODE_SEARCH_DEFAULT_CACHE_SECONDS = 300.0
+GITHUB_CODE_SEARCH_DEFAULT_MIN_INTERVAL_SECONDS = 6.1
 REPO_FALLBACK_FILE_EXTENSIONS = [
     "env", "yaml", "yml", "json", "ini", "conf", "properties",
     "py", "js", "ts", "java", "go", "rb", "php", "sh", "toml", "xml", "txt", "csv",
@@ -172,6 +198,348 @@ def _strip_html(value: str) -> str:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+class GitHubCodeSearchUnavailable(RuntimeError):
+    pass
+
+
+def _github_search_mode() -> str:
+    value = _normalize_text(os.environ.get("DARKWEB_GITHUB_CODE_SEARCH_MODE")).lower()
+    return value if value in {"auto", "api", "browser"} else "auto"
+
+
+def _github_api_token() -> tuple[str, str]:
+    direct_token = _normalize_text(os.environ.get("DARKWEB_GITHUB_TOKEN"))
+    if direct_token:
+        return direct_token, "DARKWEB_GITHUB_TOKEN"
+    token_file = _normalize_text(os.environ.get("DARKWEB_GITHUB_TOKEN_FILE"))
+    if token_file:
+        try:
+            file_token = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            file_token = ""
+        if file_token:
+            return file_token, "token_file"
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        token = _normalize_text(os.environ.get(name))
+        if token:
+            return token, name
+    return "", ""
+
+
+def _github_env_float(name: str, default: float, minimum: float) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _github_cache_seconds() -> float:
+    return _github_env_float(
+        "DARKWEB_GITHUB_CODE_SEARCH_CACHE_SECONDS",
+        GITHUB_CODE_SEARCH_DEFAULT_CACHE_SECONDS,
+        0.0,
+    )
+
+
+def _github_min_interval_seconds() -> float:
+    return _github_env_float(
+        "DARKWEB_GITHUB_CODE_SEARCH_MIN_INTERVAL_SECONDS",
+        GITHUB_CODE_SEARCH_DEFAULT_MIN_INTERVAL_SECONDS,
+        0.0,
+    )
+
+
+def _github_page_limit(value: int) -> int:
+    requested = int(value or 0)
+    return min(GITHUB_CODE_SEARCH_MAX_PAGES, requested if requested > 0 else GITHUB_CODE_SEARCH_DEFAULT_PAGES)
+
+
+def _github_api_enabled() -> bool:
+    token, _ = _github_api_token()
+    return _github_search_mode() in {"auto", "api"} and bool(token)
+
+
+def _github_iso_from_epoch(value: Any) -> str:
+    try:
+        timestamp = float(value or 0)
+    except (TypeError, ValueError):
+        return ""
+    if timestamp <= 0:
+        return ""
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _github_header_int(headers: Any, name: str) -> int | None:
+    try:
+        value = headers.get(name)
+        return int(value) if value not in {None, ""} else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _update_github_api_state(**changes: Any) -> None:
+    with _GITHUB_API_STATE_LOCK:
+        _GITHUB_API_STATE.update(changes)
+
+
+def github_code_search_status_payload() -> dict[str, Any]:
+    token, token_source = _github_api_token()
+    mode = _github_search_mode()
+    now_epoch = time.time()
+    now_monotonic = time.monotonic()
+    with _GITHUB_API_CACHE_LOCK:
+        expired = [key for key, value in _GITHUB_API_QUERY_CACHE.items() if value[0] <= now_monotonic]
+        for key in expired:
+            _GITHUB_API_QUERY_CACHE.pop(key, None)
+        cache_entries = len(_GITHUB_API_QUERY_CACHE)
+    with _GITHUB_API_STATE_LOCK:
+        state = dict(_GITHUB_API_STATE)
+    cooldown_epoch = float(state.get("cooldown_until") or 0)
+    active_channel = "browser"
+    if mode == "api" and not token:
+        active_channel = "unavailable"
+    elif mode in {"auto", "api"} and token:
+        active_channel = "api"
+    return {
+        "mode": mode,
+        "activeChannel": active_channel,
+        "fallbackChannel": "browser" if mode == "auto" else "",
+        "apiConfigured": bool(token),
+        "tokenSource": token_source,
+        "rateLimit": state.get("limit"),
+        "rateRemaining": state.get("remaining"),
+        "rateResetAt": str(state.get("reset_at") or ""),
+        "cooldownUntil": _github_iso_from_epoch(cooldown_epoch) if cooldown_epoch > now_epoch else "",
+        "lastRequestAt": str(state.get("last_request_at") or ""),
+        "lastSuccessAt": str(state.get("last_success_at") or ""),
+        "lastError": str(state.get("last_error") or ""),
+        "lastUsedChannel": str(state.get("last_used_channel") or ""),
+        "fallbackUsed": bool(state.get("fallback_used")),
+        "degraded": bool(state.get("degraded")),
+        "cacheEntries": cache_entries,
+        "cacheHits": int(state.get("cache_hits") or 0),
+        "cacheSeconds": _github_cache_seconds(),
+        "minIntervalSeconds": _github_min_interval_seconds(),
+        "defaultBranchOnly": True,
+    }
+
+
+def _github_retry_epoch(headers: Any, fallback_seconds: int) -> float:
+    now_epoch = time.time()
+    reset_epoch = _github_header_int(headers, "X-RateLimit-Reset") or 0
+    retry_after = _github_header_int(headers, "Retry-After") or 0
+    if retry_after > 0:
+        return now_epoch + retry_after
+    if reset_epoch > now_epoch:
+        return float(reset_epoch)
+    return now_epoch + max(1, fallback_seconds)
+
+
+def _github_api_request_json(url: str, token: str) -> dict[str, Any]:
+    global _GITHUB_API_LAST_REQUEST_MONOTONIC
+    with _GITHUB_API_REQUEST_LOCK:
+        now_epoch = time.time()
+        with _GITHUB_API_STATE_LOCK:
+            cooldown_until = float(_GITHUB_API_STATE.get("cooldown_until") or 0)
+        if cooldown_until > now_epoch:
+            _update_github_api_state(last_error="rate_limited", degraded=True)
+            raise GitHubCodeSearchUnavailable("rate_limited")
+        wait_seconds = _github_min_interval_seconds() - (time.monotonic() - _GITHUB_API_LAST_REQUEST_MONOTONIC)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+        _GITHUB_API_LAST_REQUEST_MONOTONIC = time.monotonic()
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github.text-match+json",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Dark-Web-Threat-Intelligence-System",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        _update_github_api_state(last_request_at=_now_utc_iso())
+        try:
+            with urlopen(request, timeout=60) as response:  # noqa: S310
+                headers = response.headers
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        except HTTPError as exc:
+            headers = exc.headers
+            remaining = _github_header_int(headers, "X-RateLimit-Remaining")
+            limit = _github_header_int(headers, "X-RateLimit-Limit")
+            reset_epoch = _github_header_int(headers, "X-RateLimit-Reset") or 0
+            retry_after = _github_header_int(headers, "Retry-After") or 0
+            try:
+                error_text = exc.read(4096).decode("utf-8", errors="replace").lower()
+            except Exception:
+                error_text = ""
+            rate_limited = (
+                exc.code == 429
+                or remaining == 0
+                or retry_after > 0
+                or "rate limit" in error_text
+                or "abuse detection" in error_text
+            )
+            if exc.code in {403, 429} and rate_limited:
+                reason = "rate_limited"
+                cooldown_until = _github_retry_epoch(headers, 60)
+            elif exc.code == 403:
+                reason = "access_denied"
+                cooldown_until = 0.0
+            elif exc.code == 401:
+                reason = "authentication_failed"
+                cooldown_until = _github_retry_epoch(headers, 300)
+            elif exc.code == 422:
+                reason = "invalid_query"
+                cooldown_until = 0.0
+            else:
+                reason = f"http_{exc.code}"
+                cooldown_until = _github_retry_epoch(headers, 30) if exc.code >= 500 else 0.0
+            _update_github_api_state(
+                last_error=reason,
+                limit=limit,
+                remaining=remaining,
+                reset_at=_github_iso_from_epoch(reset_epoch),
+                cooldown_until=cooldown_until,
+                degraded=True,
+            )
+            raise GitHubCodeSearchUnavailable(reason) from exc
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            _update_github_api_state(last_error="transport_or_response_error", degraded=True)
+            raise GitHubCodeSearchUnavailable("transport_or_response_error") from exc
+        if not isinstance(payload, dict):
+            _update_github_api_state(last_error="invalid_response", degraded=True)
+            raise GitHubCodeSearchUnavailable("invalid_response")
+        remaining = _github_header_int(headers, "X-RateLimit-Remaining")
+        limit = _github_header_int(headers, "X-RateLimit-Limit")
+        reset_epoch = _github_header_int(headers, "X-RateLimit-Reset") or 0
+        cooldown_until = float(reset_epoch) if remaining == 0 and reset_epoch else 0.0
+        _update_github_api_state(
+            last_success_at=_now_utc_iso(),
+            last_error="",
+            limit=limit,
+            remaining=remaining,
+            reset_at=_github_iso_from_epoch(reset_epoch),
+            cooldown_until=cooldown_until,
+        )
+        return payload
+
+
+def _github_api_item_to_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
+    repository = item.get("repository") if isinstance(item.get("repository"), dict) else {}
+    if bool(repository.get("private")):
+        return None
+    file_url = _normalize_text(item.get("html_url"))
+    file_path = _normalize_text(item.get("path") or item.get("name"))
+    repository_url = _normalize_text(repository.get("html_url"))
+    full_name = _normalize_text(repository.get("full_name"))
+    owner_payload = repository.get("owner") if isinstance(repository.get("owner"), dict) else {}
+    owner = _normalize_text(owner_payload.get("login"))
+    repository_name = _normalize_text(repository.get("name"))
+    if full_name and "/" in full_name:
+        owner = owner or full_name.split("/", 1)[0]
+        repository_name = repository_name or full_name.split("/", 1)[1]
+    if not file_url or not file_path or not repository_url or not owner or not repository_name:
+        return None
+    location = _parse_code_location("github", file_url) or {}
+    branch = _normalize_text(repository.get("default_branch") or location.get("branch")) or "main"
+    fragments = []
+    for text_match in item.get("text_matches") or []:
+        if isinstance(text_match, dict):
+            fragment = str(text_match.get("fragment") or "").strip()
+            if fragment:
+                fragments.append(fragment)
+    return {
+        "platform": "github",
+        "platformLabel": "GitHub",
+        "fileUrl": file_url,
+        "title": _normalize_text(item.get("name")) or file_path,
+        "repositoryOwner": owner,
+        "repositoryName": repository_name,
+        "repositoryUrl": repository_url,
+        "branch": branch,
+        "filePath": file_path,
+        "lineStart": 0,
+        "lineEnd": 0,
+        "snippetText": "\n".join(fragments)[:8000],
+        "searchChannel": "github_api",
+    }
+
+
+def _github_api_code_search(query: str, page_limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    token, _ = _github_api_token()
+    if not token:
+        raise GitHubCodeSearchUnavailable("auth_required")
+    effective_limit = min(GITHUB_CODE_SEARCH_MAX_PAGES, max(1, int(page_limit or 1)))
+    cache_key = (
+        sha1(token.encode("utf-8", errors="ignore")).hexdigest()[:16],
+        _normalize_text(query).lower(),
+        effective_limit,
+    )
+    now_monotonic = time.monotonic()
+    with _GITHUB_API_CACHE_LOCK:
+        cached = _GITHUB_API_QUERY_CACHE.get(cache_key)
+        if cached and cached[0] > now_monotonic:
+            with _GITHUB_API_STATE_LOCK:
+                _GITHUB_API_STATE["cache_hits"] = int(_GITHUB_API_STATE.get("cache_hits") or 0) + 1
+                _GITHUB_API_STATE["last_used_channel"] = "api"
+                _GITHUB_API_STATE["fallback_used"] = False
+                _GITHUB_API_STATE["degraded"] = bool(cached[2].get("incomplete_results"))
+            return [dict(item) for item in cached[1]], {**cached[2], "cache_hit": True}
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total_count = 0
+    incomplete_results = False
+    pages_fetched = 0
+    for page in range(1, effective_limit + 1):
+        api_url = f"{GITHUB_CODE_SEARCH_API}?{urlencode({'q': query, 'per_page': GITHUB_CODE_SEARCH_PER_PAGE, 'page': page})}"
+        payload = _github_api_request_json(api_url, token)
+        pages_fetched = page
+        total_count = max(total_count, int(payload.get("total_count") or 0))
+        incomplete_results = incomplete_results or bool(payload.get("incomplete_results"))
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            break
+        for item in items:
+            candidate = _github_api_item_to_candidate(item) if isinstance(item, dict) else None
+            if not candidate:
+                continue
+            key = _candidate_identity(candidate)
+            if key and key not in seen:
+                seen.add(key)
+                results.append(candidate)
+        if len(items) < GITHUB_CODE_SEARCH_PER_PAGE or len(results) >= min(total_count, 1000):
+            break
+
+    metadata = {
+        "pages_fetched": pages_fetched,
+        "total_count": total_count,
+        "incomplete_results": incomplete_results,
+        "cache_hit": False,
+    }
+    cache_seconds = _github_cache_seconds()
+    if cache_seconds > 0:
+        with _GITHUB_API_CACHE_LOCK:
+            now_monotonic = time.monotonic()
+            expired = [key for key, value in _GITHUB_API_QUERY_CACHE.items() if value[0] <= now_monotonic]
+            for key in expired:
+                _GITHUB_API_QUERY_CACHE.pop(key, None)
+            if len(_GITHUB_API_QUERY_CACHE) >= 128:
+                oldest_key = min(_GITHUB_API_QUERY_CACHE, key=lambda key: _GITHUB_API_QUERY_CACHE[key][0])
+                _GITHUB_API_QUERY_CACHE.pop(oldest_key, None)
+            _GITHUB_API_QUERY_CACHE[cache_key] = (
+                now_monotonic + cache_seconds,
+                [dict(item) for item in results],
+                dict(metadata),
+            )
+    _update_github_api_state(
+        last_used_channel="api",
+        fallback_used=False,
+        degraded=incomplete_results,
+    )
+    return results, metadata
 
 
 def _is_sqlite_locked_error(exc: Exception) -> bool:
@@ -731,6 +1099,19 @@ def _expanded_search_queries(term: str, enabled_rule_keys: list[str]) -> list[st
     return queries[:8]
 
 
+def _expanded_search_queries_for_platform(
+    platform_key: str,
+    term: str,
+    enabled_rule_keys: list[str],
+) -> list[str]:
+    queries = _expanded_search_queries(term, enabled_rule_keys)
+    if platform_key != "github" or not _github_api_enabled():
+        return queries
+    normalized = _normalize_text(term)
+    domain_query = f"@{normalized.lower()}" if "." in normalized and " " not in normalized else ""
+    return [domain_query] if domain_query and domain_query in queries else []
+
+
 def _query_priority_bonus(query: str, term: str) -> int:
     normalized_query = _normalize_text(query).lower()
     normalized_term = _normalize_text(term).lower()
@@ -778,14 +1159,14 @@ def _search_page_url(platform_key: str, search_url: str, page: int) -> str:
 
 
 def _candidate_identity(candidate: dict[str, Any]) -> str:
-    return "|".join(
-        [
-            str(candidate.get("repositoryUrl") or "").strip(),
-            str(candidate.get("branch") or "").strip(),
-            str(candidate.get("filePath") or "").strip(),
-            str(candidate.get("fileUrl") or "").strip(),
-        ]
-    )
+    repository_url = str(candidate.get("repositoryUrl") or "").strip().rstrip("/")
+    branch = str(candidate.get("branch") or "").strip()
+    file_path = str(candidate.get("filePath") or "").strip().lstrip("/")
+    if repository_url and file_path:
+        return "|".join([repository_url, branch, file_path])
+    file_url = str(candidate.get("fileUrl") or "").strip()
+    parsed = urlparse(file_url)
+    return urlunparse(parsed._replace(query="", fragment="")) if file_url else ""
 
 
 def _candidate_signature(candidates: list[dict[str, Any]]) -> str:
@@ -3146,7 +3527,43 @@ def _collect_search_results_across_pages(
     return results, issue
 
 
-def _collect_search_results_incremental(
+def _collect_github_api_search_results_incremental(
+    search_url: str,
+    *,
+    page_limit: int,
+    previous_state: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    query = _normalize_text(dict(parse_qsl(urlparse(search_url).query, keep_blank_values=True)).get("q"))
+    if not query:
+        return [], "github:api:invalid_query", {}
+    try:
+        candidates, metadata = _github_api_code_search(
+            query,
+            _github_page_limit(page_limit),
+        )
+    except GitHubCodeSearchUnavailable as exc:
+        return [], f"github:api:{exc}", {}
+    _update_github_api_state(
+        last_used_channel="api",
+        fallback_used=False,
+        degraded=bool(metadata.get("incomplete_results")),
+    )
+    previous_signature = _normalize_text((previous_state or {}).get("last_candidate_signature"))
+    signature = _candidate_signature(candidates)
+    next_state = {
+        "last_page_scanned": int(metadata.get("pages_fetched") or 0),
+        "last_candidate_signature": signature,
+        "last_candidate_keys_json": _candidate_keys_json(candidates),
+        "last_repository_urls_json": _repository_urls_json(candidates),
+        "cursor_mode": "api",
+        "signature_changed": not previous_signature or previous_signature != signature,
+        "incomplete_results": bool(metadata.get("incomplete_results")),
+        "cache_hit": bool(metadata.get("cache_hit")),
+    }
+    return candidates, "", next_state
+
+
+def _collect_web_search_results_incremental(
     platform: ExposurePlatform,
     search_url: str,
     storage_state_path: str | None,
@@ -3275,6 +3692,100 @@ def _collect_search_results_incremental(
         "signature_changed": signature_changed,
     }
     return results, issue, next_state
+
+
+def _collect_search_results_incremental(
+    platform: ExposurePlatform,
+    search_url: str,
+    storage_state_path: str | None,
+    *,
+    page_limit: int,
+    previous_state: dict[str, Any] | None = None,
+    browser_fallback: bool = True,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    mode = _github_search_mode()
+    token, _ = _github_api_token()
+    if platform.key != "github" or mode == "browser" or (mode == "auto" and not token):
+        result = _collect_web_search_results_incremental(
+            platform,
+            search_url,
+            storage_state_path,
+            page_limit=page_limit,
+            previous_state=previous_state,
+            browser_fallback=browser_fallback,
+        )
+        if platform.key == "github":
+            _update_github_api_state(
+                last_used_channel="browser",
+                fallback_used=False,
+                degraded=bool(result[1]),
+                last_error=str(result[1] or ""),
+            )
+        return result
+    if mode == "api" and not token:
+        _update_github_api_state(
+            last_used_channel="unavailable",
+            fallback_used=False,
+            degraded=True,
+            last_error="auth_required",
+        )
+        return [], "github:api:auth_required", {}
+
+    api_rows, api_issue, api_state = _collect_github_api_search_results_incremental(
+        search_url,
+        page_limit=page_limit,
+        previous_state=previous_state,
+    )
+    should_supplement = bool(browser_fallback) and (
+        bool(api_issue) or not api_rows or bool(api_state.get("incomplete_results"))
+    )
+    if mode == "api" or not should_supplement:
+        if api_issue:
+            _update_github_api_state(degraded=True)
+        return api_rows, api_issue, api_state
+
+    web_rows, web_issue, web_state = _collect_web_search_results_incremental(
+        platform,
+        search_url,
+        storage_state_path,
+        page_limit=page_limit,
+        previous_state=previous_state,
+        browser_fallback=browser_fallback,
+    )
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*api_rows, *web_rows]:
+        key = _candidate_identity(item)
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(item)
+    if not merged:
+        _update_github_api_state(
+            last_used_channel="browser",
+            fallback_used=True,
+            degraded=bool(api_issue or web_issue or api_state.get("incomplete_results")),
+        )
+        return [], web_issue or api_issue, web_state or api_state
+    _update_github_api_state(
+        last_used_channel="api+browser" if api_rows else "browser",
+        fallback_used=True,
+        degraded=bool(api_issue or web_issue or api_state.get("incomplete_results")),
+    )
+    previous_signature = _normalize_text((previous_state or {}).get("last_candidate_signature"))
+    signature = _candidate_signature(merged)
+    next_state = {
+        **(api_state or web_state),
+        "last_page_scanned": max(
+            int(api_state.get("last_page_scanned") or 0),
+            int(web_state.get("last_page_scanned") or 0),
+        ),
+        "last_candidate_signature": signature,
+        "last_candidate_keys_json": _candidate_keys_json(merged),
+        "last_repository_urls_json": _repository_urls_json(merged),
+        "cursor_mode": "api+browser",
+        "signature_changed": not previous_signature or previous_signature != signature,
+    }
+    return merged, "", next_state
 
 
 def ensure_default_code_watchlist() -> dict[str, Any]:
@@ -3772,7 +4283,7 @@ def _scan_code_watchlist_once_unlocked(
             }
             domain_like_term = "." in term and " " not in term
             if domain_like_term or not filtered_candidates:
-                for query in _expanded_search_queries(term, selected_rule_keys):
+                for query in _expanded_search_queries_for_platform(platform.key, term, selected_rule_keys):
                     expanded_search_url = _search_url(platform.key, query)
                     query_key = _search_state_query_key(term, query)
                     query_bonus = _query_priority_bonus(query, term)
@@ -3849,7 +4360,7 @@ def _scan_code_watchlist_once_unlocked(
                     )
                 except Exception as exc:
                     errors.append(f"{platform.key}:{term}:repo_fallback:{exc}")
-            if platform.key == "github" and not filtered_candidates:
+            if platform.key == "github" and not filtered_candidates and not _github_api_enabled():
                 try:
                     filtered_candidates = _github_repo_fallback_code_search(
                         term,
@@ -4085,6 +4596,7 @@ def _scan_code_watchlist_once_unlocked(
         "max_results_per_term": selected_max_results,
         "detail_fetch": selected_detail_fetch,
         "enabled_rule_keys": selected_rule_keys,
+        "github_search": github_code_search_status_payload(),
         "started_at": started_at,
         "finished_at": finished_at,
     }
@@ -4726,6 +5238,7 @@ def build_code_monitoring_summary() -> dict[str, Any]:
         "lastCandidateCount": int(latest_scan_row.get("candidateCount") or 0),
         "lastHitCount": int(latest_scan_row.get("hitCount") or 0),
         "lastErrorCount": int(latest_scan_row.get("errorCount") or 0),
+        "githubSearch": github_code_search_status_payload(),
         "recentCount": recent_count,
         "trend": [{"date": key, "value": value} for key, value in trend_counter.items()],
         "platformDistribution": [{"name": key, "value": value} for key, value in sorted(platform_counts.items(), key=lambda item: item[1], reverse=True)],
