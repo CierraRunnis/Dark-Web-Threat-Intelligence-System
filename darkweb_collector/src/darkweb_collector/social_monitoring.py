@@ -364,9 +364,11 @@ def remove_campaign_payload(actor: dict, campaign_id: int) -> None:
 
 
 def platform_status_payload() -> list[dict]:
+    facebook_state = os.environ.get("SOCIAL_FACEBOOK_STORAGE_STATE", "").strip()
     configured = {
         "x": bool(os.environ.get("SOCIAL_X_BEARER_TOKEN", "").strip()),
-        "facebook": bool(os.environ.get("SOCIAL_FACEBOOK_ACCESS_TOKEN", "").strip()),
+        "facebook": bool(os.environ.get("SOCIAL_FACEBOOK_ACCESS_TOKEN", "").strip())
+        or bool(facebook_state and Path(facebook_state).expanduser().is_file()),
         "youtube": bool(os.environ.get("SOCIAL_YOUTUBE_API_KEY", "").strip()),
         "telegram": all(
             os.environ.get(name, "").strip()

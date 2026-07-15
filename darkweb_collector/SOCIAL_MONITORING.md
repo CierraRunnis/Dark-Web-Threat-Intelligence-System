@@ -5,7 +5,7 @@
 - 监测轮次固定每 30 分钟更新一次；启用任务时首轮立即到期。30 分钟不是初验 SLA。
 - 现有 scheduler 每 60 秒运行一次 `scripts/crawl.py enqueue-due`，将到期的“任务 × 平台”投递到 `social_api` Celery 队列。
 - 只采集 X/Facebook 主帖、YouTube 视频标题与简介、Telegram 公开广播频道主消息；不采集评论、字幕、语音和私密群。
-- 平台 API 用于自动采集。缺少 API 权限时显示“覆盖受限”；已领取事件可使用授权浏览器保存 HTML 和原始截图，失败时人工上传 PNG/JPEG。
+- 平台 API 用于自动采集。Facebook 无 API 凭据但存在本地 storage-state 时，只读采集授权浏览器可见的公开搜索结果、页面和群组，并始终显示“覆盖受限”。已领取事件可使用授权浏览器保存 HTML 和原始截图，失败时人工上传 PNG/JPEG。
 - 发布仅进入系统内通知中心，不调用企业微信、Webhook 或社交平台写操作。
 
 ## 秘密与证据

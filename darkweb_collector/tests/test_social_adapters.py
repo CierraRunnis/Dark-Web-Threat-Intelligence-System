@@ -60,6 +60,30 @@ class SocialAdapterTests(unittest.TestCase):
         self.assertEqual(private_result.posts, ())
         self.assertEqual(private_transport.calls, [])
 
+    def test_facebook_uses_authorized_browser_fallback_without_api_token(self):
+        adapter = FacebookAdapter(
+            access_token="",
+            browser_storage_state="fixture-state.json",
+            browser_fetcher=lambda _request: (
+                [
+                    {
+                        "text": "Tibet test unit data offered for sale",
+                        "source_url": "https://www.facebook.com/public.page/posts/12345",
+                        "author": "Public Page",
+                    }
+                ],
+                "browser-cursor",
+            ),
+        )
+        result = adapter.collect(CollectRequest(keywords=("Tibet",), limit=5))
+
+        self.assertEqual(result.coverage.mode, "browser_fallback")
+        self.assertTrue(result.coverage.configured)
+        self.assertTrue(result.coverage.limited)
+        self.assertEqual(result.posts[0].platform_post_id, "12345")
+        self.assertEqual(result.posts[0].metadata["collection_mode"], "authorized_browser")
+        self.assertEqual(result.next_cursor, "browser-cursor")
+
     def test_youtube_maps_title_description_and_never_requests_comments(self):
         transport = FixtureTransport(FIXTURE["youtube"])
         result = YouTubeAdapter(transport=transport, api_key="fixture-key").collect(
