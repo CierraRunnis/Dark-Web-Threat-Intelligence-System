@@ -1,5 +1,7 @@
 # Darkweb Collector
 
+`0.12.0-shejiao` 的社交平台监测配置、安全边界与验证命令见 [SOCIAL_MONITORING.md](SOCIAL_MONITORING.md)。
+
 统一管理暗网公开信息采集和威胁情报提取的爬虫框架。
 
 当前项目已经从“每个站点一个独立脚本”演进为“统一 CLI + 站点适配器 + SQLite + 可选 Celery/Redis 队列”的结构，适合持续增加新站点并复用现有抓取、去重、入库和输出逻辑。
