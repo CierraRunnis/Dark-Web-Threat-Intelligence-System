@@ -1,11 +1,38 @@
 <template>
   <header class="header">
     <div class="header__actions">
-      <el-badge :value="6" class="header__badge">
-        <el-button circle class="header__action-btn" aria-label="通知">
-          <el-icon><Bell /></el-icon>
-        </el-button>
-      </el-badge>
+      <el-popover placement="bottom-end" :width="420" trigger="click" @show="loadNotifications">
+        <template #reference>
+          <el-badge :value="unreadCount" :hidden="unreadCount < 1" :max="99" class="header__badge">
+            <el-button circle class="header__action-btn" aria-label="平台内通知">
+              <el-icon><Bell /></el-icon>
+            </el-button>
+          </el-badge>
+        </template>
+        <div class="notification-panel">
+          <div class="notification-panel__head">
+            <div><strong>平台内通知</strong><span>{{ unreadCount }} 条未读</span></div>
+            <el-button v-if="unreadCount" type="primary" link @click="markAllRead">全部已读</el-button>
+          </div>
+          <div v-loading="notificationsLoading" class="notification-list">
+            <button
+              v-for="item in notifications"
+              :key="item.id"
+              type="button"
+              :class="['notification-item', { unread: !notificationRead(item) }]"
+              @click="openNotification(item)"
+            >
+              <span class="notification-item__dot"></span>
+              <span class="notification-item__body">
+                <strong>{{ item.card?.threatTitle || item.threatTitle || item.title || '社交平台威胁情报' }}</strong>
+                <small>{{ item.card?.platform || item.platformLabel || item.platform || '-' }} · {{ notificationTime(item.createdAt || item.publishedAt) }}</small>
+                <p>{{ item.card?.disposalDirection || item.summary || item.disposalDirection || '点击查看威胁详情' }}</p>
+              </span>
+            </button>
+            <div v-if="!notifications.length && !notificationsLoading" class="notification-empty">暂无平台内通知</div>
+          </div>
+        </div>
+      </el-popover>
 
       <el-dropdown trigger="click" @command="handleUserCommand">
         <el-button class="header__profile-btn" aria-label="用户菜单">
@@ -17,7 +44,7 @@
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item disabled>账号：{{ username }}</el-dropdown-item>
+            <el-dropdown-item disabled>账号：{{ username }} · {{ roleLabel }}</el-dropdown-item>
             <el-dropdown-item command="change-password" divided>
               <el-icon><Key /></el-icon>
               修改密码
@@ -74,13 +101,16 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuth } from '@/composables/useAuth'
+import { listFromResponse, useSocialMonitoringApi } from '@/composables/useSocialMonitoringApi'
+import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
 
 const router = useRouter()
 const { state, loadCurrentUser, changePassword, logout } = useAuth()
+const socialApi = useSocialMonitoringApi()
 const passwordDialogVisible = ref(false)
 const passwordSubmitting = ref(false)
 const passwordFormRef = ref()
@@ -89,9 +119,14 @@ const passwordForm = reactive({
   newPassword: '',
   confirmPassword: '',
 })
+const notifications = ref([])
+const notificationsLoading = ref(false)
+let notificationsTimer = null
 
 const username = computed(() => state.user?.username || 'admin')
-const displayName = computed(() => state.user?.display_name || username.value)
+const displayName = computed(() => state.user?.displayName || state.user?.display_name || username.value)
+const roleLabel = computed(() => String(state.user?.role || '').toLowerCase() === 'admin' ? '管理员' : '分析员')
+const unreadCount = computed(() => notifications.value.filter((item) => !notificationRead(item)).length)
 
 const passwordRules = {
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
@@ -107,7 +142,65 @@ const passwordRules = {
 
 onMounted(() => {
   loadCurrentUser()
+  loadNotifications()
+  notificationsTimer = window.setInterval(loadNotifications, 15000)
 })
+
+onBeforeUnmount(() => {
+  if (notificationsTimer) window.clearInterval(notificationsTimer)
+})
+
+async function loadNotifications() {
+  if (notificationsLoading.value) return
+  notificationsLoading.value = true
+  try {
+    const payload = await socialApi.loadNotifications({ limit: 20 })
+    notifications.value = listFromResponse(payload, ['notifications'])
+  } catch {
+    notifications.value = []
+  } finally {
+    notificationsLoading.value = false
+  }
+}
+
+async function openNotification(item) {
+  if (!notificationRead(item)) {
+    try {
+      await socialApi.markNotificationRead(item.id)
+      item.isRead = true
+      item.readAt = new Date().toISOString()
+    } catch {
+      // The detail remains accessible even if the read receipt cannot be saved.
+    }
+  }
+  const eventId = item.eventId || item.socialEventId || item.card?.eventId
+  if (eventId) router.push(`/social-monitoring/events/${eventId}`)
+}
+
+async function markAllRead() {
+  try {
+    await Promise.all(
+      notifications.value
+        .filter((item) => !notificationRead(item))
+        .map((item) => socialApi.markNotificationRead(item.id)),
+    )
+    const now = new Date().toISOString()
+    for (const item of notifications.value) {
+      item.isRead = true
+      item.readAt ||= now
+    }
+  } catch (error) {
+    ElMessage.error(error.message || '更新通知状态失败')
+  }
+}
+
+function notificationTime(value) {
+  return formatShanghaiDateTime(value, { includeSeconds: false }) || '-'
+}
+
+function notificationRead(item) {
+  return Boolean(item.read || item.readAt || item.isRead)
+}
 
 async function handleUserCommand(command) {
   if (command === 'change-password') {
@@ -231,6 +324,54 @@ async function submitPasswordChange() {
 .password-form :deep(.el-form-item:last-child) {
   margin-bottom: 0;
 }
+
+.notification-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 2px 12px;
+  border-bottom: 1px solid var(--ti-border-soft);
+}
+
+.notification-panel__head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.notification-panel__head span {
+  color: var(--ti-text-muted);
+  font-size: 12px;
+}
+
+.notification-list {
+  max-height: 430px;
+  min-height: 90px;
+  overflow-y: auto;
+}
+
+.notification-item {
+  display: grid;
+  grid-template-columns: 8px 1fr;
+  gap: 10px;
+  width: 100%;
+  padding: 13px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--ti-border-soft);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notification-item:hover { background: rgba(45, 93, 255, 0.04); }
+.notification-item__dot { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: #c7cfdb; }
+.notification-item.unread .notification-item__dot { background: var(--ti-primary); box-shadow: 0 0 0 4px rgba(45, 93, 255, 0.1); }
+.notification-item__body { display: grid; gap: 4px; min-width: 0; }
+.notification-item__body strong, .notification-item__body p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notification-item__body small { color: var(--ti-text-muted); }
+.notification-item__body p { margin: 0; color: var(--ti-text-secondary); }
+.notification-empty { display: grid; place-items: center; min-height: 120px; color: var(--ti-text-muted); }
 
 @media (max-width: 767px) {
   .header {

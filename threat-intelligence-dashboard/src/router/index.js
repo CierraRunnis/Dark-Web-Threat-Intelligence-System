@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hasAuthSession, isAuthSessionValidated, loadCurrentUser } from '@/composables/useAuth'
+import { getCurrentUser, hasAuthSession, isAuthSessionValidated, loadCurrentUser } from '@/composables/useAuth'
 import Login from '@/views/Login.vue'
 import Dashboard from '@/views/Dashboard.vue'
 import Ransomware from '@/views/Ransomware.vue'
@@ -18,6 +18,10 @@ import CodeMonitoringSettings from '@/views/CodeMonitoringSettings.vue'
 import CodeMonitoringScans from '@/views/CodeMonitoringScans.vue'
 import CodeMonitoringDetail from '@/views/CodeMonitoringDetail.vue'
 import RemotePlatformLogin from '@/views/RemotePlatformLogin.vue'
+import SocialMonitoringWorkbench from '@/views/SocialMonitoringWorkbench.vue'
+import SocialMonitoringDetail from '@/views/SocialMonitoringDetail.vue'
+import SocialMonitoringSettings from '@/views/SocialMonitoringSettings.vue'
+import UserManagement from '@/views/UserManagement.vue'
 
 const routes = [
   {
@@ -235,6 +239,51 @@ const routes = [
     },
   },
   {
+    path: '/social-monitoring',
+    name: 'SocialMonitoringWorkbench',
+    component: SocialMonitoringWorkbench,
+    meta: {
+      title: '社交平台监测',
+      icon: 'ChatDotRound',
+      kicker: 'Social Threat Monitoring',
+      subtitle: '每 30 分钟更新境外主流社交平台威胁线索，形成初验、合规证据与平台内发布闭环。',
+    },
+  },
+  {
+    path: '/social-monitoring/events/:eventId',
+    name: 'SocialMonitoringDetail',
+    component: SocialMonitoringDetail,
+    meta: {
+      title: '社交平台威胁详情',
+      hidden: true,
+      kicker: 'Social Threat Detail',
+      subtitle: '完成威胁初验、截图合规处理、平台内发布和重大事件专项报告。',
+    },
+  },
+  {
+    path: '/social-monitoring/settings',
+    name: 'SocialMonitoringSettings',
+    component: SocialMonitoringSettings,
+    meta: {
+      title: '社交平台监测配置',
+      hidden: true,
+      kicker: 'Social Monitoring Settings',
+      subtitle: '配置重要时间节点、监测平台、关键词、目标别名和重点来源。',
+    },
+  },
+  {
+    path: '/social-monitoring/users',
+    name: 'UserManagement',
+    component: UserManagement,
+    meta: {
+      title: '用户管理',
+      hidden: true,
+      requiresAdmin: true,
+      kicker: 'Access Control',
+      subtitle: '管理社交平台监测管理员与分析员账号。',
+    },
+  },
+  {
     path: '/platform-sessions/remote-login',
     name: 'RemotePlatformLogin',
     component: RemotePlatformLogin,
@@ -291,6 +340,10 @@ router.beforeEach(async (to) => {
         query: { redirect: to.fullPath },
       }
     }
+  }
+
+  if (to.meta.requiresAdmin && String(getCurrentUser()?.role || '').toLowerCase() !== 'admin') {
+    return '/social-monitoring'
   }
 
   return true

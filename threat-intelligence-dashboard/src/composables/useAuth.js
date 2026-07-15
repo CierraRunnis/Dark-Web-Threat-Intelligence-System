@@ -49,6 +49,10 @@ export function getAuthToken() {
   return state.token || localStorage.getItem(TOKEN_STORAGE_KEY) || ''
 }
 
+export function getCurrentUser() {
+  return state.user
+}
+
 export function hasAuthSession() {
   return Boolean(getAuthToken())
 }
