@@ -1800,6 +1800,7 @@ td strong {
 
   .runtime-channel {
     grid-column: 1 / -1;
+    padding-right: 64px;
   }
 
   .runtime-item:nth-of-type(2n) {
@@ -1890,7 +1891,7 @@ td strong {
   }
 
   .runtime-channel {
-    padding-right: 52px;
+    padding-right: 64px;
   }
 
   .metric-card:nth-child(1),
