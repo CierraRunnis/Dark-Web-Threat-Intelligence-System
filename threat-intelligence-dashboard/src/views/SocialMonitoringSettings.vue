@@ -95,7 +95,7 @@
               <div><span class="platform-mark telegram">TG</span><strong>Telegram MTProto</strong></div>
               <el-tag :type="accessConfigured('telegram') ? 'success' : 'info'">{{ accessConfigured('telegram') ? '已接入' : '待配置' }}</el-tag>
             </div>
-            <p class="access-description">用于公开广播频道关键词和重点频道主消息监测。StringSession 需先在可信终端完成手机号验证后生成。</p>
+            <p class="access-description">用于公开广播频道关键词和重点频道主消息监测。保存 API ID 和 API Hash 后，可直接在本页面完成账号验证。</p>
             <el-form label-position="top" class="telegram-form">
               <el-form-item>
                 <template #label><span>API ID <em>{{ credentialLabel('telegram', 'apiId') }}</em></span></template>
@@ -106,12 +106,53 @@
                 <el-input v-model="telegramForm.apiHash" type="password" show-password autocomplete="new-password" :disabled="credentialLocked('telegram', 'apiHash')" :placeholder="credentialPlaceholder('telegram', 'apiHash', '32 位 API Hash')" />
               </el-form-item>
               <el-form-item class="session-field">
-                <template #label><span>StringSession <em>{{ credentialLabel('telegram', 'session') }}</em></span></template>
-                <el-input v-model="telegramForm.session" type="password" show-password autocomplete="new-password" :disabled="credentialLocked('telegram', 'session')" :placeholder="credentialPlaceholder('telegram', 'session', '粘贴会话字符串，不是手机号或验证码')" />
+                <template #label><span>已有 StringSession（可选） <em>{{ credentialLabel('telegram', 'session') }}</em></span></template>
+                <el-input v-model="telegramForm.session" type="password" show-password autocomplete="new-password" :disabled="credentialLocked('telegram', 'session')" :placeholder="credentialPlaceholder('telegram', 'session', '已有会话可直接粘贴；也可使用下方页面登录生成')" />
               </el-form-item>
             </el-form>
-            <div class="session-help">
-              生成命令：<code>python darkweb_collector/scripts/create_telegram_session.py</code>
+            <div class="session-wizard">
+              <div class="session-wizard-head">
+                <div><strong>页面生成 StringSession</strong><span>验证码和两步验证密码仅用于本次登录，不会保存或回显。</span></div>
+                <el-tag size="small" :type="credential('telegram', 'session').configured ? 'success' : 'info'">
+                  {{ credential('telegram', 'session').configured ? '会话已配置' : '等待验证' }}
+                </el-tag>
+              </div>
+              <el-alert
+                v-if="!telegramApiCredentialsReady"
+                title="请先在上方保存 API ID 和 API Hash，再发送验证码。"
+                type="warning"
+                :closable="false"
+                show-icon
+              />
+              <el-form label-position="top" class="session-wizard-form">
+                <el-form-item v-if="!telegramLogin.attemptId" label="Telegram 登录手机号" class="full">
+                  <el-input v-model="telegramLogin.phone" autocomplete="tel" placeholder="国际格式，例如 +8613800138000" />
+                </el-form-item>
+                <template v-else>
+                  <el-form-item v-if="telegramLogin.status !== 'password_required'" label="Telegram 验证码">
+                    <el-input v-model="telegramLogin.code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="输入 Telegram 收到的验证码" />
+                  </el-form-item>
+                  <el-form-item :label="telegramLogin.status === 'password_required' ? '两步验证密码' : '两步验证密码（如已启用）'">
+                    <el-input v-model="telegramLogin.password" type="password" show-password autocomplete="current-password" placeholder="未启用两步验证可留空" />
+                  </el-form-item>
+                  <div class="session-expiry full">本次验证将在 {{ formatDateTime(telegramLogin.expiresAt) }} 失效。</div>
+                </template>
+              </el-form>
+              <div class="session-wizard-actions">
+                <el-button
+                  v-if="!telegramLogin.attemptId"
+                  type="primary"
+                  :loading="telegramLoginBusy"
+                  :disabled="!telegramApiCredentialsReady"
+                  @click="startTelegramLogin"
+                >发送验证码</el-button>
+                <template v-else>
+                  <el-button type="primary" :loading="telegramLoginBusy" @click="completeTelegramLogin">
+                    {{ telegramLogin.status === 'password_required' ? '验证两步密码并保存' : '完成登录并保存会话' }}
+                  </el-button>
+                  <el-button :disabled="telegramLoginBusy" @click="cancelTelegramLogin">取消本次验证</el-button>
+                </template>
+              </div>
             </div>
             <div class="access-actions">
               <el-button type="primary" :loading="savingPlatform === 'telegram'" @click="saveAccessConfig('telegram')">保存 Telegram 配置</el-button>
@@ -189,6 +230,7 @@ const drawerVisible = ref(false)
 const editingId = ref('')
 const saving = ref(false)
 const savingPlatform = ref('')
+const telegramLoginBusy = ref(false)
 const platformOptions = [
   { label: 'X', value: 'x' }, { label: 'Facebook', value: 'facebook' },
   { label: 'YouTube', value: 'youtube' }, { label: 'Telegram', value: 'telegram' },
@@ -196,7 +238,11 @@ const platformOptions = [
 const form = reactive(emptyForm())
 const youtubeForm = reactive({ apiKey: '' })
 const telegramForm = reactive({ apiId: '', apiHash: '', session: '' })
+const telegramLogin = reactive({ phone: '', code: '', password: '', attemptId: '', status: 'idle', expiresAt: '' })
 const isAdmin = computed(() => String(state.user?.role || '').toLowerCase() === 'admin')
+const telegramApiCredentialsReady = computed(() => (
+  credential('telegram', 'apiId').configured && credential('telegram', 'apiHash').configured
+))
 
 onMounted(() => Promise.all([loadCampaigns(), loadPlatforms(), loadScans(), ...(isAdmin.value ? [loadAccessConfig()] : [])]))
 
@@ -255,9 +301,74 @@ async function clearAccessConfig(platform) {
   try { await ElMessageBox.confirm(`确认清除页面保存的 ${platformLabel(platform)} 凭据？`, '清除平台配置', { type: 'warning' }) } catch { return }
   try {
     await api.clearPlatformConfig(platform)
+    if (platform === 'telegram') resetTelegramLogin()
     ElMessage.success(`${platformLabel(platform)} 页面配置已清除`)
     await Promise.all([loadAccessConfig(), loadPlatforms()])
   } catch (error) { ElMessage.error(error.message || '清除平台配置失败') }
+}
+
+function resetTelegramLogin() {
+  Object.assign(telegramLogin, { phone: '', code: '', password: '', attemptId: '', status: 'idle', expiresAt: '' })
+}
+
+async function startTelegramLogin() {
+  const phone = telegramLogin.phone.replace(/[\s()-]/g, '')
+  if (!/^\+[1-9][0-9]{6,14}$/.test(phone)) {
+    ElMessage.warning('请输入带国家区号的手机号，例如 +8613800138000')
+    return
+  }
+  telegramLoginBusy.value = true
+  try {
+    const result = await api.startTelegramSession({ phone })
+    Object.assign(telegramLogin, {
+      phone: '', code: '', password: '', attemptId: result.attemptId,
+      status: result.status, expiresAt: result.expiresAt,
+    })
+    ElMessage.success('验证码已发送，请查看 Telegram 官方消息')
+  } catch (error) { ElMessage.error(error.message || '发送 Telegram 验证码失败') }
+  finally { telegramLoginBusy.value = false }
+}
+
+async function completeTelegramLogin() {
+  if (telegramLogin.status !== 'password_required' && !/^\d{4,8}$/.test(telegramLogin.code.trim())) {
+    ElMessage.warning('请输入 Telegram 验证码')
+    return
+  }
+  if (telegramLogin.status === 'password_required' && !telegramLogin.password) {
+    ElMessage.warning('请输入 Telegram 两步验证密码')
+    return
+  }
+  telegramLoginBusy.value = true
+  try {
+    const result = await api.completeTelegramSession({
+      attemptId: telegramLogin.attemptId,
+      code: telegramLogin.code.trim(),
+      password: telegramLogin.password,
+    })
+    telegramLogin.code = ''
+    telegramLogin.password = ''
+    if (result.status === 'password_required') {
+      telegramLogin.status = 'password_required'
+      telegramLogin.expiresAt = result.expiresAt
+      ElMessage.warning('该账号已启用两步验证，请继续输入密码')
+      return
+    }
+    resetTelegramLogin()
+    ElMessage.success('Telegram 会话已生成并安全保存')
+    await Promise.all([loadAccessConfig(), loadPlatforms()])
+  } catch (error) {
+    telegramLogin.code = ''
+    telegramLogin.password = ''
+    ElMessage.error(error.message || 'Telegram 登录验证失败')
+  } finally { telegramLoginBusy.value = false }
+}
+
+async function cancelTelegramLogin() {
+  const attemptId = telegramLogin.attemptId
+  resetTelegramLogin()
+  if (!attemptId) return
+  try { await api.cancelTelegramSession(attemptId) }
+  catch (error) { ElMessage.error(error.message || '取消 Telegram 登录失败') }
 }
 
 function openCreate() { editingId.value = ''; Object.assign(form, emptyForm()); drawerVisible.value = true }
@@ -349,8 +460,12 @@ function scanTone(value) { return ['completed', 'success'].includes(value) ? 'su
 .access-description { min-height: 42px; margin: 14px 0 16px; color: var(--ti-text-secondary); line-height: 1.6; }
 .access-panel :deep(.el-form-item__label) em { margin-left: 8px; color: var(--ti-text-muted); font-size: 12px; font-style: normal; font-weight: 400; }
 .telegram-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }.telegram-form .session-field { grid-column: 1 / -1; }
-.session-help { margin: -2px 0 15px; color: var(--ti-text-muted); font-size: 12px; }.session-help code { color: var(--ti-primary); word-break: break-all; }
+.session-wizard { margin: 2px 0 16px; padding: 15px; border: 1px solid #cfe5f4; border-radius: 14px; background: #f5fbff; }
+.session-wizard-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
+.session-wizard-head > div { display: grid; gap: 4px; }.session-wizard-head span { color: var(--ti-text-muted); font-size: 12px; line-height: 1.5; }
+.session-wizard-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; margin-top: 13px; }.session-wizard-form .full { grid-column: 1 / -1; }
+.session-wizard-actions { display: flex; align-items: center; gap: 10px; }.session-expiry { margin: -6px 0 13px; color: var(--ti-text-muted); font-size: 12px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }.form-grid .full { grid-column: 1 / -1; }.empty { padding: 40px; color: var(--ti-text-muted); text-align: center; }
 @media (max-width: 1000px) { .settings-grid, .access-grid { grid-template-columns: 1fr; }.content-card--full { grid-column: auto; }.access-description { min-height: 0; } }
-@media (max-width: 767px) { .page-head { flex-direction: column; }.form-grid, .telegram-form { grid-template-columns: 1fr; }.form-grid .full, .telegram-form .session-field { grid-column: auto; }.access-actions { align-items: stretch; flex-direction: column; }.access-actions .el-button { margin-left: 0; } }
+@media (max-width: 767px) { .page-head { flex-direction: column; }.form-grid, .telegram-form, .session-wizard-form { grid-template-columns: 1fr; }.form-grid .full, .telegram-form .session-field, .session-wizard-form .full { grid-column: auto; }.access-actions, .session-wizard-actions { align-items: stretch; flex-direction: column; }.access-actions .el-button, .session-wizard-actions .el-button { margin-left: 0; }.session-wizard-head { flex-direction: column; } }
 </style>

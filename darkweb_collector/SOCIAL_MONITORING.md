@@ -26,13 +26,16 @@ YouTube 只保存视频标题、简介、发布时间、频道和缩略图地址
 ### Telegram MTProto API
 
 1. 在 <https://my.telegram.org> 创建应用，取得 `api_id` 和 `api_hash`。
-2. 在可信终端设置 `SOCIAL_TELEGRAM_API_ID` 和 `SOCIAL_TELEGRAM_API_HASH`，执行：
+2. 在“监测配置 → 免费平台接入配置”保存 API ID 和 API Hash。
+3. 在同一页面的“页面生成 StringSession”区域填写国际格式手机号，依次完成验证码和可选的两步验证。验证码和密码只保存在当前浏览器输入框及本次请求内；生成的 StringSession 由后端直接写入私有秘密文件，不返回浏览器。
+
+可信终端命令仍作为备用方式：
 
    ```bash
-   PYTHONPATH=darkweb_collector/src python darkweb_collector/scripts/create_telegram_session.py
+   python darkweb_collector/scripts/create_telegram_session.py
    ```
 
-3. 按提示完成手机号、验证码和可选的两步验证，将输出保存为 Codespaces secret `SOCIAL_TELEGRAM_SESSION`。
+命令行方式完成登录后，将输出保存为 Codespaces secret `SOCIAL_TELEGRAM_SESSION`，或粘贴到页面的“已有 StringSession”字段。
 
 后台任务不会发起交互式登录。会话失效时轮次明确失败并保留上次游标，必须重新生成会话。系统只接收公开广播频道用户名、`@username` 或 `t.me/username`；邀请链接、私密频道、群组和超级群组不会采集。全局关键词逐词搜索，重点频道则读取游标之后的新主消息，最终仍由服务端的“地域或目标 + 威胁词”规则筛选。
 

@@ -75,6 +75,21 @@ def clear_social_platform_config(platform: str, request: Request) -> dict:
     return _call(service.clear_platform_config_payload, _actor(request), platform)
 
 
+@router.post("/api/social-monitoring/telegram-session/start")
+def start_telegram_session(request: Request, payload: dict[str, Any]) -> dict:
+    return _call(service.start_telegram_session_payload, _actor(request), payload)
+
+
+@router.post("/api/social-monitoring/telegram-session/complete")
+def complete_telegram_session(request: Request, payload: dict[str, Any]) -> dict:
+    return _call(service.complete_telegram_session_payload, _actor(request), payload)
+
+
+@router.delete("/api/social-monitoring/telegram-session/{attempt_id}")
+def cancel_telegram_session(attempt_id: str, request: Request) -> dict:
+    return _call(service.cancel_telegram_session_payload, _actor(request), attempt_id)
+
+
 @router.get("/api/social-monitoring/campaigns")
 def social_campaigns() -> list[dict]:
     return _call(service.list_campaigns_payload)

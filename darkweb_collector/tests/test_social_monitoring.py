@@ -5,10 +5,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from PIL import Image
+from telethon.errors import SessionPasswordNeededError
 
 from darkweb_collector.db import connect
 from darkweb_collector import social_monitoring as social
@@ -209,6 +211,104 @@ class SocialMonitoringTest(unittest.TestCase):
             social.platform_config_payload(analyst)
         with self.assertRaisesRegex(social.SocialMonitoringError, "admin"):
             social.save_platform_config_payload(analyst, "youtube", {"apiKey": "AIza" + "A" * 35})
+        with self.assertRaisesRegex(social.SocialMonitoringError, "admin"):
+            social.start_telegram_session_payload(analyst, {"phone": "+8613800138000"})
+
+    def test_admin_can_generate_telegram_session_from_page_login(self) -> None:
+        secrets_path = self.root / "private" / "social-platform-secrets.json"
+        environment = {
+            "SOCIAL_PLATFORM_SECRETS_FILE": str(secrets_path),
+            "SOCIAL_TELEGRAM_API_ID": "",
+            "SOCIAL_TELEGRAM_API_HASH": "",
+            "SOCIAL_TELEGRAM_SESSION": "",
+        }
+        temporary_session = "1" + "T" * 180
+        authorized_session = "1" + "S" * 180
+
+        class Client:
+            def __init__(self, saved_session: str, authorized: bool = False) -> None:
+                self.session = SimpleNamespace(save=lambda: saved_session)
+                self.authorized = authorized
+                self.sign_in_payload = None
+
+            def connect(self) -> None: pass
+            def disconnect(self) -> None: pass
+            def send_code_request(self, phone: str):
+                self.phone = phone
+                return SimpleNamespace(phone_code_hash="phone-code-hash")
+            def sign_in(self, **payload) -> None: self.sign_in_payload = payload
+            def is_user_authorized(self) -> bool: return self.authorized
+
+        start_client = Client(temporary_session)
+        complete_client = Client(authorized_session, authorized=True)
+        with patch.dict(os.environ, environment), patch.object(
+            social, "_telegram_client", side_effect=[start_client, complete_client]
+        ):
+            social.save_platform_config_payload(
+                self.admin, "telegram", {"apiId": "123456", "apiHash": "a" * 32}
+            )
+            started = social.start_telegram_session_payload(self.admin, {"phone": "+8613800138000"})
+            completed = social.complete_telegram_session_payload(
+                self.admin, {"attemptId": started["attemptId"], "code": "12345"}
+            )
+
+        self.assertEqual(started["status"], "code_sent")
+        self.assertNotIn("phone", json.dumps(started))
+        self.assertEqual(complete_client.sign_in_payload["phone_code_hash"], "phone-code-hash")
+        self.assertEqual(completed["status"], "configured")
+        self.assertTrue(completed["config"]["configured"])
+        self.assertNotIn(authorized_session, json.dumps(completed))
+        self.assertIn(authorized_session, secrets_path.read_text(encoding="utf-8"))
+
+    def test_page_login_supports_telegram_two_step_verification(self) -> None:
+        secrets_path = self.root / "private" / "social-platform-secrets.json"
+        environment = {
+            "SOCIAL_PLATFORM_SECRETS_FILE": str(secrets_path),
+            "SOCIAL_TELEGRAM_API_ID": "",
+            "SOCIAL_TELEGRAM_API_HASH": "",
+            "SOCIAL_TELEGRAM_SESSION": "",
+        }
+        temporary_session = "1" + "T" * 180
+        password_session = "1" + "P" * 180
+        authorized_session = "1" + "A" * 180
+
+        class Client:
+            def __init__(self, saved_session: str, *, password_needed: bool = False, authorized: bool = False) -> None:
+                self.session = SimpleNamespace(save=lambda: saved_session)
+                self.password_needed = password_needed
+                self.authorized = authorized
+                self.sign_in_payloads = []
+
+            def connect(self) -> None: pass
+            def disconnect(self) -> None: pass
+            def send_code_request(self, phone: str): return SimpleNamespace(phone_code_hash="hash")
+            def sign_in(self, **payload) -> None:
+                self.sign_in_payloads.append(payload)
+                if self.password_needed:
+                    raise SessionPasswordNeededError(None)
+            def is_user_authorized(self) -> bool: return self.authorized
+
+        clients = [
+            Client(temporary_session),
+            Client(password_session, password_needed=True),
+            Client(authorized_session, authorized=True),
+        ]
+        with patch.dict(os.environ, environment), patch.object(social, "_telegram_client", side_effect=clients):
+            social.save_platform_config_payload(
+                self.admin, "telegram", {"apiId": "123456", "apiHash": "a" * 32}
+            )
+            started = social.start_telegram_session_payload(self.admin, {"phone": "+8613800138000"})
+            challenge = social.complete_telegram_session_payload(
+                self.admin, {"attemptId": started["attemptId"], "code": "12345"}
+            )
+            completed = social.complete_telegram_session_payload(
+                self.admin, {"attemptId": started["attemptId"], "password": "two-step-secret"}
+            )
+
+        self.assertEqual(challenge["status"], "password_required")
+        self.assertEqual(clients[2].sign_in_payloads, [{"password": "two-step-secret"}])
+        self.assertEqual(completed["status"], "configured")
+        self.assertNotIn("two-step-secret", json.dumps(completed))
 
     def test_edited_post_keeps_content_snapshots(self) -> None:
         event_id = self._event()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -10,6 +10,8 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+from threading import RLock
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -73,6 +75,9 @@ SOCIAL_PLATFORM_HOSTS = {
     "youtube": ("youtube.com", "youtu.be"),
     "telegram": ("t.me", "telegram.me"),
 }
+TELEGRAM_LOGIN_TTL_SECONDS = 10 * 60
+_TELEGRAM_LOGIN_ATTEMPTS: dict[str, dict[str, Any]] = {}
+_TELEGRAM_LOGIN_LOCK = RLock()
 
 
 class SocialMonitoringError(ValueError):
@@ -480,6 +485,185 @@ def clear_platform_config_payload(actor: dict, platform: str) -> dict:
         raise SocialMonitoringError("platform credential configuration is not supported", 404)
     remove_social_secrets(PLATFORM_CREDENTIALS[selected].values())
     return _platform_config(selected)
+
+
+def _telegram_client(session: str, api_id: str, api_hash: str):
+    from telethon.sessions import StringSession
+    from telethon.sync import TelegramClient
+
+    return TelegramClient(StringSession(session), int(api_id), api_hash)
+
+
+def _cleanup_telegram_login_attempts() -> None:
+    now = monotonic()
+    for attempt_id, attempt in list(_TELEGRAM_LOGIN_ATTEMPTS.items()):
+        if float(attempt["expires_monotonic"]) <= now:
+            _TELEGRAM_LOGIN_ATTEMPTS.pop(attempt_id, None)
+
+
+def _telegram_attempt_response(attempt_id: str, attempt: dict, status: str) -> dict:
+    return {"attemptId": attempt_id, "status": status, "expiresAt": attempt["expires_at"]}
+
+
+def start_telegram_session_payload(actor: dict, payload: dict) -> dict:
+    require_role(actor, "admin")
+    api_id = get_social_secret("SOCIAL_TELEGRAM_API_ID")
+    api_hash = get_social_secret("SOCIAL_TELEGRAM_API_HASH")
+    if not api_id or not api_hash:
+        raise SocialMonitoringError("save Telegram API ID and API Hash before sending a login code", 409)
+    if social_secret_state("SOCIAL_TELEGRAM_SESSION")["source"] == "environment":
+        raise SocialMonitoringError("Telegram session is managed by an environment variable", 409)
+
+    phone = re.sub(r"[\s()-]", "", str(payload.get("phone") or ""))
+    if not re.fullmatch(r"\+[1-9][0-9]{6,14}", phone):
+        raise SocialMonitoringError("Telegram phone must use international format, for example +8613800138000")
+
+    try:
+        from telethon.errors import FloodWaitError, PhoneNumberBannedError, PhoneNumberInvalidError
+
+        client = _telegram_client("", api_id, api_hash)
+        try:
+            client.connect()
+            sent_code = client.send_code_request(phone)
+            phone_code_hash = str(getattr(sent_code, "phone_code_hash", "") or "")
+            saved_session = client.session.save()
+        finally:
+            client.disconnect()
+    except PhoneNumberInvalidError as exc:
+        raise SocialMonitoringError("Telegram rejected the phone number format") from exc
+    except PhoneNumberBannedError as exc:
+        raise SocialMonitoringError("Telegram has restricted this phone number", 403) from exc
+    except FloodWaitError as exc:
+        raise SocialMonitoringError(
+            f"Telegram temporarily limited login attempts; retry after {max(int(exc.seconds), 1)} seconds", 429
+        ) from exc
+    except SocialMonitoringError:
+        raise
+    except Exception as exc:
+        raise SocialMonitoringError("Telegram failed to send the login code", 502) from exc
+    if not phone_code_hash or not saved_session:
+        raise SocialMonitoringError("Telegram did not return a usable login challenge", 502)
+
+    attempt_id = secrets.token_urlsafe(24)
+    attempt = {
+        "actor_id": int(actor["id"]),
+        "phone": phone,
+        "phone_code_hash": phone_code_hash,
+        "session": saved_session,
+        "password_required": False,
+        "busy": False,
+        "expires_monotonic": monotonic() + TELEGRAM_LOGIN_TTL_SECONDS,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=TELEGRAM_LOGIN_TTL_SECONDS)).isoformat(),
+    }
+    with _TELEGRAM_LOGIN_LOCK:
+        _cleanup_telegram_login_attempts()
+        for existing_id, existing in list(_TELEGRAM_LOGIN_ATTEMPTS.items()):
+            if int(existing["actor_id"]) == int(actor["id"]):
+                _TELEGRAM_LOGIN_ATTEMPTS.pop(existing_id, None)
+        _TELEGRAM_LOGIN_ATTEMPTS[attempt_id] = attempt
+    return _telegram_attempt_response(attempt_id, attempt, "code_sent")
+
+
+def complete_telegram_session_payload(actor: dict, payload: dict) -> dict:
+    require_role(actor, "admin")
+    attempt_id = str(payload.get("attemptId") or "").strip()
+    code = str(payload.get("code") or "").strip()
+    password = str(payload.get("password") or "")
+    if len(password) > 512:
+        raise SocialMonitoringError("Telegram two-step verification password is too long")
+    with _TELEGRAM_LOGIN_LOCK:
+        _cleanup_telegram_login_attempts()
+        attempt = _TELEGRAM_LOGIN_ATTEMPTS.get(attempt_id)
+        if not attempt or int(attempt["actor_id"]) != int(actor["id"]):
+            raise SocialMonitoringError("Telegram login attempt expired or was not found", 404)
+        if attempt["busy"]:
+            raise SocialMonitoringError("Telegram login attempt is already being processed", 409)
+        attempt["busy"] = True
+
+    if not attempt["password_required"] and not re.fullmatch(r"[0-9]{4,8}", code):
+        with _TELEGRAM_LOGIN_LOCK:
+            attempt["busy"] = False
+        raise SocialMonitoringError("enter the Telegram verification code")
+    if attempt["password_required"] and not password:
+        with _TELEGRAM_LOGIN_LOCK:
+            attempt["busy"] = False
+        return _telegram_attempt_response(attempt_id, attempt, "password_required")
+
+    api_id = get_social_secret("SOCIAL_TELEGRAM_API_ID")
+    api_hash = get_social_secret("SOCIAL_TELEGRAM_API_HASH")
+    client = None
+    remove_attempt = False
+    try:
+        from telethon.errors import (
+            FloodWaitError,
+            PasswordHashInvalidError,
+            PhoneCodeExpiredError,
+            PhoneCodeInvalidError,
+            SessionPasswordNeededError,
+        )
+
+        client = _telegram_client(str(attempt["session"]), api_id, api_hash)
+        client.connect()
+        if attempt["password_required"]:
+            client.sign_in(password=password)
+        else:
+            try:
+                client.sign_in(
+                    phone=str(attempt["phone"]),
+                    code=code,
+                    phone_code_hash=str(attempt["phone_code_hash"]),
+                )
+            except SessionPasswordNeededError:
+                attempt["session"] = client.session.save()
+                attempt["password_required"] = True
+                if not password:
+                    return _telegram_attempt_response(attempt_id, attempt, "password_required")
+                client.sign_in(password=password)
+        if not client.is_user_authorized():
+            raise SocialMonitoringError("Telegram login was not authorized", 401)
+        session = client.session.save()
+        _validate_platform_secret("telegram", "session", session)
+        if social_secret_state("SOCIAL_TELEGRAM_SESSION")["source"] == "environment":
+            raise SocialMonitoringError("Telegram session is managed by an environment variable", 409)
+        update_social_secrets({"SOCIAL_TELEGRAM_SESSION": session})
+        remove_attempt = True
+        return {"status": "configured", "config": _platform_config("telegram")}
+    except PhoneCodeInvalidError as exc:
+        raise SocialMonitoringError("Telegram verification code is invalid") from exc
+    except PhoneCodeExpiredError as exc:
+        remove_attempt = True
+        raise SocialMonitoringError("Telegram verification code expired; request a new code") from exc
+    except PasswordHashInvalidError as exc:
+        raise SocialMonitoringError("Telegram two-step verification password is incorrect") from exc
+    except FloodWaitError as exc:
+        raise SocialMonitoringError(
+            f"Telegram temporarily limited login attempts; retry after {max(int(exc.seconds), 1)} seconds", 429
+        ) from exc
+    except SocialMonitoringError:
+        raise
+    except Exception as exc:
+        raise SocialMonitoringError("Telegram login failed", 502) from exc
+    finally:
+        if client is not None:
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        with _TELEGRAM_LOGIN_LOCK:
+            if remove_attempt:
+                _TELEGRAM_LOGIN_ATTEMPTS.pop(attempt_id, None)
+            elif attempt_id in _TELEGRAM_LOGIN_ATTEMPTS:
+                _TELEGRAM_LOGIN_ATTEMPTS[attempt_id]["busy"] = False
+
+
+def cancel_telegram_session_payload(actor: dict, attempt_id: str) -> dict:
+    require_role(actor, "admin")
+    with _TELEGRAM_LOGIN_LOCK:
+        _cleanup_telegram_login_attempts()
+        attempt = _TELEGRAM_LOGIN_ATTEMPTS.get(str(attempt_id))
+        if attempt and int(attempt["actor_id"]) == int(actor["id"]):
+            _TELEGRAM_LOGIN_ATTEMPTS.pop(str(attempt_id), None)
+    return {"status": "cancelled"}
 
 
 def list_scans_payload(campaign_id: int | None = None, limit: int = 100) -> list[dict]:
