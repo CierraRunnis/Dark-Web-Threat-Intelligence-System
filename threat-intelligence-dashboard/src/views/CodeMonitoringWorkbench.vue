@@ -12,6 +12,53 @@
         </div>
       </header>
 
+      <section class="panel runtime-strip" :class="`runtime-strip--${githubChannel.tone}`">
+        <div class="runtime-channel">
+          <span class="runtime-channel__dot" aria-hidden="true"></span>
+          <div>
+            <span class="runtime-label">GitHub 搜索通道</span>
+            <div class="runtime-channel__value">{{ githubChannel.label }}</div>
+          </div>
+          <span class="runtime-chip">{{ githubModeLabel }}</span>
+        </div>
+
+        <div class="runtime-item">
+          <span class="runtime-label">认证状态</span>
+          <strong :class="{ 'runtime-value--warning': !githubSearch.apiConfigured }">
+            {{ githubTokenLabel }}
+          </strong>
+        </div>
+        <div class="runtime-item">
+          <span class="runtime-label">API 配额</span>
+          <strong>{{ githubQuotaLabel }}</strong>
+        </div>
+        <div class="runtime-item">
+          <span class="runtime-label">最近成功</span>
+          <strong>{{ githubLastSuccessLabel }}</strong>
+        </div>
+        <div class="runtime-item">
+          <span class="runtime-label">后台监测</span>
+          <strong>{{ monitoringRuntimeLabel }}</strong>
+        </div>
+
+        <el-tooltip content="刷新运行状态" placement="top">
+          <el-button
+            text
+            circle
+            class="runtime-refresh"
+            :loading="runtimeLoading"
+            aria-label="刷新运行状态"
+            @click="loadRuntimeStatus"
+          >
+            <el-icon><Refresh /></el-icon>
+          </el-button>
+        </el-tooltip>
+
+        <div v-if="githubStatusMessage" class="runtime-message">
+          {{ githubStatusMessage }}
+        </div>
+      </section>
+
       <section class="top-grid">
         <article v-for="card in metricCards" :key="card.label" class="panel metric-card">
           <div class="panel-title">
@@ -338,9 +385,9 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search } from '@element-plus/icons-vue'
+import { Refresh, Search } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
 import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
@@ -378,9 +425,12 @@ const pageSize = ref(10)
 const suppressedCurrentPage = ref(1)
 const suppressedPageSize = ref(10)
 const scanLoading = ref(false)
+const runtimeLoading = ref(false)
+const runtimeLoadError = ref('')
 const applyingRouteState = ref(false)
 const hits = ref([])
 const watchlists = ref([])
+let runtimeRefreshTimer = null
 const summary = reactive({
   totalHits: 0,
   sensitiveSnippetCount: 0,
@@ -395,6 +445,78 @@ const summary = reactive({
   sensitiveTypeTop: [],
   riskDistribution: [],
   lastScanAt: '',
+})
+const runtimeStatus = reactive({
+  enabled: false,
+  running: false,
+  last_success_at: '',
+  github_search: {},
+})
+
+const githubSearch = computed(() => runtimeStatus.github_search || {})
+
+const githubChannel = computed(() => {
+  const channel = String(githubSearch.value.activeChannel || '').toLowerCase()
+  if (channel === 'api') return { label: '认证 API', tone: 'success' }
+  if (channel === 'browser') return { label: '登录态浏览器', tone: 'browser' }
+  return { label: '不可用', tone: 'danger' }
+})
+
+const githubModeLabel = computed(() => {
+  const labels = { auto: '自动', api: '仅 API', browser: '仅浏览器' }
+  return labels[githubSearch.value.mode] || '自动'
+})
+
+const githubTokenLabel = computed(() => {
+  if (!githubSearch.value.apiConfigured) return '未配置 Token'
+  const sourceLabels = {
+    DARKWEB_GITHUB_TOKEN: '环境变量',
+    token_file: '令牌文件',
+    GITHUB_TOKEN: 'GitHub 环境',
+    GH_TOKEN: 'GitHub CLI 环境',
+  }
+  return `已配置 · ${sourceLabels[githubSearch.value.tokenSource] || '运行环境'}`
+})
+
+const githubQuotaLabel = computed(() => {
+  const remaining = githubSearch.value.rateRemaining
+  const limit = githubSearch.value.rateLimit
+  if (remaining == null && limit == null) return '等待首次请求'
+  if (remaining == null) return `- / ${formatNumber(limit)}`
+  if (limit == null) return formatNumber(remaining)
+  return `${formatNumber(remaining)} / ${formatNumber(limit)}`
+})
+
+const githubLastSuccessLabel = computed(() =>
+  formatDateTime(githubSearch.value.lastSuccessAt) || '暂无',
+)
+
+const monitoringRuntimeLabel = computed(() => {
+  if (runtimeStatus.running) return '正在扫描'
+  if (runtimeStatus.enabled) return '持续监测中'
+  return '未启动'
+})
+
+const githubStatusMessage = computed(() => {
+  if (runtimeLoadError.value) return runtimeLoadError.value
+  if (githubSearch.value.cooldownUntil) {
+    return `API 冷却至 ${formatDateTime(githubSearch.value.cooldownUntil) || githubSearch.value.cooldownUntil}`
+  }
+  const errorLabels = {
+    token_missing: 'GitHub API Token 缺失，当前无法使用认证 API。',
+    rate_limited: 'GitHub API 已限流，系统将在冷却结束后恢复。',
+    access_denied: 'GitHub API 拒绝访问，请检查 Token 权限。',
+    server_error: 'GitHub API 暂时不可用。',
+    transport_or_response_error: 'GitHub API 网络或响应异常。',
+    invalid_response: 'GitHub API 返回了无法识别的数据。',
+  }
+  const lastError = String(githubSearch.value.lastError || '')
+  if (lastError) return errorLabels[lastError] || lastError
+  if (!githubSearch.value.apiConfigured && githubSearch.value.mode === 'auto') {
+    return '未配置 GitHub API Token，手动扫描将使用登录态浏览器。'
+  }
+  if (githubSearch.value.degraded) return 'GitHub 搜索通道当前处于降级状态。'
+  return ''
 })
 
 const metricCards = computed(() => [
@@ -791,6 +913,20 @@ async function loadData({ background = false } = {}) {
   }
 }
 
+async function loadRuntimeStatus() {
+  if (runtimeLoading.value) return
+  runtimeLoading.value = true
+  try {
+    const payload = await api.loadContinuousStatus()
+    Object.assign(runtimeStatus, payload || {})
+    runtimeLoadError.value = ''
+  } catch (error) {
+    runtimeLoadError.value = error.message || '运行状态加载失败'
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
 async function runQuickScan() {
   const target = watchlists.value[0]
   if (!target?.id) {
@@ -807,7 +943,7 @@ async function runQuickScan() {
       detail_fetch: target.detail_fetch,
       enabled_rule_keys: target.enabled_rule_keys || [],
     })
-    await loadData()
+    await Promise.all([loadData(), loadRuntimeStatus()])
     ElMessage.success('代码扫描已执行')
   } catch (error) {
     ElMessage.error(error.message || '执行代码扫描失败')
@@ -849,7 +985,12 @@ watch(
 onMounted(async () => {
   applyRouteFilters(route.query)
   const restored = restoreWorkbenchCache()
-  await loadData({ background: restored })
+  await Promise.all([loadData({ background: restored }), loadRuntimeStatus()])
+  runtimeRefreshTimer = window.setInterval(loadRuntimeStatus, 30 * 1000)
+})
+
+onBeforeUnmount(() => {
+  if (runtimeRefreshTimer) window.clearInterval(runtimeRefreshTimer)
 })
 </script>
 
@@ -919,6 +1060,111 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.runtime-strip {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.45fr) repeat(4, minmax(120px, 1fr)) 38px;
+  align-items: stretch;
+  margin-bottom: 10px;
+  overflow: visible;
+  box-shadow: none;
+}
+
+.runtime-channel,
+.runtime-item {
+  min-width: 0;
+  padding: 12px 15px;
+}
+
+.runtime-channel {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.runtime-channel__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(32, 185, 121, 0.12);
+}
+
+.runtime-strip--browser .runtime-channel__dot {
+  background: var(--orange);
+  box-shadow: 0 0 0 4px rgba(244, 154, 47, 0.14);
+}
+
+.runtime-strip--danger .runtime-channel__dot {
+  background: var(--red);
+  box-shadow: 0 0 0 4px rgba(239, 79, 95, 0.13);
+}
+
+.runtime-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.runtime-channel__value,
+.runtime-item strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-value--warning {
+  color: #c67420 !important;
+}
+
+.runtime-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #d8e3f0;
+  border-radius: 4px;
+  color: var(--text-soft);
+  background: #f7f9fc;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.runtime-item {
+  border-left: 1px solid var(--panel-line);
+}
+
+.runtime-refresh {
+  align-self: center;
+  justify-self: center;
+  color: var(--text-soft);
+}
+
+.runtime-refresh :deep(.el-icon) {
+  font-size: 17px;
+}
+
+.runtime-message {
+  grid-column: 1 / -1;
+  padding: 8px 15px;
+  border-top: 1px solid #f1dfc9;
+  color: #a76120;
+  background: #fff9f1;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
 }
 
 .ghost-btn,
@@ -1548,6 +1794,24 @@ td strong {
 }
 
 @media (max-width: 1240px) {
+  .runtime-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .runtime-channel {
+    grid-column: 1 / -1;
+  }
+
+  .runtime-item:nth-of-type(2n) {
+    border-left: 0;
+  }
+
+  .runtime-refresh {
+    position: absolute;
+    top: 11px;
+    right: 12px;
+  }
+
   .metric-card:nth-child(1),
   .metric-card:nth-child(2),
   .metric-card:nth-child(3),
@@ -1611,6 +1875,24 @@ td strong {
 }
 
 @media (max-width: 720px) {
+  .runtime-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-channel,
+  .runtime-item {
+    grid-column: 1;
+  }
+
+  .runtime-item {
+    border-top: 1px solid var(--panel-line);
+    border-left: 0;
+  }
+
+  .runtime-channel {
+    padding-right: 52px;
+  }
+
   .metric-card:nth-child(1),
   .metric-card:nth-child(2),
   .metric-card:nth-child(3),
