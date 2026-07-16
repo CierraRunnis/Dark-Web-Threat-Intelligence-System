@@ -1055,6 +1055,7 @@ start_services() {
   local frontend_log="$LOG_DIR/frontend.log"
   local seed_worker_log="$LOG_DIR/worker-seed.log"
   local detail_worker_log="$LOG_DIR/worker-detail.log"
+  local social_worker_log="$LOG_DIR/worker-social.log"
   local scheduler_log="$LOG_DIR/scheduler.log"
   local vulnerability_sync_log="$LOG_DIR/vuln-sync.log"
 
@@ -1117,6 +1118,15 @@ source \"$COLLECTOR_VENV/bin/activate\"
 python scripts/crawl.py worker --queue browser_render
 "
 
+  local social_worker_command
+  social_worker_command="
+set -euo pipefail
+cd \"$COLLECTOR_ROOT\"
+${env_exports}
+source \"$COLLECTOR_VENV/bin/activate\"
+python scripts/crawl.py worker --queue social_api
+"
+
   local scheduler_command
   scheduler_command="
 set -euo pipefail
@@ -1167,6 +1177,7 @@ PY" "$SERVICE_WAIT_SECONDS"; then
   tmux_new_window "frontend" "$frontend_log" "$frontend_command"
   tmux_new_window "worker-seed" "$seed_worker_log" "$seed_worker_command"
   tmux_new_window "worker-detail" "$detail_worker_log" "$detail_worker_command"
+  tmux_new_window "worker-social" "$social_worker_log" "$social_worker_command"
 
   local browser_index browser_window
   local service_records=(
@@ -1175,6 +1186,7 @@ PY" "$SERVICE_WAIT_SECONDS"; then
     "frontend" "$frontend_log"
     "worker-seed" "$seed_worker_log"
     "worker-detail" "$detail_worker_log"
+    "worker-social" "$social_worker_log"
   )
   for (( browser_index = 1; browser_index <= BROWSER_CONCURRENCY; browser_index++ )); do
     browser_window="worker-browser"

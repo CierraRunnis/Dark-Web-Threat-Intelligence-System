@@ -421,6 +421,12 @@ class SocialMonitoringTest(unittest.TestCase):
         with self.assertRaisesRegex(social.SocialMonitoringError, "approved redacted screenshot"):
             social.publish_event_payload(self.admin, event_id)
 
+    def test_wsl_launcher_starts_social_api_worker(self) -> None:
+        launcher = Path(__file__).parents[1] / "scripts" / "start_all_services_wsl.sh"
+        content = launcher.read_text(encoding="utf-8")
+        self.assertIn("python scripts/crawl.py worker --queue social_api", content)
+        self.assertIn('tmux_new_window "worker-social"', content)
+
 
 if __name__ == "__main__":
     unittest.main()
