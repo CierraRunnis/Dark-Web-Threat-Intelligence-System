@@ -427,6 +427,12 @@ class SocialMonitoringTest(unittest.TestCase):
         self.assertIn("python scripts/crawl.py worker --queue social_api", content)
         self.assertIn('tmux_new_window "worker-social"', content)
 
+    def test_telegram_session_helper_reads_page_managed_secrets(self) -> None:
+        helper = Path(__file__).parents[1] / "scripts" / "create_telegram_session.py"
+        content = helper.read_text(encoding="utf-8")
+        self.assertIn('get_social_secret("SOCIAL_TELEGRAM_API_ID")', content)
+        self.assertIn('get_social_secret("SOCIAL_TELEGRAM_API_HASH")', content)
+
 
 if __name__ == "__main__":
     unittest.main()

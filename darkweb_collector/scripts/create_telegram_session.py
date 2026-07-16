@@ -1,15 +1,23 @@
 from __future__ import annotations
 
-import os
+from pathlib import Path
 import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 
+from darkweb_collector.social_secrets import get_social_secret
+
 
 def main() -> int:
-    api_id = os.environ.get("SOCIAL_TELEGRAM_API_ID", "").strip()
-    api_hash = os.environ.get("SOCIAL_TELEGRAM_API_HASH", "").strip()
+    api_id = get_social_secret("SOCIAL_TELEGRAM_API_ID")
+    api_hash = get_social_secret("SOCIAL_TELEGRAM_API_HASH")
     if not api_id or not api_hash:
         print(
             "Set SOCIAL_TELEGRAM_API_ID and SOCIAL_TELEGRAM_API_HASH before running this helper.",
