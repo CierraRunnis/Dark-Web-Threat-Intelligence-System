@@ -8,6 +8,32 @@
 - 平台 API 用于自动采集。Facebook 无 API 凭据但存在本地 storage-state 时，只读采集授权浏览器可见的公开搜索结果、页面和群组，并始终显示“覆盖受限”。已领取事件可使用授权浏览器保存 HTML 和原始截图，失败时人工上传 PNG/JPEG。
 - 发布仅进入系统内通知中心，不调用企业微信、Webhook 或社交平台写操作。
 
+## 第一阶段免费官方接口
+
+当前新建任务默认只选择 YouTube 和 Telegram，X、Facebook 仍保留为后续可选平台。
+
+### YouTube Data API
+
+1. 在 Google Cloud 项目中启用 YouTube Data API v3，并创建 API Key。
+2. 将 Key 注入 `SOCIAL_YOUTUBE_API_KEY`。
+3. 关键词监测每轮合并为一次 `search.list`；按 30 分钟周期每天执行 48 次，低于默认每日 100 次搜索调用配额。
+4. 重点频道不使用搜索配额。系统先读取频道的 uploads 播放列表，再用 `playlistItems.list` 获取新视频。支持频道 ID、`/channel/UC...`、`/@handle` 和 `/user/name`。
+
+YouTube 只保存视频标题、简介、发布时间、频道和缩略图地址，不采集评论、字幕或语音。
+
+### Telegram MTProto API
+
+1. 在 <https://my.telegram.org> 创建应用，取得 `api_id` 和 `api_hash`。
+2. 在可信终端设置 `SOCIAL_TELEGRAM_API_ID` 和 `SOCIAL_TELEGRAM_API_HASH`，执行：
+
+   ```bash
+   PYTHONPATH=darkweb_collector/src python darkweb_collector/scripts/create_telegram_session.py
+   ```
+
+3. 按提示完成手机号、验证码和可选的两步验证，将输出保存为 Codespaces secret `SOCIAL_TELEGRAM_SESSION`。
+
+后台任务不会发起交互式登录。会话失效时轮次明确失败并保留上次游标，必须重新生成会话。系统只接收公开广播频道用户名、`@username` 或 `t.me/username`；邀请链接、私密频道、群组和超级群组不会采集。全局关键词逐词搜索，重点频道则读取游标之后的新主消息，最终仍由服务端的“地域或目标 + 威胁词”规则筛选。
+
 ## 秘密与证据
 
 以下变量必须由 Codespaces secrets 或机器本地环境注入，不得写入 Git：
@@ -39,7 +65,7 @@ npm ci
 npm run build
 ```
 
-离线测试使用 `tests/fixtures/social_platform_payloads.json`，不依赖真实平台或账号。它覆盖 30 分钟锚点、重叠轮次、四平台投递、失败游标保留、匹配/排除、去重、编辑快照、删除留痕、领取竞争、原图权限、脱敏发布和报告数据。
+离线测试使用 `tests/fixtures/social_platform_payloads.json`，不依赖真实平台或账号。它覆盖 YouTube 搜索和频道 uploads 播放列表、Telegram 非交互式会话和公开频道边界、30 分钟锚点、重叠轮次、失败游标保留、匹配/排除、去重、编辑快照、删除留痕、领取竞争、原图权限、脱敏发布和报告数据。
 
 实网烟雾测试只在已配置上述秘密时执行，每个平台只做一次低频、只读采集与授权截图。Facebook 无合规接口权限时不宣称全平台覆盖。
 

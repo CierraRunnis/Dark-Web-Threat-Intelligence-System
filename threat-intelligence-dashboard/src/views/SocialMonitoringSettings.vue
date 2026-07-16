@@ -127,7 +127,7 @@ const isAdmin = computed(() => String(state.user?.role || '').toLowerCase() === 
 onMounted(() => Promise.all([loadCampaigns(), loadPlatforms(), loadScans()]))
 
 function emptyForm() {
-  return { name: '', startAt: '', endAt: '', timezone: 'Asia/Shanghai', intervalSeconds: 1800, platforms: ['x', 'facebook', 'youtube', 'telegram'], regionTermsText: '西藏\n藏区', targetAliasesText: '', threatTermsText: '攻击\n泄露\n售卖\n凭证\n定向行动', exclusionTermsText: '', sourcesText: '', enabled: true }
+  return { name: '', startAt: '', endAt: '', timezone: 'Asia/Shanghai', intervalSeconds: 1800, platforms: ['youtube', 'telegram'], regionTermsText: '西藏\n藏区', targetAliasesText: '', threatTermsText: '攻击\n泄露\n售卖\n凭证\n定向行动', exclusionTermsText: '', sourcesText: '', enabled: true }
 }
 
 async function loadCampaigns() {

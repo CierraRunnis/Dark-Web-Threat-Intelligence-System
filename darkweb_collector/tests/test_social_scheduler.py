@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import unittest
 
 from darkweb_collector.social_adapters import CollectResult, CoverageStatus, SocialAdapterError, SocialPost
@@ -122,6 +123,29 @@ class SocialSchedulerTests(unittest.TestCase):
 
         self.assertEqual({item["platform"] for item in calls}, {"x", "facebook", "youtube", "telegram"})
         self.assertEqual(len(dispatched), 4)
+
+    def test_enqueue_preserves_global_cursor_when_source_cursors_are_merged(self):
+        service = FakeService()
+        service.due = [
+            {
+                "campaign_id": 9,
+                "platform": "youtube",
+                "scheduled_at": ANCHOR.isoformat(),
+                "cursor": json.dumps({"__global__": "2026-07-15T00:00:00+00:00"}),
+                "sources": [{"id": 3, "value": "UCfixture", "cursor": "source-cursor"}],
+            }
+        ]
+        calls = []
+
+        enqueue_due_social_scans(
+            lambda payload: calls.append(payload) or "job-youtube",
+            service=service,
+            now=ANCHOR,
+        )
+
+        cursor = json.loads(calls[0]["cursor"])
+        self.assertEqual(cursor["__global__"], "2026-07-15T00:00:00+00:00")
+        self.assertEqual(cursor["UCfixture"], "source-cursor")
 
     def test_success_persists_posts_scan_stats_and_cursor(self):
         service = FakeService()

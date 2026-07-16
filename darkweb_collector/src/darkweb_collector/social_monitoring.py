@@ -377,6 +377,20 @@ def platform_status_payload() -> list[dict]:
     }
     with get_db_connection() as connection:
         sources = list_social_sources(connection)
+    details = {
+        "youtube": {
+            "billingMode": "free_quota",
+            "credentialNames": ["SOCIAL_YOUTUBE_API_KEY"],
+            "message": "官方 Data API 免费配额；关键词每 30 分钟合并为一次搜索，重点频道使用 uploads 播放列表。",
+        },
+        "telegram": {
+            "billingMode": "free",
+            "credentialNames": [
+                "SOCIAL_TELEGRAM_API_ID", "SOCIAL_TELEGRAM_API_HASH", "SOCIAL_TELEGRAM_SESSION"
+            ],
+            "message": "官方 MTProto API 免费；仅采集用户会话可访问的公开广播频道主消息。",
+        },
+    }
     return [
         {
             "platform": platform,
@@ -384,6 +398,7 @@ def platform_status_payload() -> list[dict]:
             "coverageLimited": platform in {"facebook", "telegram"},
             "sourceCount": sum(1 for row in sources if row["platform"] == platform and row["enabled"]),
             "status": "configured" if configured[platform] else "missing_credentials",
+            **details.get(platform, {}),
         }
         for platform in PLATFORMS
     ]
@@ -868,7 +883,7 @@ def list_due_social_campaign_platforms(now: str | None = None) -> list[dict]:
             for platform in _json_load(campaign["platforms_json"], []):
                 active = get_active_social_scan_run(connection, int(campaign["id"]), platform)
                 latest = connection.execute(
-                    "SELECT scheduled_at FROM social_scan_runs WHERE campaign_id = ? AND platform = ? ORDER BY id DESC LIMIT 1",
+                    "SELECT scheduled_at, cursor_after FROM social_scan_runs WHERE campaign_id = ? AND platform = ? ORDER BY id DESC LIMIT 1",
                     (campaign["id"], platform),
                 ).fetchone()
                 scheduled_at = datetime.fromtimestamp(scheduled, timezone.utc).isoformat()
@@ -908,7 +923,7 @@ def list_due_social_campaign_platforms(now: str | None = None) -> list[dict]:
                             "threat_terms": grouped["threat"],
                             "exclude_terms": grouped["exclude"],
                             "sources": sources,
-                            "cursor": next((row["cursor"] for row in sources if row["cursor"]), ""),
+                            "cursor": str((latest or {})["cursor_after"] or "") if latest else "",
                             "last_success_at": next(
                                 (
                                     row["last_success_at"]

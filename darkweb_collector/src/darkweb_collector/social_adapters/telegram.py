@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from .base import (
     CollectRequest,
@@ -18,6 +21,31 @@ from .base import (
 
 
 TelegramFetcher = Callable[[CollectRequest], tuple[list[Mapping[str, Any]], Mapping[str, Any]]]
+TelegramClientFactory = Callable[[str, int, str], Any]
+
+
+def telegram_source_identifier(source: str) -> str:
+    clean = source.strip().rstrip("/")
+    if not clean:
+        return ""
+    if clean.startswith("@"):
+        clean = clean[1:]
+    elif "://" in clean or clean.lower().startswith(("t.me/", "www.t.me/")):
+        parsed = urlparse(clean if "://" in clean else f"https://{clean}")
+        if parsed.netloc.lower() not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+            return ""
+        parts = [part for part in parsed.path.split("/") if part]
+        if parts and parts[0] == "s":
+            parts = parts[1:]
+        if not parts or parts[0].startswith("+") or parts[0].lower() == "joinchat":
+            return ""
+        clean = parts[0]
+    return clean if re.fullmatch(r"[A-Za-z0-9_]{5,}", clean) else ""
+
+
+def _global_cursor_key(term: str) -> str:
+    digest = hashlib.sha256(term.casefold().encode("utf-8")).hexdigest()[:12]
+    return f"__global__:{digest}"
 
 
 class TelegramAdapter:
@@ -29,6 +57,7 @@ class TelegramAdapter:
         api_id: str | None = None,
         api_hash: str | None = None,
         session: str | None = None,
+        client_factory: TelegramClientFactory | None = None,
     ) -> None:
         self.fetcher = fetcher
         self.api_id = api_id if api_id is not None else (
@@ -40,6 +69,7 @@ class TelegramAdapter:
         self.session = session if session is not None else (
             env_value("SOCIAL_TELEGRAM_SESSION") or env_value("TELEGRAM_SESSION")
         )
+        self.client_factory = client_factory
 
     def coverage_status(self) -> CoverageStatus:
         if self.fetcher or (self.api_id and self.api_hash and self.session):
@@ -69,57 +99,105 @@ class TelegramAdapter:
         )
 
     def _telethon_fetch(self, request: CollectRequest) -> tuple[list[Mapping[str, Any]], Mapping[str, Any]]:
-        try:
-            from telethon.sync import TelegramClient
-            from telethon.sessions import StringSession
-        except ImportError as exc:
-            raise SocialAdapterError("telethon is required for Telegram API collection") from exc
+        if self.client_factory is None:
+            try:
+                from telethon.sync import TelegramClient
+                from telethon.sessions import StringSession
+            except ImportError as exc:
+                raise SocialAdapterError("telethon is required for Telegram API collection") from exc
+
+            client_factory: TelegramClientFactory = (
+                lambda session, api_id, api_hash: TelegramClient(StringSession(session), api_id, api_hash)
+            )
+        else:
+            client_factory = self.client_factory
 
         cursors = decode_cursor_map(request.cursor)
         next_cursors = dict(cursors)
         rows: list[Mapping[str, Any]] = []
-        terms = " ".join(item.strip() for item in request.keywords if item.strip())
-        targets = list(request.sources) or ["__global__"]
+        terms = tuple(dict.fromkeys(item.strip() for item in request.keywords if item.strip()))
+        client = None
         try:
-            with TelegramClient(StringSession(self.session), int(self.api_id), self.api_hash) as client:
-                for target in targets:
-                    entity = None if target == "__global__" else client.get_entity(target)
-                    if entity is not None and (not bool(getattr(entity, "broadcast", False)) or bool(getattr(entity, "megagroup", False))):
+            client = client_factory(self.session, int(self.api_id), self.api_hash)
+            client.connect()
+            if not client.is_user_authorized():
+                raise SocialAdapterError("Telegram session is not authorized; generate a new StringSession")
+
+            for term in terms:
+                cursor_key = _global_cursor_key(term)
+                after = normalize_timestamp(cursors.get(cursor_key) or request.since)
+                latest = after
+                for message in client.iter_messages(None, search=term, limit=max(request.limit, 1)):
+                    row = _telegram_message_row(message)
+                    if row is None or (after and row["date"] <= after):
                         continue
-                    messages = client.iter_messages(
-                        entity,
-                        search=terms or None,
-                        min_id=int(cursors.get(target, "0") or 0) if entity is not None else 0,
-                        limit=max(request.limit, 1),
-                    )
-                    max_id = int(cursors.get(target, "0") or 0)
-                    for message in messages:
-                        chat = getattr(message, "chat", None)
-                        if not bool(getattr(chat, "broadcast", False)) or bool(getattr(chat, "megagroup", False)):
-                            continue
-                        published = normalize_timestamp(getattr(message, "date", None))
-                        if request.since and published and published <= normalize_timestamp(request.since):
-                            continue
-                        message_id = int(getattr(message, "id", 0) or 0)
-                        max_id = max(max_id, message_id)
-                        username = str(getattr(chat, "username", "") or "")
-                        rows.append(
-                            {
-                                "id": message_id,
-                                "text": str(getattr(message, "message", "") or ""),
-                                "date": published,
-                                "channel_id": str(getattr(chat, "id", "") or ""),
-                                "channel_title": str(getattr(chat, "title", "") or username),
-                                "username": username,
-                                "is_broadcast": True,
-                                "is_private": False,
-                            }
-                        )
-                    if entity is not None and max_id:
-                        next_cursors[target] = str(max_id)
+                    rows.append(row)
+                    latest = max(latest, str(row["date"]))
+                if latest:
+                    next_cursors[cursor_key] = latest
+
+            for target in request.sources:
+                identifier = telegram_source_identifier(target)
+                if not identifier:
+                    continue
+                entity = client.get_entity(identifier)
+                if (
+                    not bool(getattr(entity, "broadcast", False))
+                    or bool(getattr(entity, "megagroup", False))
+                    or not str(getattr(entity, "username", "") or "")
+                ):
+                    continue
+                max_id = int(cursors.get(target, "0") or 0)
+                for message in client.iter_messages(
+                    entity,
+                    search=None,
+                    min_id=max_id,
+                    limit=max(request.limit, 1),
+                ):
+                    row = _telegram_message_row(message)
+                    if row is None:
+                        continue
+                    published = str(row["date"])
+                    if request.since and published <= normalize_timestamp(request.since):
+                        continue
+                    rows.append(row)
+                    max_id = max(max_id, int(row["id"]))
+                if max_id:
+                    next_cursors[target] = str(max_id)
+        except SocialAdapterError:
+            raise
         except Exception as exc:
             raise SocialAdapterError(f"Telegram API collection failed: {exc}") from exc
+        finally:
+            if client is not None:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
         return rows, next_cursors
+
+
+def _telegram_message_row(message: Any) -> Mapping[str, Any] | None:
+    chat = getattr(message, "chat", None)
+    username = str(getattr(chat, "username", "") or "")
+    message_id = int(getattr(message, "id", 0) or 0)
+    if (
+        not message_id
+        or not username
+        or not bool(getattr(chat, "broadcast", False))
+        or bool(getattr(chat, "megagroup", False))
+    ):
+        return None
+    return {
+        "id": message_id,
+        "text": str(getattr(message, "message", "") or ""),
+        "date": normalize_timestamp(getattr(message, "date", None)),
+        "channel_id": str(getattr(chat, "id", "") or ""),
+        "channel_title": str(getattr(chat, "title", "") or username),
+        "username": username,
+        "is_broadcast": True,
+        "is_private": False,
+    }
 
 
 def parse_telegram_messages(rows: list[Mapping[str, Any]], *, collected_at: str | None = None) -> list[SocialPost]:
@@ -129,6 +207,8 @@ def parse_telegram_messages(rows: list[Mapping[str, Any]], *, collected_at: str 
         if item.get("is_private") or not item.get("is_broadcast", True) or not item.get("id"):
             continue
         username = str(item.get("username") or "")
+        if not username:
+            continue
         channel_id = str(item.get("channel_id") or username)
         post_id = str(item["id"])
         if username:

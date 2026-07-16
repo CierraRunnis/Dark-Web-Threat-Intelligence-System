@@ -196,7 +196,9 @@ def enqueue_due_social_scans(
             and source.get("cursor")
         }
         if source_cursor_map and platform != "x":
-            payload["cursor"] = encode_cursor_map(source_cursor_map)
+            cursor_map = decode_cursor_map(str(payload.get("cursor") or "") or None)
+            cursor_map.update(source_cursor_map)
+            payload["cursor"] = encode_cursor_map(cursor_map)
         try:
             claim = selected_service.claim_social_scan(campaign_id, platform, scheduled_at=scheduled_at)
         except Exception as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -136,6 +137,32 @@ class SocialMonitoringTest(unittest.TestCase):
         with patch.object(social, "utc_now", return_value="2026-07-15T03:04:05+00:00"):
             enabled = social.save_campaign_payload(self.admin, {"enabled": True}, campaign["id"])
         self.assertEqual(enabled["anchorAt"], "2026-07-15T03:04:05+00:00")
+
+    def test_keyword_only_platform_restores_last_successful_scan_cursor(self) -> None:
+        campaign = social.save_campaign_payload(
+            self.admin,
+            {
+                "name": "YouTube keyword monitoring",
+                "startAt": "2026-07-15T00:00:00+00:00",
+                "anchorAt": "2026-07-15T00:00:00+00:00",
+                "platforms": ["youtube"],
+                "terms": {"region": ["Tibet"], "threat": ["data leak"]},
+                "sources": [],
+            },
+        )
+        first = social.list_due_social_campaign_platforms("2026-07-15T00:00:00+00:00")[0]
+        scan = social.claim_social_scan(campaign["id"], "youtube", first["scheduled_at"])
+        cursor = json.dumps({"__global__": "2026-07-15T00:00:01+00:00"})
+        social.finish_social_scan(
+            scan["id"],
+            stats={"candidate_count": 1, "new_count": 0, "duplicate_count": 0},
+            status="succeeded",
+            error=None,
+            cursor=cursor,
+        )
+
+        second = social.list_due_social_campaign_platforms("2026-07-15T00:30:00+00:00")[0]
+        self.assertEqual(second["cursor"], cursor)
 
     def test_edited_post_keeps_content_snapshots(self) -> None:
         event_id = self._event()
