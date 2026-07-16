@@ -149,13 +149,15 @@ $env:DARKWEB_GITHUB_CODE_SEARCH_MODE = "auto"
 $env:DARKWEB_GITHUB_TOKEN = "<GitHub App installation token 或 fine-grained token>"
 ```
 
-生产环境建议由独立的 GitHub App 凭据刷新进程定期更新令牌文件，采集服务每次请求都会重新读取文件，无需重启：
+在“代码监测”页面点击“配置 GitHub App”，填写 App ID、Installation ID 和私钥后，服务会验证安装状态并自动签发、刷新 installation token。私钥保存在已被 Git 忽略的运行数据目录，不会写入数据库、扫描结果或接口响应；Linux 下配置文件权限为 `0600`。
+
+也可以继续由外部进程维护令牌文件，采集服务每次请求都会重新读取，无需重启：
 
 ```powershell
 $env:DARKWEB_GITHUB_TOKEN_FILE = "C:\ProgramData\DarkWebThreatIntel\github-token"
 ```
 
-令牌只从环境变量或运行时文件读取，不会保存到数据库、扫描结果或 Git 仓库。可用模式：
+令牌只保存在内存或从环境变量、运行时文件读取，不会保存到数据库、扫描结果或 Git 仓库。可用模式：
 
 - `auto`：有令牌时使用 API，必要时由手动扫描回退到登录态浏览器。
 - `api`：只使用 API；令牌缺失或限流时返回明确状态。
@@ -163,7 +165,7 @@ $env:DARKWEB_GITHUB_TOKEN_FILE = "C:\ProgramData\DarkWebThreatIntel\github-token
 
 系统会串行发送 GitHub API 请求，读取限流响应头并进入冷却，同时在短时间内复用相同查询。GitHub 全局代码搜索仍只覆盖仓库默认分支；非默认分支不能通过全局搜索完整发现。
 
-系统不会轮换多个个人账号来规避 GitHub 限制。需要隔离不同客户授权范围时，应为不同采集实例配置各自的 GitHub App installation token 文件。
+系统不会轮换多个个人账号来规避 GitHub 限制。需要隔离不同客户授权范围时，应为不同采集实例配置各自的 GitHub App。
 
 ## Tor 网桥
 

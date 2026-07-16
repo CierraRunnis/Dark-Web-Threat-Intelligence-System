@@ -46,6 +46,7 @@ from darkweb_collector.db import (
 from darkweb_collector.document_exposure_browser import fetch_page_artifacts_with_session
 from darkweb_collector.document_exposure_platforms import PLATFORMS, ExposurePlatform, get_exposure_platform
 from darkweb_collector.document_exposure_sessions import build_platform_session_payloads, platform_storage_state_path
+from darkweb_collector.github_app_auth import github_app_config_status, github_app_installation_token
 from darkweb_collector.runtime import output_root
 from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
@@ -221,6 +222,9 @@ def _github_api_token() -> tuple[str, str]:
             file_token = ""
         if file_token:
             return file_token, "token_file"
+    app_token = github_app_installation_token()
+    if app_token:
+        return app_token, "github_app"
     for name in ("GITHUB_TOKEN", "GH_TOKEN"):
         token = _normalize_text(os.environ.get(name))
         if token:
@@ -286,6 +290,7 @@ def _update_github_api_state(**changes: Any) -> None:
 
 def github_code_search_status_payload() -> dict[str, Any]:
     token, token_source = _github_api_token()
+    app_status = github_app_config_status()
     mode = _github_search_mode()
     now_epoch = time.time()
     now_monotonic = time.monotonic()
@@ -308,6 +313,13 @@ def github_code_search_status_payload() -> dict[str, Any]:
         "fallbackChannel": "browser" if mode == "auto" else "",
         "apiConfigured": bool(token),
         "tokenSource": token_source,
+        "credentialType": "github_app" if token_source == "github_app" else ("token" if token else ""),
+        "appConfigured": bool(app_status.get("configured")),
+        "appId": app_status.get("appId"),
+        "installationId": app_status.get("installationId"),
+        "appLastValidatedAt": str(app_status.get("lastValidatedAt") or ""),
+        "appTokenExpiresAt": str(app_status.get("tokenExpiresAt") or ""),
+        "appLastError": str(app_status.get("lastError") or ""),
         "rateLimit": state.get("limit"),
         "rateRemaining": state.get("remaining"),
         "rateResetAt": str(state.get("reset_at") or ""),

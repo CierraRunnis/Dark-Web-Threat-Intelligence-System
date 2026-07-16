@@ -6,6 +6,10 @@
           <h1>代码监测</h1>
         </div>
         <div class="header-actions">
+          <el-button plain class="ghost-btn" @click="openGithubAppDialog">
+            <el-icon><Setting /></el-icon>
+            配置 GitHub App
+          </el-button>
           <el-button plain class="ghost-btn" @click="router.push('/document-exposure/code-monitoring/settings')">配置管理</el-button>
           <el-button plain class="ghost-btn" @click="router.push('/document-exposure/code-monitoring/scans')">扫描历史</el-button>
           <el-button type="primary" class="primary-btn" :loading="scanLoading" @click="runQuickScan">立即扫描</el-button>
@@ -381,13 +385,65 @@
         </article>
       </section>
     </main>
+
+    <el-dialog
+      v-model="githubAppDialogOpen"
+      title="配置 GitHub App"
+      class="github-app-dialog"
+      destroy-on-close
+      :close-on-click-modal="false"
+      @closed="githubAppForm.privateKey = ''"
+    >
+      <el-form label-position="top" class="github-app-form" @submit.prevent>
+        <div class="github-app-form__ids">
+          <el-form-item label="App ID">
+            <el-input v-model.trim="githubAppForm.appId" inputmode="numeric" autocomplete="off" />
+          </el-form-item>
+          <el-form-item label="Installation ID">
+            <el-input v-model.trim="githubAppForm.installationId" inputmode="numeric" autocomplete="off" />
+          </el-form-item>
+        </div>
+        <el-form-item :label="githubAppConfig.configured ? '私钥（留空保留现有私钥）' : '私钥'">
+          <el-input
+            v-model="githubAppForm.privateKey"
+            class="github-app-private-key"
+            type="textarea"
+            :rows="8"
+            resize="vertical"
+            autocomplete="off"
+            placeholder="粘贴 GitHub App 私钥内容"
+          />
+        </el-form-item>
+      </el-form>
+
+      <template #footer>
+        <div class="github-app-dialog__footer">
+          <el-popconfirm
+            v-if="githubAppConfig.configured"
+            title="确认删除当前 GitHub App 配置？"
+            confirm-button-text="删除"
+            cancel-button-text="取消"
+            @confirm="deleteGithubAppConfig"
+          >
+            <template #reference>
+              <el-button type="danger" plain :loading="githubAppDeleting">删除配置</el-button>
+            </template>
+          </el-popconfirm>
+          <span class="github-app-dialog__spacer"></span>
+          <el-button @click="githubAppDialogOpen = false">取消</el-button>
+          <el-button type="primary" :loading="githubAppSaving" @click="saveGithubAppConfig">
+            保存并验证
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { Refresh, Search, Setting } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
 import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
@@ -427,6 +483,10 @@ const suppressedPageSize = ref(10)
 const scanLoading = ref(false)
 const runtimeLoading = ref(false)
 const runtimeLoadError = ref('')
+const githubAppDialogOpen = ref(false)
+const githubAppLoading = ref(false)
+const githubAppSaving = ref(false)
+const githubAppDeleting = ref(false)
 const applyingRouteState = ref(false)
 const hits = ref([])
 const watchlists = ref([])
@@ -452,6 +512,19 @@ const runtimeStatus = reactive({
   last_success_at: '',
   github_search: {},
 })
+const githubAppConfig = reactive({
+  configured: false,
+  appId: null,
+  installationId: null,
+  lastValidatedAt: '',
+  tokenExpiresAt: '',
+  lastError: '',
+})
+const githubAppForm = reactive({
+  appId: '',
+  installationId: '',
+  privateKey: '',
+})
 
 const githubSearch = computed(() => runtimeStatus.github_search || {})
 
@@ -468,10 +541,12 @@ const githubModeLabel = computed(() => {
 })
 
 const githubTokenLabel = computed(() => {
-  if (!githubSearch.value.apiConfigured) return '未配置 Token'
+  if (!githubSearch.value.apiConfigured && githubSearch.value.appConfigured) return 'GitHub App 连接异常'
+  if (!githubSearch.value.apiConfigured) return '未配置认证'
   const sourceLabels = {
     DARKWEB_GITHUB_TOKEN: '环境变量',
     token_file: '令牌文件',
+    github_app: 'GitHub App',
     GITHUB_TOKEN: 'GitHub 环境',
     GH_TOKEN: 'GitHub CLI 环境',
   }
@@ -512,8 +587,20 @@ const githubStatusMessage = computed(() => {
   }
   const lastError = String(githubSearch.value.lastError || '')
   if (lastError) return errorLabels[lastError] || lastError
+  const appErrorLabels = {
+    private_key_required: 'GitHub App 私钥缺失。',
+    invalid_private_key: 'GitHub App 私钥无效。',
+    credentials_rejected: 'GitHub App 凭据或安装状态无效。',
+    network_error: 'GitHub App 无法连接 GitHub。',
+    github_unavailable: 'GitHub 暂时无法签发安装令牌。',
+    invalid_response: 'GitHub App 安装令牌响应无效。',
+    missing_dependency: '服务缺少 GitHub App 认证依赖。',
+    config_invalid: 'GitHub App 本地配置文件无效。',
+  }
+  const appError = String(githubSearch.value.appLastError || '')
+  if (appError) return appErrorLabels[appError] || 'GitHub App 配置验证失败。'
   if (!githubSearch.value.apiConfigured && githubSearch.value.mode === 'auto') {
-    return '未配置 GitHub API Token，手动扫描将使用登录态浏览器。'
+    return '未配置 GitHub 认证，手动扫描将使用登录态浏览器。'
   }
   if (githubSearch.value.degraded) return 'GitHub 搜索通道当前处于降级状态。'
   return ''
@@ -927,6 +1014,74 @@ async function loadRuntimeStatus() {
   }
 }
 
+async function loadGithubAppConfig() {
+  if (githubAppLoading.value) return
+  githubAppLoading.value = true
+  try {
+    const payload = await api.loadGithubAppConfig()
+    Object.assign(githubAppConfig, payload || {})
+    githubAppForm.appId = payload?.appId ? String(payload.appId) : ''
+    githubAppForm.installationId = payload?.installationId ? String(payload.installationId) : ''
+    githubAppForm.privateKey = ''
+  } catch (error) {
+    ElMessage.error(error.message || 'GitHub App 配置加载失败')
+  } finally {
+    githubAppLoading.value = false
+  }
+}
+
+async function openGithubAppDialog() {
+  githubAppDialogOpen.value = true
+  await loadGithubAppConfig()
+}
+
+async function saveGithubAppConfig() {
+  const appId = Number(githubAppForm.appId)
+  const installationId = Number(githubAppForm.installationId)
+  if (!Number.isInteger(appId) || appId <= 0 || !Number.isInteger(installationId) || installationId <= 0) {
+    ElMessage.error('App ID 和 Installation ID 必须是正整数')
+    return
+  }
+  if (!githubAppConfig.configured && !githubAppForm.privateKey.trim()) {
+    ElMessage.error('首次配置必须填写 GitHub App 私钥')
+    return
+  }
+
+  githubAppSaving.value = true
+  try {
+    const payload = await api.saveGithubAppConfig({
+      app_id: appId,
+      installation_id: installationId,
+      private_key: githubAppForm.privateKey,
+    })
+    Object.assign(githubAppConfig, payload || {})
+    githubAppForm.privateKey = ''
+    githubAppDialogOpen.value = false
+    await loadRuntimeStatus()
+    ElMessage.success('GitHub App 已连接')
+  } catch (error) {
+    githubAppForm.privateKey = ''
+    ElMessage.error(error.message || 'GitHub App 配置验证失败')
+  } finally {
+    githubAppSaving.value = false
+  }
+}
+
+async function deleteGithubAppConfig() {
+  githubAppDeleting.value = true
+  try {
+    const payload = await api.deleteGithubAppConfig()
+    Object.assign(githubAppConfig, payload || {})
+    githubAppDialogOpen.value = false
+    await loadRuntimeStatus()
+    ElMessage.success('GitHub App 配置已删除')
+  } catch (error) {
+    ElMessage.error(error.message || 'GitHub App 配置删除失败')
+  } finally {
+    githubAppDeleting.value = false
+  }
+}
+
 async function runQuickScan() {
   const target = watchlists.value[0]
   if (!target?.id) {
@@ -1060,6 +1215,31 @@ h1 {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+:deep(.github-app-dialog) {
+  width: min(560px, calc(100vw - 24px));
+}
+
+.github-app-form__ids {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.github-app-private-key :deep(textarea) {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+}
+
+.github-app-dialog__footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.github-app-dialog__spacer {
+  flex: 1;
 }
 
 .runtime-strip {
@@ -1876,6 +2056,15 @@ td strong {
 }
 
 @media (max-width: 720px) {
+  .github-app-form__ids {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .github-app-dialog__footer {
+    flex-wrap: wrap;
+  }
+
   .runtime-strip {
     grid-template-columns: 1fr;
   }

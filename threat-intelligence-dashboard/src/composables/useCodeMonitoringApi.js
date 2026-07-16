@@ -15,6 +15,21 @@ export function useCodeMonitoringApi() {
     loadSummary() {
       return requestJson('/api/code-monitoring/summary')
     },
+    loadGithubAppConfig() {
+      return requestJson('/api/code-monitoring/github-app')
+    },
+    saveGithubAppConfig(payload) {
+      return requestJson('/api/code-monitoring/github-app', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+    },
+    deleteGithubAppConfig() {
+      return requestJson('/api/code-monitoring/github-app', {
+        method: 'DELETE',
+      })
+    },
     loadSessions() {
       return requestJson('/api/platform-sessions?module=code_monitoring')
     },

@@ -15,7 +15,7 @@ from fastapi import WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from darkweb_collector.bot_assistant import (
     BotAssistantError,
@@ -88,6 +88,13 @@ from darkweb_collector.document_exposure_sessions import (
     verify_platform_session,
 )
 from darkweb_collector.document_exposure_platforms import list_exposure_platforms
+from darkweb_collector.github_app_auth import (
+    GitHubAppConfigError,
+    GitHubAppConnectionError,
+    delete_github_app_config,
+    github_app_config_status,
+    save_github_app_config,
+)
 from darkweb_collector.remote_browser_sessions import (
     close_remote_browser_login,
     control_remote_browser,
@@ -651,6 +658,12 @@ class CodeMonitoringContinuousStopRequest(BaseModel):
     watchlist_id: int = Field(..., gt=0)
 
 
+class GitHubAppConfigRequest(BaseModel):
+    app_id: int = Field(..., gt=0)
+    installation_id: int = Field(..., gt=0)
+    private_key: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=65536)
+
+
 @app.post("/api/jobs/run-site")
 def run_site(payload: RunSiteRequest) -> dict:
     return dispatch_run_site(site_name=payload.site_name, force=payload.force)
@@ -1047,6 +1060,33 @@ def document_exposure_review(hit_id: int, payload: DocumentExposureReviewRequest
 @app.get("/api/code-monitoring/summary")
 def code_monitoring_summary() -> dict:
     return build_code_monitoring_summary()
+
+
+@app.get("/api/code-monitoring/github-app")
+def get_code_monitoring_github_app() -> dict:
+    return github_app_config_status()
+
+
+@app.put("/api/code-monitoring/github-app")
+def configure_code_monitoring_github_app(payload: GitHubAppConfigRequest) -> dict:
+    try:
+        return save_github_app_config(
+            app_id=payload.app_id,
+            installation_id=payload.installation_id,
+            private_key=payload.private_key.get_secret_value(),
+        )
+    except GitHubAppConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GitHubAppConnectionError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.delete("/api/code-monitoring/github-app")
+def remove_code_monitoring_github_app() -> dict:
+    try:
+        return delete_github_app_config()
+    except GitHubAppConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/code-monitoring/watchlists")

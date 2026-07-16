@@ -138,6 +138,28 @@ class GitHubCodeSearchTests(unittest.TestCase):
         self.assertEqual((first_token, first_source), ("first-token", "token_file"))
         self.assertEqual((second_token, second_source), ("second-token", "token_file"))
 
+    def test_saved_github_app_is_used_without_exposing_installation_token(self) -> None:
+        app_status = {
+            "configured": True,
+            "appId": 123,
+            "installationId": 456,
+            "lastValidatedAt": "2026-07-16T00:00:00+00:00",
+            "tokenExpiresAt": "2026-07-16T01:00:00Z",
+            "lastError": "",
+        }
+        with (
+            patch.dict(os.environ, {"DARKWEB_GITHUB_CODE_SEARCH_MODE": "auto"}, clear=True),
+            patch.object(code, "github_app_installation_token", return_value="installation-token"),
+            patch.object(code, "github_app_config_status", return_value=app_status),
+        ):
+            token, source = code._github_api_token()
+            status = code.github_code_search_status_payload()
+
+        self.assertEqual((token, source), ("installation-token", "github_app"))
+        self.assertEqual(status["credentialType"], "github_app")
+        self.assertEqual(status["appId"], 123)
+        self.assertNotIn("installation-token", json.dumps(status))
+
     def test_rate_limit_enters_cooldown_without_exposing_token(self) -> None:
         reset_epoch = int(time.time()) + 120
         error = HTTPError(
