@@ -38,7 +38,7 @@
       </article>
 
       <article class="content-card">
-        <div class="card-head"><div><h2>平台接入状态</h2><p>凭据只从环境变量或机器本地秘密文件读取。</p></div><el-button :loading="loadingPlatforms" @click="loadPlatforms">刷新</el-button></div>
+        <div class="card-head"><div><h2>平台接入状态</h2><p>凭据只从环境变量或机器本地秘密文件读取。</p></div><el-button :loading="loadingPlatforms" @click="refreshPlatformState">刷新</el-button></div>
         <div class="platform-grid">
           <div v-for="item in platforms" :key="item.platform" class="platform-card">
             <div>
@@ -49,6 +49,75 @@
             <span>最近更新：{{ formatDateTime(item.updatedAt || item.lastCheckedAt) }}</span>
           </div>
           <div v-if="!platforms.length" class="empty">暂无平台状态</div>
+        </div>
+      </article>
+
+      <article v-if="isAdmin" id="platform-access-config" class="content-card content-card--full">
+        <div class="card-head">
+          <div><h2>免费平台接入配置</h2><p>在这里配置 YouTube Data API 和 Telegram MTProto。已保存的值不会回显。</p></div>
+          <el-button :loading="loadingAccessConfig" @click="loadAccessConfig">刷新配置状态</el-button>
+        </div>
+        <el-alert
+          title="凭据采用只写方式保存到服务端用户私有目录，Linux 下文件权限为 0600；环境变量优先级更高且不能在页面覆盖。"
+          type="info"
+          :closable="false"
+          show-icon
+          class="config-alert"
+        />
+        <div v-loading="loadingAccessConfig" class="access-grid">
+          <section class="access-panel">
+            <div class="access-title">
+              <div><span class="platform-mark youtube">YT</span><strong>YouTube Data API</strong></div>
+              <el-tag :type="accessConfigured('youtube') ? 'success' : 'info'">{{ accessConfigured('youtube') ? '已接入' : '待配置' }}</el-tag>
+            </div>
+            <p class="access-description">用于关键词搜索和重点频道新视频监测。重点频道通过 uploads 播放列表读取，不占用搜索调用次数。</p>
+            <el-form label-position="top">
+              <el-form-item>
+                <template #label><span>API Key <em>{{ credentialLabel('youtube', 'apiKey') }}</em></span></template>
+                <el-input
+                  v-model="youtubeForm.apiKey"
+                  type="password"
+                  show-password
+                  autocomplete="new-password"
+                  :disabled="credentialLocked('youtube', 'apiKey')"
+                  :placeholder="credentialPlaceholder('youtube', 'apiKey', '粘贴 Google Cloud API Key')"
+                />
+              </el-form-item>
+            </el-form>
+            <div class="access-actions">
+              <el-button type="primary" :loading="savingPlatform === 'youtube'" :disabled="credentialLocked('youtube', 'apiKey')" @click="saveAccessConfig('youtube')">保存 YouTube 配置</el-button>
+              <el-button v-if="hasLocalCredential('youtube')" type="danger" plain @click="clearAccessConfig('youtube')">清除页面配置</el-button>
+            </div>
+          </section>
+
+          <section class="access-panel">
+            <div class="access-title">
+              <div><span class="platform-mark telegram">TG</span><strong>Telegram MTProto</strong></div>
+              <el-tag :type="accessConfigured('telegram') ? 'success' : 'info'">{{ accessConfigured('telegram') ? '已接入' : '待配置' }}</el-tag>
+            </div>
+            <p class="access-description">用于公开广播频道关键词和重点频道主消息监测。StringSession 需先在可信终端完成手机号验证后生成。</p>
+            <el-form label-position="top" class="telegram-form">
+              <el-form-item>
+                <template #label><span>API ID <em>{{ credentialLabel('telegram', 'apiId') }}</em></span></template>
+                <el-input v-model="telegramForm.apiId" :disabled="credentialLocked('telegram', 'apiId')" :placeholder="credentialPlaceholder('telegram', 'apiId', 'my.telegram.org 获取的数字 ID')" />
+              </el-form-item>
+              <el-form-item>
+                <template #label><span>API Hash <em>{{ credentialLabel('telegram', 'apiHash') }}</em></span></template>
+                <el-input v-model="telegramForm.apiHash" type="password" show-password autocomplete="new-password" :disabled="credentialLocked('telegram', 'apiHash')" :placeholder="credentialPlaceholder('telegram', 'apiHash', '32 位 API Hash')" />
+              </el-form-item>
+              <el-form-item class="session-field">
+                <template #label><span>StringSession <em>{{ credentialLabel('telegram', 'session') }}</em></span></template>
+                <el-input v-model="telegramForm.session" type="password" show-password autocomplete="new-password" :disabled="credentialLocked('telegram', 'session')" :placeholder="credentialPlaceholder('telegram', 'session', '粘贴会话字符串，不是手机号或验证码')" />
+              </el-form-item>
+            </el-form>
+            <div class="session-help">
+              生成命令：<code>python darkweb_collector/scripts/create_telegram_session.py</code>
+            </div>
+            <div class="access-actions">
+              <el-button type="primary" :loading="savingPlatform === 'telegram'" @click="saveAccessConfig('telegram')">保存 Telegram 配置</el-button>
+              <el-button v-if="hasLocalCredential('telegram')" type="danger" plain @click="clearAccessConfig('telegram')">清除页面配置</el-button>
+            </div>
+          </section>
         </div>
       </article>
 
@@ -111,20 +180,25 @@ const { state } = useAuth()
 const campaigns = ref([])
 const platforms = ref([])
 const scans = ref([])
+const accessConfig = ref({})
 const loadingCampaigns = ref(false)
 const loadingPlatforms = ref(false)
 const loadingScans = ref(false)
+const loadingAccessConfig = ref(false)
 const drawerVisible = ref(false)
 const editingId = ref('')
 const saving = ref(false)
+const savingPlatform = ref('')
 const platformOptions = [
   { label: 'X', value: 'x' }, { label: 'Facebook', value: 'facebook' },
   { label: 'YouTube', value: 'youtube' }, { label: 'Telegram', value: 'telegram' },
 ]
 const form = reactive(emptyForm())
+const youtubeForm = reactive({ apiKey: '' })
+const telegramForm = reactive({ apiId: '', apiHash: '', session: '' })
 const isAdmin = computed(() => String(state.user?.role || '').toLowerCase() === 'admin')
 
-onMounted(() => Promise.all([loadCampaigns(), loadPlatforms(), loadScans()]))
+onMounted(() => Promise.all([loadCampaigns(), loadPlatforms(), loadScans(), ...(isAdmin.value ? [loadAccessConfig()] : [])]))
 
 function emptyForm() {
   return { name: '', startAt: '', endAt: '', timezone: 'Asia/Shanghai', intervalSeconds: 1800, platforms: ['youtube', 'telegram'], regionTermsText: '西藏\n藏区', targetAliasesText: '', threatTermsText: '攻击\n泄露\n售卖\n凭证\n定向行动', exclusionTermsText: '', sourcesText: '', enabled: true }
@@ -142,11 +216,48 @@ async function loadPlatforms() {
   catch (error) { ElMessage.error(error.message || '加载平台状态失败') }
   finally { loadingPlatforms.value = false }
 }
+async function loadAccessConfig() {
+  if (!isAdmin.value) return
+  loadingAccessConfig.value = true
+  try { accessConfig.value = await api.loadPlatformConfig() }
+  catch (error) { ElMessage.error(error.message || '加载平台接入配置失败') }
+  finally { loadingAccessConfig.value = false }
+}
+async function refreshPlatformState() { await Promise.all([loadPlatforms(), ...(isAdmin.value ? [loadAccessConfig()] : [])]) }
 async function loadScans() {
   loadingScans.value = true
   try { scans.value = listFromResponse(await api.loadScans({ limit: 50 }), ['scans']) }
   catch (error) { ElMessage.error(error.message || '加载监测轮次失败') }
   finally { loadingScans.value = false }
+}
+
+async function saveAccessConfig(platform) {
+  const payload = platform === 'youtube'
+    ? { apiKey: youtubeForm.apiKey.trim() }
+    : {
+        apiId: telegramForm.apiId.trim(),
+        apiHash: telegramForm.apiHash.trim(),
+        session: telegramForm.session.trim(),
+      }
+  const cleanPayload = Object.fromEntries(Object.entries(payload).filter(([, value]) => value))
+  if (!Object.keys(cleanPayload).length) { ElMessage.warning('请至少填写一项需要保存的凭据'); return }
+  savingPlatform.value = platform
+  try {
+    await api.savePlatformConfig(platform, cleanPayload)
+    Object.assign(platform === 'youtube' ? youtubeForm : telegramForm, platform === 'youtube' ? { apiKey: '' } : { apiId: '', apiHash: '', session: '' })
+    ElMessage.success(`${platformLabel(platform)} 配置已安全保存`)
+    await Promise.all([loadAccessConfig(), loadPlatforms()])
+  } catch (error) { ElMessage.error(error.message || '保存平台配置失败') }
+  finally { savingPlatform.value = '' }
+}
+
+async function clearAccessConfig(platform) {
+  try { await ElMessageBox.confirm(`确认清除页面保存的 ${platformLabel(platform)} 凭据？`, '清除平台配置', { type: 'warning' }) } catch { return }
+  try {
+    await api.clearPlatformConfig(platform)
+    ElMessage.success(`${platformLabel(platform)} 页面配置已清除`)
+    await Promise.all([loadAccessConfig(), loadPlatforms()])
+  } catch (error) { ElMessage.error(error.message || '清除平台配置失败') }
 }
 
 function openCreate() { editingId.value = ''; Object.assign(form, emptyForm()); drawerVisible.value = true }
@@ -208,6 +319,12 @@ function platformLabel(value) { return platformOptions.find((item) => item.value
 function platformList(value) { return Array.isArray(value) ? value.map(platformLabel).join('、') : '-' }
 function platformStatus(item) { const key = item.status || item.healthStatus; return { healthy: '正常', success: '正常', configured: item.coverageLimited ? '已配置（覆盖受限）' : '已配置', limited: '覆盖受限', degraded: '覆盖受限', missingCredentials: '缺少凭据', missing_credentials: '缺少凭据', failed: '采集异常', error: '采集异常' }[key] || item.statusLabel || '待配置' }
 function platformTone(item) { const key = item.status || item.healthStatus; if (['healthy', 'success', 'configured'].includes(key)) return 'success'; if (['limited', 'degraded'].includes(key)) return 'warning'; if (['failed', 'error'].includes(key)) return 'danger'; return 'info' }
+function credential(platform, field) { return accessConfig.value?.[platform]?.credentials?.[field] || { configured: false, source: 'missing' } }
+function accessConfigured(platform) { return Boolean(accessConfig.value?.[platform]?.configured) }
+function credentialLocked(platform, field) { return credential(platform, field).source === 'environment' }
+function credentialLabel(platform, field) { return { environment: '由环境变量管理', localFile: '已由页面保存', local_file: '已由页面保存', missing: '未配置' }[credential(platform, field).source] || '未配置' }
+function credentialPlaceholder(platform, field, emptyText) { const item = credential(platform, field); return item.configured ? (item.source === 'environment' ? '环境变量已配置，页面不可覆盖' : '已保存；留空表示保持不变') : emptyText }
+function hasLocalCredential(platform) { return Object.values(accessConfig.value?.[platform]?.credentials || {}).some((item) => ['local_file', 'localFile'].includes(item.source)) }
 function scanStatus(value) { return { queued: '待执行', running: '执行中', completed: '已完成', success: '已完成', delayed: '轮次延迟', failed: '采集异常' }[value] || value || '-' }
 function scanTone(value) { return ['completed', 'success'].includes(value) ? 'success' : value === 'failed' ? 'danger' : value === 'delayed' ? 'warning' : 'info' }
 </script>
@@ -222,7 +339,18 @@ function scanTone(value) { return ['completed', 'success'].includes(value) ? 'su
 .content-card { min-width: 0; padding: 22px; }.content-card--full { grid-column: 1 / -1; }
 .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }.card-head h2 { margin: 0 0 6px; font-size: 19px; }
 .platform-grid { display: grid; gap: 11px; }.platform-card { padding: 14px; border: 1px solid var(--ti-border-soft); border-radius: 14px; }.platform-card > div { display: flex; justify-content: space-between; gap: 10px; }.platform-card p { margin: 10px 0; color: var(--ti-text-secondary); }.platform-card > span { color: var(--ti-text-muted); font-size: 12px; }
+.config-alert { margin-bottom: 18px; }
+.access-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.access-panel { padding: 18px; border: 1px solid var(--ti-border-soft); border-radius: 18px; background: linear-gradient(180deg, #fff, #fafcff); }
+.access-title, .access-title > div, .access-actions { display: flex; align-items: center; gap: 10px; }
+.access-title { justify-content: space-between; }.access-title strong { font-size: 17px; }
+.platform-mark { display: inline-grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; color: #fff; font-size: 11px; font-weight: 800; }
+.platform-mark.youtube { background: #e53935; }.platform-mark.telegram { background: #168acd; }
+.access-description { min-height: 42px; margin: 14px 0 16px; color: var(--ti-text-secondary); line-height: 1.6; }
+.access-panel :deep(.el-form-item__label) em { margin-left: 8px; color: var(--ti-text-muted); font-size: 12px; font-style: normal; font-weight: 400; }
+.telegram-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }.telegram-form .session-field { grid-column: 1 / -1; }
+.session-help { margin: -2px 0 15px; color: var(--ti-text-muted); font-size: 12px; }.session-help code { color: var(--ti-primary); word-break: break-all; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }.form-grid .full { grid-column: 1 / -1; }.empty { padding: 40px; color: var(--ti-text-muted); text-align: center; }
-@media (max-width: 1000px) { .settings-grid { grid-template-columns: 1fr; }.content-card--full { grid-column: auto; } }
-@media (max-width: 767px) { .page-head { flex-direction: column; }.form-grid { grid-template-columns: 1fr; }.form-grid .full { grid-column: auto; } }
+@media (max-width: 1000px) { .settings-grid, .access-grid { grid-template-columns: 1fr; }.content-card--full { grid-column: auto; }.access-description { min-height: 0; } }
+@media (max-width: 767px) { .page-head { flex-direction: column; }.form-grid, .telegram-form { grid-template-columns: 1fr; }.form-grid .full, .telegram-form .session-field { grid-column: auto; }.access-actions { align-items: stretch; flex-direction: column; }.access-actions .el-button { margin-left: 0; } }
 </style>

@@ -60,6 +60,21 @@ def social_platforms() -> list[dict]:
     return _call(service.platform_status_payload)
 
 
+@router.get("/api/social-monitoring/platform-config")
+def social_platform_config(request: Request) -> dict:
+    return _call(service.platform_config_payload, _actor(request))
+
+
+@router.put("/api/social-monitoring/platform-config/{platform}")
+def save_social_platform_config(platform: str, request: Request, payload: dict[str, Any]) -> dict:
+    return _call(service.save_platform_config_payload, _actor(request), platform, payload)
+
+
+@router.delete("/api/social-monitoring/platform-config/{platform}")
+def clear_social_platform_config(platform: str, request: Request) -> dict:
+    return _call(service.clear_platform_config_payload, _actor(request), platform)
+
+
 @router.get("/api/social-monitoring/campaigns")
 def social_campaigns() -> list[dict]:
     return _call(service.list_campaigns_payload)

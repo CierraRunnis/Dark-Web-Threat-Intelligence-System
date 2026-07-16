@@ -12,6 +12,8 @@
 
 当前新建任务默认只选择 YouTube 和 Telegram，X、Facebook 仍保留为后续可选平台。
 
+管理员可以在“监测配置 → 免费平台接入配置”中直接填写凭据。页面采用只写方式，保存后只显示“已配置”和凭据来源，不会把原值返回浏览器。页面保存的值默认位于当前系统用户的 `~/.config/darkweb-threat-intel/social-platform-secrets.json`；Linux 下目录权限设为 `0700`、文件权限设为 `0600`，Windows 下继承用户配置目录 ACL。可以用 `SOCIAL_PLATFORM_SECRETS_FILE` 指定其他仓库外路径。环境变量和 Codespaces secrets 的优先级高于页面配置，且不能在页面中覆盖。
+
 ### YouTube Data API
 
 1. 在 Google Cloud 项目中启用 YouTube Data API v3，并创建 API Key。
@@ -46,6 +48,7 @@ SOCIAL_YOUTUBE_API_KEY
 SOCIAL_TELEGRAM_API_ID
 SOCIAL_TELEGRAM_API_HASH
 SOCIAL_TELEGRAM_SESSION
+SOCIAL_PLATFORM_SECRETS_FILE
 SOCIAL_X_STORAGE_STATE
 SOCIAL_FACEBOOK_STORAGE_STATE
 SOCIAL_YOUTUBE_STORAGE_STATE

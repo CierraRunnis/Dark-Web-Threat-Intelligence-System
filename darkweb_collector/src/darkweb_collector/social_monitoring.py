@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 from typing import Any
@@ -52,6 +53,12 @@ from darkweb_collector.db import (
     update_user,
     update_user_password,
     upsert_social_event,
+)
+from darkweb_collector.social_secrets import (
+    get_social_secret,
+    remove_social_secrets,
+    social_secret_state,
+    update_social_secrets,
 )
 
 
@@ -369,9 +376,9 @@ def platform_status_payload() -> list[dict]:
         "x": bool(os.environ.get("SOCIAL_X_BEARER_TOKEN", "").strip()),
         "facebook": bool(os.environ.get("SOCIAL_FACEBOOK_ACCESS_TOKEN", "").strip())
         or bool(facebook_state and Path(facebook_state).expanduser().is_file()),
-        "youtube": bool(os.environ.get("SOCIAL_YOUTUBE_API_KEY", "").strip()),
+        "youtube": bool(get_social_secret("SOCIAL_YOUTUBE_API_KEY")),
         "telegram": all(
-            os.environ.get(name, "").strip()
+            get_social_secret(name)
             for name in ("SOCIAL_TELEGRAM_API_ID", "SOCIAL_TELEGRAM_API_HASH", "SOCIAL_TELEGRAM_SESSION")
         ),
     }
@@ -402,6 +409,77 @@ def platform_status_payload() -> list[dict]:
         }
         for platform in PLATFORMS
     ]
+
+
+PLATFORM_CREDENTIALS = {
+    "youtube": {"apiKey": "SOCIAL_YOUTUBE_API_KEY"},
+    "telegram": {
+        "apiId": "SOCIAL_TELEGRAM_API_ID",
+        "apiHash": "SOCIAL_TELEGRAM_API_HASH",
+        "session": "SOCIAL_TELEGRAM_SESSION",
+    },
+}
+
+
+def _platform_config(platform: str) -> dict:
+    credentials = {
+        field: social_secret_state(secret_name)
+        for field, secret_name in PLATFORM_CREDENTIALS[platform].items()
+    }
+    return {
+        "platform": platform,
+        "configured": all(bool(item["configured"]) for item in credentials.values()),
+        "credentials": credentials,
+    }
+
+
+def platform_config_payload(actor: dict) -> dict:
+    require_role(actor, "admin")
+    return {platform: _platform_config(platform) for platform in PLATFORM_CREDENTIALS}
+
+
+def _validate_platform_secret(platform: str, field: str, value: str) -> None:
+    if any(character.isspace() for character in value):
+        raise SocialMonitoringError(f"{platform} {field} must not contain whitespace")
+    if platform == "youtube" and (len(value) < 20 or len(value) > 200):
+        raise SocialMonitoringError("YouTube API Key format is invalid")
+    if platform == "telegram" and field == "apiId" and (not value.isdigit() or int(value) <= 0):
+        raise SocialMonitoringError("Telegram API ID must be a positive integer")
+    if platform == "telegram" and field == "apiHash" and not re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        raise SocialMonitoringError("Telegram API Hash must contain 32 hexadecimal characters")
+    if platform == "telegram" and field == "session" and len(value) < 100:
+        raise SocialMonitoringError("Telegram StringSession is too short")
+
+
+def save_platform_config_payload(actor: dict, platform: str, payload: dict) -> dict:
+    require_role(actor, "admin")
+    selected = str(platform).lower()
+    if selected not in PLATFORM_CREDENTIALS:
+        raise SocialMonitoringError("platform credential configuration is not supported", 404)
+    updates = {}
+    for field, secret_name in PLATFORM_CREDENTIALS[selected].items():
+        if field not in payload:
+            continue
+        value = str(payload.get(field) or "").strip()
+        if not value:
+            continue
+        if social_secret_state(secret_name)["source"] == "environment":
+            raise SocialMonitoringError(f"{field} is managed by an environment variable", 409)
+        _validate_platform_secret(selected, field, value)
+        updates[secret_name] = value
+    if not updates:
+        raise SocialMonitoringError("at least one non-empty credential field is required")
+    update_social_secrets(updates)
+    return _platform_config(selected)
+
+
+def clear_platform_config_payload(actor: dict, platform: str) -> dict:
+    require_role(actor, "admin")
+    selected = str(platform).lower()
+    if selected not in PLATFORM_CREDENTIALS:
+        raise SocialMonitoringError("platform credential configuration is not supported", 404)
+    remove_social_secrets(PLATFORM_CREDENTIALS[selected].values())
+    return _platform_config(selected)
 
 
 def list_scans_payload(campaign_id: int | None = None, limit: int = 100) -> list[dict]:

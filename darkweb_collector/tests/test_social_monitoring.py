@@ -164,6 +164,52 @@ class SocialMonitoringTest(unittest.TestCase):
         second = social.list_due_social_campaign_platforms("2026-07-15T00:30:00+00:00")[0]
         self.assertEqual(second["cursor"], cursor)
 
+    def test_admin_can_save_write_only_platform_credentials_outside_the_repository(self) -> None:
+        secrets_path = self.root / "private" / "social-platform-secrets.json"
+        environment = {
+            "SOCIAL_PLATFORM_SECRETS_FILE": str(secrets_path),
+            "SOCIAL_YOUTUBE_API_KEY": "",
+            "SOCIAL_TELEGRAM_API_ID": "",
+            "SOCIAL_TELEGRAM_API_HASH": "",
+            "SOCIAL_TELEGRAM_SESSION": "",
+        }
+        youtube_key = "AIza" + "A" * 35
+        telegram_session = "1" + "A" * 180
+        with patch.dict(os.environ, environment):
+            youtube = social.save_platform_config_payload(
+                self.admin, "youtube", {"apiKey": youtube_key}
+            )
+            telegram = social.save_platform_config_payload(
+                self.admin,
+                "telegram",
+                {"apiId": "123456", "apiHash": "a" * 32, "session": telegram_session},
+            )
+            config = social.platform_config_payload(self.admin)
+            status = {item["platform"]: item for item in social.platform_status_payload()}
+
+            self.assertTrue(youtube["configured"])
+            self.assertTrue(telegram["configured"])
+            self.assertTrue(config["youtube"]["credentials"]["apiKey"]["configured"])
+            self.assertEqual(config["youtube"]["credentials"]["apiKey"]["source"], "local_file")
+            self.assertTrue(status["youtube"]["configured"])
+            self.assertTrue(status["telegram"]["configured"])
+            response_text = json.dumps(config)
+            self.assertNotIn(youtube_key, response_text)
+            self.assertNotIn(telegram_session, response_text)
+            self.assertIn(youtube_key, secrets_path.read_text(encoding="utf-8"))
+
+            cleared = social.clear_platform_config_payload(self.admin, "youtube")
+            self.assertFalse(cleared["configured"])
+
+    def test_analyst_cannot_manage_platform_credentials(self) -> None:
+        analyst = social.create_user_payload(
+            self.admin, {"username": "analyst-config", "password": "secret12", "role": "analyst"}
+        )
+        with self.assertRaisesRegex(social.SocialMonitoringError, "admin"):
+            social.platform_config_payload(analyst)
+        with self.assertRaisesRegex(social.SocialMonitoringError, "admin"):
+            social.save_platform_config_payload(analyst, "youtube", {"apiKey": "AIza" + "A" * 35})
+
     def test_edited_post_keeps_content_snapshots(self) -> None:
         event_id = self._event()
         campaign_id = social.get_event_payload(event_id)["campaignId"]

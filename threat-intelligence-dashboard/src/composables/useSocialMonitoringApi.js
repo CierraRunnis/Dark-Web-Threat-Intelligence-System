@@ -45,6 +45,18 @@ export function useSocialMonitoringApi() {
     loadPlatforms() {
       return json('/api/social-monitoring/platforms')
     },
+    loadPlatformConfig() {
+      return json('/api/social-monitoring/platform-config')
+    },
+    savePlatformConfig(platform, payload) {
+      return json(
+        `/api/social-monitoring/platform-config/${encodeURIComponent(platform)}`,
+        jsonOptions('PUT', payload),
+      )
+    },
+    clearPlatformConfig(platform) {
+      return json(`/api/social-monitoring/platform-config/${encodeURIComponent(platform)}`, { method: 'DELETE' })
+    },
     loadCampaigns() {
       return json('/api/social-monitoring/campaigns')
     },

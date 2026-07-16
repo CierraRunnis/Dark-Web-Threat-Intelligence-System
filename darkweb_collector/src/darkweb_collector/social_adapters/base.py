@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
-import os
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from darkweb_collector.social_secrets import get_social_secret
 
 
 class SocialAdapterError(RuntimeError):
@@ -181,7 +182,7 @@ def encode_cursor_map(cursor_map: Mapping[str, Any]) -> str | None:
 
 
 def env_value(name: str) -> str:
-    return os.environ.get(name, "").strip()
+    return get_social_secret(name)
 
 
 def ensure_api_success(payload: Mapping[str, Any], platform: str) -> None:
