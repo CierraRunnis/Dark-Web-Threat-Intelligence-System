@@ -1,10 +1,10 @@
 <template>
-  <div ref="screenRoot" class="prototype-screen" v-html="screenHtml"></div>
+  <div ref="screenRoot" class="prototype-screen" @click="handleNavigation"></div>
 </template>
 
 <script setup>
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { initializePrototype } from '@/prototype/runtime'
 import { hydratePrototypeScreen } from '@/prototype/dataRuntime'
 
@@ -15,9 +15,11 @@ const screens = import.meta.glob('@/prototype/screens/*.html', {
 })
 
 const route = useRoute()
+const router = useRouter()
 const screenRoot = ref(null)
-const screenHtml = ref('')
+const cachedScreens = new Map()
 let renderVersion = 0
+let activeFile = ''
 
 const screenRoutes = {
   'dashboard.html': '/',
@@ -67,9 +69,47 @@ function rewriteHref(rawHref) {
   return routePath ? `${routePath}${url.search}` : rawHref
 }
 
+function handleNavigation(event) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  const link = event.target.closest('a[href]')
+  if (!link || !screenRoot.value?.contains(link) || link.hasAttribute('download') || link.target === '_blank') return
+  const href = link.getAttribute('href')
+  if (!href || href.startsWith('#') || /^(mailto:|tel:|javascript:)/i.test(href)) return
+  const url = new URL(href, window.location.href)
+  if (url.origin !== window.location.origin) return
+  event.preventDefault()
+  router.push(`${url.pathname}${url.search}${url.hash}`)
+}
+
 async function renderScreen() {
   const version = ++renderVersion
   const file = route.meta.screen
+  if (activeFile && activeFile !== file && screenRoot.value) {
+    const readyState = screenRoot.value.querySelector('.runtime-data-state[data-state="ready"]')
+    if (activeFile === 'intelligence.html' && readyState) {
+      const fragment = document.createDocumentFragment()
+      fragment.append(...screenRoot.value.childNodes)
+      cachedScreens.set(activeFile, {
+        bodyClassName: document.body.className,
+        fragment,
+        title: document.title,
+      })
+    }
+  }
+
+  const cached = activeFile !== file ? cachedScreens.get(file) : null
+  if (cached) {
+    cachedScreens.delete(file)
+    document.title = cached.title
+    document.body.className = cached.bodyClassName
+    document.body.dataset.prototypePage = file
+    document.body.dataset.prototypeSource = route.meta.source || ''
+    document.body.dataset.prototypeRecordId = String(route.params.eventId || route.params.hitId || route.params.runId || '')
+    screenRoot.value.replaceChildren(cached.fragment)
+    activeFile = file
+    return
+  }
+
   const source = screenSource(file)
   const parsed = new DOMParser().parseFromString(source, 'text/html')
   parsed.querySelectorAll('script').forEach((script) => script.remove())
@@ -92,9 +132,10 @@ async function renderScreen() {
   document.body.dataset.prototypePage = file
   document.body.dataset.prototypeSource = route.meta.source || ''
   document.body.dataset.prototypeRecordId = String(route.params.eventId || route.params.hitId || route.params.runId || '')
-  screenHtml.value = parsed.body.innerHTML
   await nextTick()
-  if (version !== renderVersion) return
+  if (version !== renderVersion || !screenRoot.value) return
+  screenRoot.value.innerHTML = parsed.body.innerHTML
+  activeFile = file
   initializePrototype()
   await hydratePrototypeScreen({ root: screenRoot.value, route, file })
 }

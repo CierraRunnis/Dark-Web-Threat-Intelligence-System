@@ -56,16 +56,30 @@ const jsonResponseCache = new Map()
 const inFlightJsonRequests = new Map()
 
 async function requestJson(url, options = {}) {
-  const method = String(options.method || 'GET').toUpperCase()
+  const { preferCached = false, ...fetchOptions } = options
+  const method = String(fetchOptions.method || 'GET').toUpperCase()
   const cacheable = method === 'GET' && CACHEABLE_JSON_URLS.has(url)
   if (cacheable) {
     const cached = jsonResponseCache.get(url)
-    if (cached && Date.now() - cached.storedAt < JSON_CACHE_TTL_MS) return cached.payload
+    const fresh = cached && Date.now() - cached.storedAt < JSON_CACHE_TTL_MS
+    if (cached && (fresh || preferCached)) {
+      if (!fresh && !inFlightJsonRequests.has(url)) {
+        const refresh = requestJsonUncached(url, fetchOptions)
+          .then((payload) => {
+            jsonResponseCache.set(url, { storedAt: Date.now(), payload })
+            return payload
+          })
+          .catch(() => cached.payload)
+          .finally(() => inFlightJsonRequests.delete(url))
+        inFlightJsonRequests.set(url, refresh)
+      }
+      return cached.payload
+    }
     const inFlight = inFlightJsonRequests.get(url)
     if (inFlight) return inFlight
   }
 
-  const request = requestJsonUncached(url, options)
+  const request = requestJsonUncached(url, fetchOptions)
   if (!cacheable) return request
   inFlightJsonRequests.set(url, request)
   try {
@@ -1187,7 +1201,7 @@ async function hydrateIntelligence(root) {
     list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
     list.replaceChildren()
   }
-  const events = (await requestJson('/api/events')).filter((item) => eventType(item))
+  const events = (await requestJson('/api/events', { preferCached: true })).filter((item) => eventType(item))
   renderIntelligenceItems(root, events)
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
   const recent = events.filter((item) => {
