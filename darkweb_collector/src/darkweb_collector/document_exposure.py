@@ -43,7 +43,7 @@ from darkweb_collector.db import (
     upsert_netdisk_source_health,
     upsert_netdisk_source_state,
 )
-from darkweb_collector.detail_i18n import translate_event_title_live
+from darkweb_collector.detail_i18n import translate_event_title_cached, translate_event_title_live
 from darkweb_collector.document_exposure_browser import (
     NetdiskShareUnavailable,
     fetch_aliyundrive_share_file_entries,
@@ -4126,7 +4126,7 @@ def build_document_exposure_event_records(limit: int | None = None) -> list[dict
                 "disclosureDate": _format_date(row.get("disclosureTime") or row.get("lastSeenAt")),
                 "updatedTime": row.get("lastSeenAt") or "",
                 "updatedTimeRaw": row.get("lastSeenAt") or "",
-                "title": translate_event_title_live(row.get("title")),
+                "title": translate_event_title_cached(row.get("title")),
                 "originalTitle": row.get("title") or "",
                 "category": "文件监测外泄",
                 "attacker": platform_label,

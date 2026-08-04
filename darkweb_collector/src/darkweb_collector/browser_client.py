@@ -78,6 +78,7 @@ class BrowserClient:
         hide_selectors: tuple[str, ...] = (),
         screenshot_styles: str = "",
         storage_state_path: str | None = None,
+        capture_ready_script: str = "",
     ) -> tuple[str, bytes]:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -114,7 +115,12 @@ class BrowserClient:
                 html = _read_page_content(page)
                 self._task_count += 1
                 return html, b""
-            _wait_for_capture_ready(page, timeout_ms=selector_timeout_ms)
+            capture_timeout_ms = min(timeout_seconds * 1000, 30_000) if capture_ready_script else selector_timeout_ms
+            _wait_for_capture_ready(
+                page,
+                timeout_ms=capture_timeout_ms,
+                capture_ready_script=capture_ready_script,
+            )
             screenshot_png = None
             if screenshot_selectors:
                 try:
@@ -303,11 +309,13 @@ def _read_page_content(page, *, attempts: int = 6, wait_ms: int = 250) -> str:
     return ""
 
 
-def _wait_for_capture_ready(page, *, timeout_ms: int) -> None:
+def _wait_for_capture_ready(page, *, timeout_ms: int, capture_ready_script: str = "") -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     try:
         page.wait_for_function(_CAPTURE_READY_SCRIPT, timeout=max(timeout_ms, 1_000))
+        if capture_ready_script:
+            page.wait_for_function(capture_ready_script, timeout=max(timeout_ms, 1_000))
     except PlaywrightTimeoutError as exc:
         raise RuntimeError("page remained in a loading state; screenshot skipped") from exc
     page.wait_for_timeout(500)
@@ -443,6 +451,7 @@ def fetch_page_artifacts_with_browser(
     hide_selectors: tuple[str, ...] = (),
     screenshot_styles: str = "",
     storage_state_path: str | None = None,
+    capture_ready_script: str = "",
 ) -> tuple[str, bytes]:
     requested_proxy = BrowserProxyConfig(server=proxy_server)
     client = _get_or_create_client(requested_proxy)
@@ -456,6 +465,7 @@ def fetch_page_artifacts_with_browser(
             hide_selectors=hide_selectors,
             screenshot_styles=screenshot_styles,
             storage_state_path=storage_state_path,
+            capture_ready_script=capture_ready_script,
         )
     except Exception:
         close_browser_client()

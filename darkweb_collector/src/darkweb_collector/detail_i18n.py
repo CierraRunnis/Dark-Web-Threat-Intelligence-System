@@ -141,6 +141,17 @@ def translate_event_detail_text_live(value: str | None) -> str:
     return translated
 
 
+def translate_event_title_cached(value: str | None, *, fallback: str | None = None) -> str:
+    raw = _normalize_text(value)
+    fallback_text = _normalize_text(fallback) or raw
+    if not raw:
+        return fallback_text
+
+    with _CACHE_LOCK:
+        cached = _load_cache().get(raw)
+    return cached or fallback_text
+
+
 def translate_event_title_live(value: str | None, *, fallback: str | None = None) -> str:
     raw = _normalize_text(value)
     fallback_text = _normalize_text(fallback) or raw

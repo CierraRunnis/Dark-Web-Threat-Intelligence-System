@@ -3,6 +3,7 @@ from __future__ import annotations
 from html import escape
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -29,6 +30,44 @@ from darkweb_collector.utils import dump_json, dump_text, utc_now_iso
 
 AUTH_ERROR_CODES = {4009, 4087}
 SECTION = "sellers_place"
+
+
+def _capture_ready_script(expects_image: bool) -> str:
+    return f"""
+() => {{
+    const root = document.querySelector('.product-detail-info');
+    if (!root) return false;
+    const text = (selector) => String(root.querySelector(selector)?.textContent || '').trim();
+    const productReady = Boolean(text('.name') && text('.title') && /\\d/.test(text('.price')));
+    const image = root.querySelector(':scope > .el-image img');
+    const imageReady = !{str(expects_image).lower()} || Boolean(
+        image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0
+    );
+    return productReady && imageReady;
+}}
+"""
+
+
+def _stored_capture_is_complete(html_path, json_path) -> bool:
+    try:
+        html = html_path.read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    required_patterns = (
+        r'class="name"[^>]*>\s*[^<\s]',
+        r'class="title"[^>]*>\s*[^<\s]',
+        r'class="price"[\s\S]{0,1000}>\s*\$\s*\d',
+    )
+    if not all(re.search(pattern, html) for pattern in required_patterns):
+        return False
+    if payload.get("attachments"):
+        root_start = html.find('class="product-detail-info"')
+        info_start = html.find('class="info box"', root_start)
+        image_markup = html[root_start:info_start] if root_start >= 0 and info_start > root_start else ""
+        if "<img " not in image_markup or 'class="el-image__inner"' not in image_markup:
+            return False
+    return True
 
 
 def _base_url(url: str) -> str:
@@ -162,6 +201,11 @@ class ChanganAdapter(SiteAdapter):
                     (detail_dir / f"{stem}.{suffix}").exists()
                     for suffix in ("html", "json", "png")
                 )
+                if artifacts_ready:
+                    artifacts_ready = _stored_capture_is_complete(
+                        detail_dir / f"{stem}.html",
+                        detail_dir / f"{stem}.json",
+                    )
                 unchanged = topic_snapshot is not None and topic_snapshot["content_hash"] == topic["content_hash"]
                 if unchanged and detail_snapshot is not None and artifacts_ready:
                     continue
@@ -205,6 +249,7 @@ class ChanganAdapter(SiteAdapter):
                 screenshot_selectors=(".product-detail-info",),
                 hide_selectors=("header", ".header", ".sidebar", ".nav"),
                 storage_state_path=storage_state_path,
+                capture_ready_script=_capture_ready_script(bool(detail.get("attachments"))),
             )
         except Exception as exc:
             print(f"[changan] warning: detail screenshot failed for {detail_task.target_url}: {exc}")

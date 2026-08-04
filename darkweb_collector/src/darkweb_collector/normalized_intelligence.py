@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
     Locale = None
 
 from darkweb_collector.config import get_site_config
-from darkweb_collector.detail_i18n import translate_event_title_live
+from darkweb_collector.detail_i18n import translate_event_title_cached
 from darkweb_collector.db import (
     list_document_hit_snapshots,
     list_document_hits,
@@ -920,7 +920,7 @@ def build_display_title(event: dict[str, Any]) -> str:
             "数据泄露": "疑似数据泄露",
         }
         suffix = leak_title_map.get(leak_type, "疑似数据泄露")
-        translated_title = translate_event_title_live(raw_title, fallback=subject)
+        translated_title = translate_event_title_cached(raw_title, fallback=subject)
         if any(token in translated_title for token in ("泄露", "售卖", "数据库", "凭证", "证件", "文档", "源代码", "源码")):
             return translated_title
         return f"{translated_title}{suffix}"
