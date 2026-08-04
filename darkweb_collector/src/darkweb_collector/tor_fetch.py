@@ -111,6 +111,7 @@ def fetch_page_artifacts(
     screenshot_selector: str | None = None,
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
+    screenshot_styles: str = "",
     render_html_for_screenshot: bool = False,
 ) -> tuple[str, bytes | None]:
     if mode == "browser":
@@ -124,6 +125,7 @@ def fetch_page_artifacts(
             screenshot_selector=screenshot_selector,
             screenshot_selectors=screenshot_selectors,
             hide_selectors=hide_selectors,
+            screenshot_styles=screenshot_styles,
         )
         return html, screenshot_png
 
@@ -148,6 +150,7 @@ def fetch_page_artifacts(
                 screenshot_selector=screenshot_selector,
                 screenshot_selectors=screenshot_selectors,
                 hide_selectors=hide_selectors,
+                screenshot_styles=screenshot_styles,
             )
         else:
             from darkweb_collector.browser_client import fetch_page_artifacts_with_browser
@@ -160,6 +163,7 @@ def fetch_page_artifacts(
                 screenshot_selector=screenshot_selector,
                 screenshot_selectors=screenshot_selectors,
                 hide_selectors=hide_selectors,
+                screenshot_styles=screenshot_styles,
             )
         return html, screenshot_png
     except Exception as exc:
@@ -199,9 +203,11 @@ def fetch_via_tor_curl(
             url,
         ]
 
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(command, capture_output=True, check=False)
         if result.returncode == 0:
-            return result.stdout
+            if isinstance(result.stdout, bytes):
+                return result.stdout.decode("utf-8", errors="replace")
+            return str(result.stdout or "")
 
         last_error = _stderr_text(result.stderr)
         if attempt < attempts:

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>勒索行动追踪 · 玄鉴</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-ransomware">
+<div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" data-od-id="ransomware-sidebar">
+      <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><path d="M24 3 40 9v12c0 11-6.7 18.5-16 23-9.3-4.5-16-12-16-23V9L24 3Z"/><circle cx="24" cy="22" r="8"/><path d="M14 22h20M24 12v20m-6-4 12-12"/></svg></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span></a>
+      <nav class="sidebar-nav" aria-label="主导航"></nav><div class="sidebar-footer"></div>
+    </aside>
+    <button class="sidebar-backdrop" data-sidebar-toggle aria-label="关闭导航"></button>
+    <div class="app-stage">
+      <header class="app-header" data-od-id="ransomware-header">
+        <button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航">☰</button>
+        <div class="header-actions"><span class="app-version" data-od-id="ransomware-version">版本 <strong>v0.20.0</strong></span><span class="avatar" data-od-id="ransomware-account">个人</span></div>
+      </header>
+
+      <main class="app-main" id="content" data-od-id="ransomware-main">
+        <section class="ransom-workspace" data-od-id="ransomware-actor-intelligence-section">
+          <aside class="ransom-side-stack" data-od-id="ransomware-actor-intelligence">
+            <article class="card actor-focus dense-panel">
+              <div class="panel-header"><h2>团伙活跃度</h2><span class="meta">近 7 天</span></div>
+              <div class="actor-rank"><b>01</b><div><strong>LockBit</strong><span>12 起 · 制造业为主</span></div><i style="--score:92%"></i></div>
+              <div class="actor-rank"><b>02</b><div><strong>Black Basta</strong><span>9 起 · 医疗行业上升</span></div><i style="--score:74%"></i></div>
+              <div class="actor-rank"><b>03</b><div><strong>Akira</strong><span>7 起 · VPN 入口集中</span></div><i style="--score:61%"></i></div>
+              <div class="actor-rank"><b>04</b><div><strong>RansomHub</strong><span>6 起 · 政府承包商</span></div><i style="--score:50%"></i></div>
+            </article>
+            <article class="card action-feed dense-panel">
+              <div class="panel-header"><h2>即时动态</h2><span class="pulse-label">LIVE</span></div>
+              <ol class="timeline-feed">
+                <li><time>09:12</time><div><strong>LockBit 更新受害组织页面</strong><span>新增财务样本目录</span></div></li>
+                <li><time>08:44</time><div><strong>Black Basta 调整倒计时</strong><span>公开时间提前 6 小时</span></div></li>
+                <li><time>08:03</time><div><strong>Akira 新增英国受害组织</strong><span>已匹配现有实体</span></div></li>
+                <li><time>07:35</time><div><strong>Play 发布数据样本</strong><span>已转入泄露核验</span></div></li>
+              </ol>
+            </article>
+          </aside>
+        </section>
+
+        <section data-od-id="ransomware-victim-list">
+          <article class="card data-table-panel dense-panel">
+            <div class="panel-header"><div><h2>受害组织清单 <span class="heading-count" data-table-count="ransomware-table">5</span></h2></div><button class="btn btn-secondary" data-toast="当前结果已导出">导出</button></div>
+            <div class="toolbar"><div class="tabs compact-tabs" data-target="ransomware-table"><button class="tab active" data-tab="all">全部</button><button class="tab" data-tab="disclosed">新披露</button><button class="tab" data-tab="countdown">倒计时</button><button class="tab" data-tab="published">已发布</button></div><select class="select" data-filter-target="ransomware-table" data-filter-key="industry"><option value="">全部行业</option><option value="制造业">制造业</option><option value="医疗">医疗</option><option value="专业服务">专业服务</option></select><div class="search-field"><input class="input" data-table-search="ransomware-table" placeholder="搜索团伙、组织或地区"></div></div>
+            <div class="table-wrap"><table class="ds-table" id="ransomware-table" data-table><thead><tr><th>发现时间</th><th>受害组织 / 事件</th><th>团伙</th><th>阶段</th><th>行业</th><th>地区</th><th>处置</th></tr></thead><tbody>
+              <tr data-category="published" data-industry="制造业"><td class="num">03-10 09:12</td><td class="table-title">北美制造商<span>财务与工程文档已发布</span></td><td>LockBit</td><td><span class="badge badge-critical">数据发布</span></td><td>制造业</td><td>美国 / 加拿大</td><td><a class="btn btn-ghost" href="ransomware-detail.html?id=RAN-2026-0310-014">查看</a></td></tr>
+              <tr data-category="countdown" data-industry="医疗"><td class="num">03-10 08:44</td><td class="table-title">欧洲医疗集团<span>谈判倒计时提前</span></td><td>Black Basta</td><td><span class="badge badge-high">18 小时</span></td><td>医疗</td><td>德国 / 波兰</td><td><a class="btn btn-ghost" href="ransomware-detail.html?id=RAN-2026-0310-012">查看</a></td></tr>
+              <tr data-category="disclosed" data-industry="专业服务"><td class="num">03-10 08:03</td><td class="table-title">英国专业服务公司<span>新受害组织披露</span></td><td>Akira</td><td><span class="badge">新披露</span></td><td>专业服务</td><td>英国</td><td><a class="btn btn-ghost" href="ransomware-detail.html?id=RAN-2026-0310-010">查看</a></td></tr>
+              <tr data-category="published" data-industry="制造业"><td class="num">03-10 07:35</td><td class="table-title">东南亚制造企业<span>样本目录已获取</span></td><td>Play</td><td><span class="badge badge-critical">数据发布</span></td><td>制造业</td><td>越南 / 泰国</td><td><a class="btn btn-ghost" href="ransomware-detail.html?id=RAN-2026-0310-009">查看</a></td></tr>
+              <tr data-category="disclosed" data-industry="专业服务"><td class="num">03-10 06:58</td><td class="table-title">美国政府承包商<span>旧版访问链路被利用</span></td><td>RansomHub</td><td><span class="badge">初始入侵</span></td><td>专业服务</td><td>美国</td><td><a class="btn btn-ghost" href="ransomware-detail.html?id=RAN-2026-0310-006">查看</a></td></tr>
+            </tbody></table></div><div class="empty-state" data-table-empty="ransomware-table">暂无匹配事件</div>
+          </article>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status"></div><script src="app.js"></script>
+</body>
+</html>

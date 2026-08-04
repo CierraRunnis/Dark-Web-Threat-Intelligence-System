@@ -14,6 +14,7 @@ from darkweb_collector.db import (
     get_db_connection,
     get_last_successful_crawl_job,
     list_crawl_jobs,
+    reconcile_stale_crawl_jobs,
     upsert_crawl_job,
 )
 from darkweb_collector.job_diagnostics import is_in_failure_cooldown
@@ -78,7 +79,7 @@ def refresh_normalized_after_source_change(site_name: str) -> None:
         from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
 
         with get_db_connection() as connection:
-            ensure_normalized_intelligence(connection, force=False)
+            ensure_normalized_intelligence(connection, force=False, enrichment_budget=0)
     except Exception:
         logger.exception("failed to refresh normalized intelligence after source change")
 
@@ -332,6 +333,7 @@ def enqueue_due_sites(
 ) -> list[dict[str, str]]:
     dispatched: list[dict[str, str]] = []
     with get_db_connection() as connection:
+        reconcile_stale_crawl_jobs(connection)
         for config in load_site_configs(config_path):
             if not config.enabled:
                 continue

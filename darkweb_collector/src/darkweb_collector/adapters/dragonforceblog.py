@@ -11,6 +11,37 @@ from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url
 from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
 
+DRAGONFORCE_SCREENSHOT_STYLES = """
+body.stop-scrolling {
+    height: auto !important;
+    overflow: visible !important;
+}
+.overlay { display: none !important; }
+.publication-wrapper {
+    position: static !important;
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    background: transparent !important;
+}
+.publication { margin: 0 !important; }
+.publication-header { display: none !important; }
+.publication-content__images:has(.content-images__addictional:empty) {
+    display: block !important;
+    aspect-ratio: auto !important;
+}
+.publication-content__images:has(.content-images__addictional:empty) .content-images__main {
+    aspect-ratio: 1 / 1;
+}
+"""
+
+
+def _detail_artifacts_exist(output_dir, artifact_stem: str) -> bool:
+    details_dir = output_dir / "details"
+    return all((details_dir / f"{artifact_stem}.{suffix}").exists() for suffix in ("html", "json", "png"))
+
+
 class DragonforceblogAdapter(SiteAdapter):
     """Adapter for DragonForceBlog darkweb site."""
 
@@ -75,6 +106,9 @@ class DragonforceblogAdapter(SiteAdapter):
 
         with get_db_connection() as connection:
             for victim in seed_result.payload["victims"]:
+                artifact_stem = safe_stem(
+                    f"{victim.get('content_hash', '')[:10]}_{victim['name'][:30]}"
+                )
                 # Check if this victim already exists with same content hash
                 snapshot = get_victim_snapshot(
                     connection,
@@ -90,6 +124,7 @@ class DragonforceblogAdapter(SiteAdapter):
                     snapshot
                     and snapshot.get("content_hash") == victim.get("content_hash")
                     and snapshot.get("last_detail_fetch_status") == "ok"
+                    and _detail_artifacts_exist(config.output_dir, artifact_stem)
                 ):
                     continue
 
@@ -109,9 +144,7 @@ class DragonforceblogAdapter(SiteAdapter):
                             "display_label": victim.get("display_label", victim["name"]),
                             "content_hash": victim.get("content_hash", ""),
                             "victim_data": victim,  # Pass the full victim data from list page
-                            "artifact_stem": safe_stem(
-                                f"{victim.get('content_hash', '')[:10]}_{victim['name'][:30]}"
-                            ),
+                            "artifact_stem": artifact_stem,
                         },
                     )
                 )
@@ -134,44 +167,38 @@ class DragonforceblogAdapter(SiteAdapter):
             run_ctx: Run context
 
         Returns:
-            DetailResult or None if failed
+            Parsed detail result.
         """
-        try:
-            html, screenshot_png = fetch_page_artifacts(
-                url=detail_task.target_url,
-                mode=config.detail_fetch_mode,
-                timeout_seconds=config.fetch_timeout_seconds,
-                render_wait_seconds=config.render_wait_seconds,
-                screenshot_selector=".publication",
-                hide_selectors=(
-                    ".publications-list",
-                    ".header-promo",
-                    ".blog-layout__header",
-                    ".header-menu",
-                ),
-            )
+        html, screenshot_png = fetch_page_artifacts(
+            url=detail_task.target_url,
+            mode="tor_http",
+            timeout_seconds=config.fetch_timeout_seconds,
+            render_wait_seconds=config.render_wait_seconds,
+            screenshot_selector=".publication",
+            hide_selectors=(
+                ".publications-list",
+                ".header-promo",
+                ".blog-layout__header",
+                ".header-menu",
+            ),
+            screenshot_styles=DRAGONFORCE_SCREENSHOT_STYLES,
+            render_html_for_screenshot=True,
+        )
 
-            # Parse the detail page
-            detail = parse_dragonforceblog_detail_page(detail_task.target_url, html)
+        detail = parse_dragonforceblog_detail_page(detail_task.target_url, html)
+        victim_data = detail_task.metadata.get("victim_data", {})
+        detail["claimed_size"] = detail.get("claimed_size") or victim_data.get("claimed_size", "")
+        detail["location"] = detail.get("location") or victim_data.get("location", "")
+        detail["company_name"] = detail.get("company_name") or victim_data.get("name", "")
 
-            # Merge with victim data from list page
-            victim_data = detail_task.metadata.get("victim_data", {})
-            detail["claimed_size"] = detail.get("claimed_size") or victim_data.get("claimed_size", "")
-            detail["location"] = detail.get("location") or victim_data.get("location", "")
-            detail["company_name"] = detail.get("company_name") or victim_data.get("name", "")
-
-            return DetailResult(
-                site_name=self.site_name,
-                target_url=detail_task.target_url,
-                payload=detail,
-                raw_html=html,
-                screenshot_png=screenshot_png,
-                metadata=detail_task.metadata,
-            )
-        except Exception as e:
-            # Log error but don't fail the entire run
-            print(f"Error collecting detail for {detail_task.target_url}: {e}")
-            return None
+        return DetailResult(
+            site_name=self.site_name,
+            target_url=detail_task.target_url,
+            payload=detail,
+            raw_html=html,
+            screenshot_png=screenshot_png,
+            metadata=detail_task.metadata,
+        )
 
     def persist(
         self,

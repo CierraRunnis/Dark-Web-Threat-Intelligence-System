@@ -16,12 +16,15 @@ from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
 
+import psutil
+
 from darkweb_collector.runtime import default_db_path
 
 
 SETTINGS_PATH_ENV = "DARKWEB_TOR_BRIDGE_SETTINGS_PATH"
 TOR_EXECUTABLE_ENV = "DARKWEB_TOR_EXECUTABLE"
 TRANSPORT_EXECUTABLE_ENV = "DARKWEB_TOR_TRANSPORT_EXECUTABLE"
+PT_CONFIG_PATH_ENV = "DARKWEB_TOR_PT_CONFIG_PATH"
 SETTINGS_FILE = "tor_bridge_settings.json"
 RUNTIME_DIR_NAME = "tor_bridge_runtime"
 DEFAULT_SOCKS_HOST = "127.0.0.1"
@@ -32,6 +35,7 @@ BOOTSTRAP_PATTERN = re.compile(r"Bootstrapped\s+(\d{1,3})%\s+\(([^)]+)\):\s*(.*)
 EXIT_IP_CHECK_HOST = "check.torproject.org"
 EXIT_IP_CHECK_PATH = "/api/ip"
 EXIT_IP_RETRY_SECONDS = 15
+PACKAGED_PT_CONFIG_PATH = Path(__file__).with_name("pt_config.json")
 DEFAULT_SNOWFLAKE_BRIDGES = [
     (
         "Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 "
@@ -88,6 +92,10 @@ _exit_ip_error = ""
 _exit_ip_checking = False
 _exit_ip_last_attempt = 0.0
 _runtime_generation = 0
+_builtin_bridge_lock = Lock()
+_builtin_bridge_cache_key: tuple[str, int, int] | None = None
+_builtin_bridge_cache: dict[str, Any] = {}
+_builtin_bridge_last_good: dict[str, Any] = {}
 
 
 def settings_path() -> Path:
@@ -209,16 +217,24 @@ def load_tor_bridge_settings() -> dict[str, Any]:
     if not settings["tor_executable"]:
         settings["tor_executable"] = detect_tor_executable()
     if not settings["transport_executable"]:
-        settings["transport_executable"] = detect_transport_executable(settings["tor_executable"], settings["bridge_mode"])
+        settings["transport_executable"] = detect_transport_executable(
+            settings["tor_executable"],
+            _effective_transport_mode(settings),
+        )
     return settings
 
 
 def save_tor_bridge_settings(payload: dict[str, Any]) -> dict[str, Any]:
     previous = load_tor_bridge_settings()
     settings = _normalize_settings({**previous, **payload, "updated_at": _now_iso()})
+    bridge_errors = _bridge_mode_errors(settings)
+    if bridge_errors:
+        raise ValueError(" ".join(bridge_errors))
     runtime_keys = (
         "enabled",
         "bridge_mode",
+        "tor_executable",
+        "transport_executable",
         "socks_host",
         "socks_port",
         "bridge_lines",
@@ -227,8 +243,7 @@ def save_tor_bridge_settings(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if any(previous.get(key) != settings.get(key) for key in runtime_keys):
         with _process_lock:
-            if _process_running():
-                _terminate_process_locked(previous)
+            _terminate_process_locked(previous)
             _reset_exit_ip_state()
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,12 +394,157 @@ def _effective_bridge_lines(settings: dict[str, Any]) -> list[str]:
     lines = list(settings.get("bridge_lines") or [])
     mode = _string(settings.get("bridge_mode"))
     if not lines and mode in DEFAULT_BUILTIN_BRIDGES:
-        return list(DEFAULT_BUILTIN_BRIDGES[mode])
+        bridges = refresh_builtin_bridges(settings)["bridges"]
+        return list(bridges.get(mode) or DEFAULT_BUILTIN_BRIDGES[mode])
     return lines
 
 
+def _bridge_line_mode(line: str) -> str:
+    parts = _string(line).split()
+    if parts and parts[0].lower() == "bridge":
+        parts = parts[1:]
+    if not parts:
+        return ""
+    mode = parts[0].lower()
+    if mode == "meek":
+        mode = "meek_lite"
+    return mode if mode in TRANSPORT_MODES else "vanilla"
+
+
+def _bridge_line_modes(settings: dict[str, Any]) -> set[str]:
+    return {mode for line in settings.get("bridge_lines") or [] if (mode := _bridge_line_mode(line))}
+
+
+def _bridge_mode_errors(settings: dict[str, Any]) -> list[str]:
+    modes = _bridge_line_modes(settings)
+    if not modes:
+        return []
+    selected = _string(settings.get("bridge_mode"))
+    if selected == "custom":
+        if len(modes) > 1:
+            return ["Custom bridge lines must use one transport type."]
+        return []
+    if modes != {selected}:
+        actual = ", ".join(sorted(modes))
+        return [f"Bridge lines use {actual}, but the selected bridge mode is {selected}."]
+    return []
+
+
+def _effective_transport_mode(settings: dict[str, Any]) -> str:
+    selected = _string(settings.get("bridge_mode")) or "snowflake"
+    if selected != "custom":
+        return selected
+    modes = _bridge_line_modes(settings)
+    return next(iter(modes)) if len(modes) == 1 else ""
+
+
+def _pt_config_candidates(settings: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+    explicit_path = _string(os.environ.get(PT_CONFIG_PATH_ENV))
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+    local_app_data = _string(os.environ.get("LOCALAPPDATA"))
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "DarkWebThreatIntel" / "tor-expert" / "pt_config.json")
+    try:
+        candidates.append(
+            Path.home() / ".local" / "share" / "darkweb-threat-intel" / "tor-expert" / "pt_config.json"
+        )
+    except RuntimeError:
+        pass
+    candidates.append(PACKAGED_PT_CONFIG_PATH)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        key = os.path.normcase(str(resolved))
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return unique
+
+
+def _read_pt_config(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("bridges"), dict):
+        raise ValueError("Tor Browser bridge configuration is invalid")
+    return payload
+
+
+def _parse_pt_config(path: Path) -> dict[str, Any]:
+    payload = _read_pt_config(path)
+    mode_names = {
+        "meek": "meek_lite",
+        "meek-azure": "meek_lite",
+        "meek_lite": "meek_lite",
+        "snowflake": "snowflake",
+        "obfs4": "obfs4",
+        "webtunnel": "webtunnel",
+    }
+    bridges: dict[str, list[str]] = {}
+    for raw_mode, raw_lines in payload["bridges"].items():
+        mode = mode_names.get(_string(raw_mode).lower())
+        if not mode:
+            continue
+        lines = [line for line in _normalize_bridge_lines(raw_lines) if _bridge_line_mode(line) == mode]
+        if lines:
+            bridges[mode] = lines
+    if not bridges:
+        raise ValueError("Tor Browser bridge configuration contains no supported bridges")
+    source_stat = path.stat()
+    recommended_mode = mode_names.get(_string(payload.get("recommendedDefault")).lower(), "")
+    return {
+        "bridges": bridges,
+        "source": "bundled" if path == PACKAGED_PT_CONFIG_PATH else "project_cache",
+        "source_path": str(path),
+        "updated_at": datetime.fromtimestamp(source_stat.st_mtime, timezone.utc).isoformat(),
+        "recommended_mode": recommended_mode,
+        "source_error": "",
+    }
+
+
+def _fallback_builtin_bridges(error: str = "") -> dict[str, Any]:
+    return {
+        "bridges": {mode: list(lines) for mode, lines in DEFAULT_BUILTIN_BRIDGES.items()},
+        "source": "bundled_fallback",
+        "source_path": "",
+        "updated_at": "",
+        "recommended_mode": "obfs4",
+        "source_error": error,
+    }
+
+
+def refresh_builtin_bridges(
+    settings: dict[str, Any] | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Load the project-owned built-in bridge list when its JSON file changes."""
+    global _builtin_bridge_cache, _builtin_bridge_cache_key, _builtin_bridge_last_good
+    current = settings or load_tor_bridge_settings()
+    candidates = [path for path in _pt_config_candidates(current) if path.is_file()]
+    if not candidates:
+        return dict(_builtin_bridge_last_good or _fallback_builtin_bridges())
+    source = candidates[0]
+    source_stat = source.stat()
+    cache_key = (os.path.normcase(str(source)), source_stat.st_mtime_ns, source_stat.st_size)
+    with _builtin_bridge_lock:
+        if not force and cache_key == _builtin_bridge_cache_key and _builtin_bridge_cache:
+            return dict(_builtin_bridge_cache)
+        try:
+            loaded = _parse_pt_config(source)
+        except Exception as exc:
+            loaded = dict(_builtin_bridge_last_good or _fallback_builtin_bridges())
+            loaded["source_error"] = str(exc)
+        else:
+            _builtin_bridge_last_good = dict(loaded)
+        _builtin_bridge_cache_key = cache_key
+        _builtin_bridge_cache = dict(loaded)
+        return dict(loaded)
+
+
 def _client_transport_plugin(settings: dict[str, Any], paths: dict[str, str]) -> str:
-    mode = _string(settings.get("bridge_mode")) or "snowflake"
+    mode = _effective_transport_mode(settings)
     if mode not in TRANSPORT_MODES:
         return ""
     transport = _string(settings.get("transport_executable"))
@@ -431,12 +591,12 @@ def write_torrc(settings: dict[str, Any] | None = None) -> Path:
 
 
 def _runtime_errors(settings: dict[str, Any]) -> list[str]:
-    errors = []
+    errors = _bridge_mode_errors(settings)
     tor_executable = _string(settings.get("tor_executable"))
     if not _is_executable_file(tor_executable):
         errors.append("Tor executable was not found. Install tor or Tor Browser, then refresh bridge status.")
 
-    mode = _string(settings.get("bridge_mode"))
+    mode = _effective_transport_mode(settings)
     if mode in TRANSPORT_MODES:
         transport_executable = _string(settings.get("transport_executable"))
         if not _is_executable_file(transport_executable):
@@ -488,12 +648,26 @@ def _write_pid_file(settings: dict[str, Any], pid: int) -> None:
 def _pid_matches_runtime(pid: int, settings: dict[str, Any]) -> bool:
     if pid <= 0 or pid == os.getpid():
         return False
+    if os.name == "nt":
+        try:
+            process = psutil.Process(pid)
+            expected_executable = Path(_string(settings.get("tor_executable"))).resolve()
+            actual_executable = Path(process.exe()).resolve()
+            expected_torrc = Path(_runtime_paths(settings)["torrc_path"]).resolve()
+            command = process.cmdline()
+        except (OSError, psutil.Error):
+            return False
+        if os.path.normcase(str(actual_executable)) != os.path.normcase(str(expected_executable)):
+            return False
+        return any(
+            os.path.normcase(str(Path(arg.strip('"')).resolve())) == os.path.normcase(str(expected_torrc))
+            for arg in command
+            if arg and not arg.startswith("-")
+        )
     try:
         os.kill(pid, 0)
     except OSError:
         return False
-    if os.name == "nt":
-        return _socks_listener_ready(settings)
     try:
         command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
     except OSError:
@@ -724,18 +898,25 @@ def _terminate_process_locked(settings: dict[str, Any]) -> None:
     global _process
     if _process_running():
         assert _process is not None
-        _process.terminate()
-        try:
-            _process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _process.kill()
-            _process.wait(timeout=5)
+        if os.name == "nt":
+            _terminate_windows_process_tree(_process.pid)
+        else:
+            _process.terminate()
+            try:
+                _process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _process.kill()
+                _process.wait(timeout=5)
         _process = None
         _remove_pid_file(settings)
         return
     _process = None
     pid = _find_external_tor_pid(settings)
     if pid is None:
+        return
+    if os.name == "nt":
+        _terminate_windows_process_tree(pid)
+        _remove_pid_file(settings)
         return
     try:
         os.kill(pid, signal.SIGTERM)
@@ -751,6 +932,25 @@ def _terminate_process_locked(settings: dict[str, Any]) -> None:
         except OSError:
             pass
     _remove_pid_file(settings)
+
+
+def _terminate_windows_process_tree(pid: int) -> None:
+    try:
+        parent = psutil.Process(pid)
+        processes = parent.children(recursive=True) + [parent]
+    except psutil.Error:
+        return
+    for process in reversed(processes):
+        try:
+            process.terminate()
+        except psutil.Error:
+            pass
+    _, alive = psutil.wait_procs(processes, timeout=5)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.Error:
+            pass
 
 
 def _refresh_process_state(settings: dict[str, Any]) -> tuple[bool, int | None]:
@@ -834,6 +1034,7 @@ def stop_tor_bridge() -> dict[str, Any]:
 
 def get_tor_bridge_status() -> dict[str, Any]:
     settings = load_tor_bridge_settings()
+    builtin_bridges = refresh_builtin_bridges(settings)
     paths = _runtime_paths(settings)
     process_running, pid = _refresh_process_state(settings)
     runtime_errors = _runtime_errors(settings)
@@ -858,6 +1059,13 @@ def get_tor_bridge_status() -> dict[str, Any]:
         **paths,
         "settings_path": str(settings_path()),
         "bridge_count": len(_effective_bridge_lines(settings)),
+        "builtin_bridge_auto_update": True,
+        "builtin_bridge_source": builtin_bridges["source"],
+        "builtin_bridge_source_path": builtin_bridges["source_path"],
+        "builtin_bridge_updated_at": builtin_bridges["updated_at"],
+        "builtin_bridge_recommended_mode": builtin_bridges["recommended_mode"],
+        "builtin_bridge_modes": sorted(builtin_bridges["bridges"]),
+        "builtin_bridge_update_error": builtin_bridges["source_error"],
         "process_running": process_running,
         "process_pid": pid,
         "runtime_ready": not runtime_errors,

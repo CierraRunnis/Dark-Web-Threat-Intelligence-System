@@ -1,7 +1,14 @@
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [ValidateSet("start", "stop", "status", "install", "register")]
-    [string]$Action = "start"
+    [Parameter(Position = 0)]
+    [ValidateSet("start", "stop", "status", "install", "register", "uninstall")]
+    [string]$Action = "start",
+
+    [Parameter(Position = 1)]
+    [ValidateSet("keep-data", "purge-data")]
+    [string]$UninstallMode = "keep-data",
+
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +23,7 @@ $ApiJobsUrl = "$ApiBaseUrl/api/jobs"
 $FrontendHost = "127.0.0.1"
 $FrontendPort = if ($env:DARKWEB_FRONTEND_PORT) { [int]$env:DARKWEB_FRONTEND_PORT } else { 5173 }
 $FrontendUrl = "http://${FrontendHost}:${FrontendPort}"
+$NewUiMarker = '<meta name="darkweb-ui" content="xuanjian-new-ui"'
 $ServiceWaitSeconds = 45
 $SchedulerIntervalSeconds = if ($env:SCHEDULER_INTERVAL_SECONDS) { [int]$env:SCHEDULER_INTERVAL_SECONDS } else { 60 }
 $VulnSyncIntervalSeconds = if ($env:VULN_SYNC_INTERVAL_SECONDS) { [int]$env:VULN_SYNC_INTERVAL_SECONDS } else { 3600 }
@@ -46,6 +54,8 @@ $LocalAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:US
 $VenvDir = Join-Path $CollectorRoot "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $RuntimeDir = Join-Path $CollectorRoot ".runtime\windows"
+$DashboardNodeModulesDir = Join-Path $DashboardRoot "node_modules"
+$DashboardDistDir = Join-Path $DashboardRoot "dist"
 $LogDir = Join-Path $RuntimeDir "logs"
 $PidFile = Join-Path $RuntimeDir "services.json"
 $RuntimePortsFile = Join-Path $RuntimeDir "ports.json"
@@ -55,8 +65,14 @@ $PansouExePath = Join-Path $PansouRuntimeDir "pansou.exe"
 $CommandBinDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel\bin"
 $DarkwebCommandPath = Join-Path $CommandBinDir "darkweb.cmd"
 $DefaultUserDataDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel"
+$DefaultTorExpertRoot = Join-Path $DefaultUserDataDir "tor-expert"
+$DefaultTorBridgeRuntimeDir = Join-Path $DefaultUserDataDir "tor_bridge_runtime"
+$DefaultTorBridgeAutoRuntimeDir = Join-Path $DefaultUserDataDir "tor_bridge_runtime_auto"
+$DefaultNpmCacheDir = Join-Path $DefaultUserDataDir "npm-cache"
 $LegacyCollectorOutputRoot = Join-Path $DefaultUserDataDir "output"
 $ProjectCollectorOutputRoot = Join-Path $CollectorRoot "output"
+$ProjectCollectorOutputArchiveRoot = Join-Path $CollectorRoot "output-archive"
+$ProjectCollectorDbPath = Join-Path $CollectorRoot "data\collector.db"
 $AuthPasswordFile = if ($env:DARKWEB_AUTH_PASSWORD_FILE) {
     [System.IO.Path]::GetFullPath($env:DARKWEB_AUTH_PASSWORD_FILE)
 }
@@ -70,11 +86,44 @@ $PlaywrightStamp = Join-Path $VenvDir ".playwright.browsers.ready"
 $PackageLockStamp = Join-Path $DashboardRoot "node_modules\.package-lock.sha256"
 $RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { "redis://127.0.0.1:6379/0" }
 $CollectorDbPath = if ($env:DARKWEB_COLLECTOR_DB_PATH) { $env:DARKWEB_COLLECTOR_DB_PATH } else { Join-Path $DefaultUserDataDir "collector.db" }
-$CollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) { $env:DARKWEB_COLLECTOR_SITES_FILE } else { Join-Path $CollectorRoot "sites.yaml" }
+$ConfiguredCollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) {
+    [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_SITES_FILE)
+}
+else {
+    ""
+}
+$ConfiguredSitesParent = if ($ConfiguredCollectorSitesFile) { Split-Path -Parent $ConfiguredCollectorSitesFile } else { "" }
+$SitesFileBelongsToAnotherCheckout = $ConfiguredSitesParent -and (Split-Path -Leaf $ConfiguredSitesParent) -ieq "darkweb_collector" -and $ConfiguredSitesParent -ine $CollectorRoot
+$CollectorSitesFile = if ($ConfiguredCollectorSitesFile -and -not $SitesFileBelongsToAnotherCheckout) {
+    $ConfiguredCollectorSitesFile
+}
+else {
+    Join-Path $CollectorRoot "sites.yaml"
+}
 $TorBridgeTorExecutable = if ($env:DARKWEB_TOR_EXECUTABLE) { $env:DARKWEB_TOR_EXECUTABLE } else { "" }
 $TorBridgeTransportExecutable = if ($env:DARKWEB_TOR_TRANSPORT_EXECUTABLE) { $env:DARKWEB_TOR_TRANSPORT_EXECUTABLE } else { "" }
-$CollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
-    $configuredOutputRoot = [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
+$TorExpertRoot = if ($env:DARKWEB_TOR_EXPERT_DIR) { [System.IO.Path]::GetFullPath($env:DARKWEB_TOR_EXPERT_DIR) } else { $DefaultTorExpertRoot }
+$TorBridgePtConfigPath = if ($env:DARKWEB_TOR_PT_CONFIG_PATH -and [System.IO.Path]::GetExtension($env:DARKWEB_TOR_PT_CONFIG_PATH) -ieq ".json") {
+    [System.IO.Path]::GetFullPath($env:DARKWEB_TOR_PT_CONFIG_PATH)
+}
+else {
+    Join-Path $TorExpertRoot "pt_config.json"
+}
+$TorReleaseMetadataUrl = if ($env:TOR_RELEASE_METADATA_URL) { $env:TOR_RELEASE_METADATA_URL } else { "https://aus1.torproject.org/torbrowser/update_3/release/download-windows-x86_64.json" }
+$TorDistBaseUrl = if ($env:TOR_DIST_BASE_URL) { $env:TOR_DIST_BASE_URL.TrimEnd("/") } else { "https://dist.torproject.org/torbrowser" }
+$TorBrowserBuildRepo = if ($env:TOR_BROWSER_BUILD_REPO) { $env:TOR_BROWSER_BUILD_REPO } else { "https://gitlab.torproject.org/tpo/applications/tor-browser-build.git" }
+$BundledTorPtConfigPath = Join-Path $CollectorRoot "src\darkweb_collector\tor_bridge_control\pt_config.json"
+$script:TorReleaseInfo = $null
+$ConfiguredCollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
+    [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
+}
+else {
+    ""
+}
+$ConfiguredOutputParent = if ($ConfiguredCollectorOutputRoot) { Split-Path -Parent $ConfiguredCollectorOutputRoot } else { "" }
+$OutputRootBelongsToAnotherCheckout = $ConfiguredOutputParent -and (Split-Path -Leaf $ConfiguredOutputParent) -ieq "darkweb_collector" -and $ConfiguredOutputParent -ine $CollectorRoot
+$CollectorOutputRoot = if ($ConfiguredCollectorOutputRoot -and -not $OutputRootBelongsToAnotherCheckout) {
+    $configuredOutputRoot = $ConfiguredCollectorOutputRoot
     $resolvedLegacyOutputRoot = [System.IO.Path]::GetFullPath($LegacyCollectorOutputRoot)
     if ($configuredOutputRoot -ieq $resolvedLegacyOutputRoot) {
         $ProjectCollectorOutputRoot
@@ -303,6 +352,134 @@ function Set-UserEnv {
     }
 }
 
+function Test-SamePath {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+    if (-not $Left -or -not $Right) {
+        return $false
+    }
+    $leftPath = [System.IO.Path]::GetFullPath($Left).TrimEnd("\")
+    $rightPath = [System.IO.Path]::GetFullPath($Right).TrimEnd("\")
+    return $leftPath.Equals($rightPath, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-PathUnderRoot {
+    param(
+        [string]$Path,
+        [string]$Root
+    )
+    if (-not $Path -or -not $Root) {
+        return $false
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
+    $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd("\")
+    return $fullPath.StartsWith($fullRoot + "\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Remove-ManagedPath {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+    param(
+        [string]$Path,
+        [string]$ExpectedPath,
+        [string]$Label
+    )
+    if (-not (Test-SamePath -Left $Path -Right $ExpectedPath)) {
+        Stop-WithError "Refusing to remove unexpected path for ${Label}: $Path"
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($PSCmdlet.ShouldProcess($fullPath, "Remove $Label")) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            if ($item.PSIsContainer) {
+                [System.IO.Directory]::Delete($Path, $false)
+            }
+            else {
+                [System.IO.File]::Delete($Path)
+            }
+        }
+        else {
+            Remove-Item -LiteralPath $Path -Recurse:$item.PSIsContainer -Force
+        }
+    }
+}
+
+function Remove-EmptyManagedDirectory {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+    param(
+        [string]$Path,
+        [string]$ExpectedPath
+    )
+    if (-not (Test-SamePath -Left $Path -Right $ExpectedPath)) {
+        Stop-WithError "Refusing to remove unexpected directory: $Path"
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return
+    }
+    if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) {
+        return
+    }
+    if ($PSCmdlet.ShouldProcess($Path, "Remove empty darkweb directory")) {
+        Remove-Item -LiteralPath $Path -Force
+    }
+}
+
+function Remove-UserPathEntry {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+    param([string]$Path)
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath) {
+        return
+    }
+    $entries = @($userPath -split ";" | Where-Object { $_ -and $_.Trim() })
+    $remaining = @($entries | Where-Object { -not (Test-SamePath -Left $_ -Right $Path) })
+    if ($remaining.Count -eq $entries.Count) {
+        return
+    }
+    if ($PSCmdlet.ShouldProcess("User PATH", "Remove $Path")) {
+        [Environment]::SetEnvironmentVariable("Path", ($remaining -join ";"), "User")
+    }
+}
+
+function Remove-ManagedUserEnv {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+    param(
+        [string]$Name,
+        [string[]]$ExpectedValues = @(),
+        [string]$ExpectedRoot = ""
+    )
+    $current = [Environment]::GetEnvironmentVariable($Name, "User")
+    if ($null -eq $current) {
+        return
+    }
+    $managed = $false
+    foreach ($expected in $ExpectedValues) {
+        $sameValue = $current -ieq $expected
+        $samePath = -not $sameValue -and
+            [System.IO.Path]::IsPathRooted($current) -and
+            [System.IO.Path]::IsPathRooted($expected) -and
+            (Test-SamePath -Left $current -Right $expected)
+        if ($sameValue -or $samePath) {
+            $managed = $true
+            break
+        }
+    }
+    if (-not $managed -and $ExpectedRoot) {
+        $managed = (Test-SamePath -Left $current -Right $ExpectedRoot) -or (Test-PathUnderRoot -Path $current -Root $ExpectedRoot)
+    }
+    if (-not $managed) {
+        Write-Warn "Preserving user-managed environment variable $Name"
+        return
+    }
+    if ($PSCmdlet.ShouldProcess("User environment", "Remove $Name")) {
+        [Environment]::SetEnvironmentVariable($Name, $null, "User")
+    }
+}
+
 function Test-CommandWorks {
     param(
         [string]$CommandName,
@@ -408,12 +585,183 @@ function Resolve-TorBridgeTransportExecutable {
     $candidates = @()
     if ($TorExecutable) {
         $torDir = Split-Path -Parent $TorExecutable
-        foreach ($name in @("snowflake-client.exe", "lyrebird.exe", "obfs4proxy.exe")) {
+        foreach ($name in @("lyrebird.exe", "snowflake-client.exe", "obfs4proxy.exe")) {
             $candidates += (Join-Path $torDir "PluggableTransports\$name")
             $candidates += (Join-Path (Split-Path -Parent $torDir) "PluggableTransports\$name")
         }
     }
-    return Resolve-CommandOrFile -Names @("snowflake-client.exe", "lyrebird.exe", "obfs4proxy.exe") -Candidates $candidates
+    return Resolve-CommandOrFile -Names @("lyrebird.exe", "snowflake-client.exe", "obfs4proxy.exe") -Candidates $candidates
+}
+
+function Get-TorReleaseInfo {
+    if ($script:TorReleaseInfo) {
+        return $script:TorReleaseInfo
+    }
+    $payload = Invoke-RestMethod -Uri $TorReleaseMetadataUrl -TimeoutSec 30
+    $version = [string]$payload.version
+    $gitTag = [string]$payload.git_tag
+    if ($version -notmatch '^\d+\.\d+\.\d+$' -or $gitTag -notmatch '^tbb-[0-9A-Za-z._-]+$') {
+        throw "Tor release metadata is invalid."
+    }
+    $script:TorReleaseInfo = [PSCustomObject]@{
+        Version = $version
+        GitTag = $gitTag
+    }
+    return $script:TorReleaseInfo
+}
+
+function Get-InstalledProjectTorRuntime {
+    $manifestPath = Join-Path $TorExpertRoot "current.json"
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            if ((Test-Path -LiteralPath $manifest.tor_executable -PathType Leaf) -and
+                (Test-Path -LiteralPath $manifest.transport_executable -PathType Leaf)) {
+                return [PSCustomObject]@{
+                    Version = [string]$manifest.version
+                    TorExecutable = (Resolve-Path -LiteralPath $manifest.tor_executable).Path
+                    TransportExecutable = (Resolve-Path -LiteralPath $manifest.transport_executable).Path
+                    CheckedAt = [string]$manifest.checked_at
+                }
+            }
+        }
+        catch {
+        }
+    }
+    foreach ($directory in @(Get-ChildItem -LiteralPath $TorExpertRoot -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)) {
+        $tor = Join-Path $directory.FullName "tor\tor.exe"
+        $transport = Join-Path $directory.FullName "tor\pluggable_transports\lyrebird.exe"
+        if ((Test-Path -LiteralPath $tor -PathType Leaf) -and (Test-Path -LiteralPath $transport -PathType Leaf)) {
+            return [PSCustomObject]@{
+                Version = $directory.Name
+                TorExecutable = (Resolve-Path -LiteralPath $tor).Path
+                TransportExecutable = (Resolve-Path -LiteralPath $transport).Path
+                CheckedAt = ""
+            }
+        }
+    }
+    return $null
+}
+
+function Save-ProjectTorRuntimeManifest {
+    param([object]$Runtime)
+    New-Item -ItemType Directory -Force -Path $TorExpertRoot | Out-Null
+    $manifestPath = Join-Path $TorExpertRoot "current.json"
+    $json = @{
+        version = $Runtime.Version
+        tor_executable = $Runtime.TorExecutable
+        transport_executable = $Runtime.TransportExecutable
+        checked_at = [DateTime]::UtcNow.ToString("o")
+    } | ConvertTo-Json
+    [System.IO.File]::WriteAllText($manifestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Install-ProjectTorRuntime {
+    param([object]$Release)
+    $target = Join-Path $TorExpertRoot $Release.Version
+    $tor = Join-Path $target "tor\tor.exe"
+    $transport = Join-Path $target "tor\pluggable_transports\lyrebird.exe"
+    if (-not ((Test-Path -LiteralPath $tor -PathType Leaf) -and (Test-Path -LiteralPath $transport -PathType Leaf))) {
+        $archiveName = "tor-expert-bundle-windows-x86_64-$($Release.Version).tar.gz"
+        $versionUrl = "$TorDistBaseUrl/$($Release.Version)"
+        $downloadRoot = Join-Path $TorExpertRoot (".download-" + [Guid]::NewGuid().ToString("N"))
+        $archivePath = Join-Path $downloadRoot $archiveName
+        $unpackRoot = Join-Path $downloadRoot "unpacked"
+        New-Item -ItemType Directory -Force -Path $unpackRoot | Out-Null
+        try {
+            Write-Info "Downloading official Tor Expert Bundle $($Release.Version)..."
+            Invoke-WebRequest -Uri "$versionUrl/$archiveName" -OutFile $archivePath -UseBasicParsing -TimeoutSec 180
+            $checksumText = (Invoke-WebRequest -Uri "$versionUrl/sha256sums-signed-build.txt" -UseBasicParsing -TimeoutSec 30).Content
+            $pattern = "(?im)^([0-9a-f]{{64}})\s+\*?{0}\s*$" -f [Regex]::Escape($archiveName)
+            $match = [Regex]::Match($checksumText, $pattern)
+            if (-not $match.Success) {
+                throw "The official checksum list does not contain $archiveName."
+            }
+            $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $match.Groups[1].Value.ToLowerInvariant()) {
+                throw "Tor Expert Bundle checksum verification failed."
+            }
+            $tar = Resolve-OptionalCommand "tar"
+            if (-not $tar) {
+                throw "Windows tar.exe is unavailable."
+            }
+            & $tar -xzf $archivePath -C $unpackRoot
+            if ($LASTEXITCODE -ne 0) {
+                throw "Tor Expert Bundle extraction failed."
+            }
+            $unpackedTor = Join-Path $unpackRoot "tor\tor.exe"
+            $unpackedTransport = Join-Path $unpackRoot "tor\pluggable_transports\lyrebird.exe"
+            if (-not ((Test-Path -LiteralPath $unpackedTor -PathType Leaf) -and (Test-Path -LiteralPath $unpackedTransport -PathType Leaf))) {
+                throw "Tor Expert Bundle is missing tor.exe or lyrebird.exe."
+            }
+            if (Test-Path -LiteralPath $target) {
+                $invalidTarget = "$target.invalid.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+                Move-Item -LiteralPath $target -Destination $invalidTarget
+            }
+            Move-Item -LiteralPath $unpackRoot -Destination $target
+        }
+        finally {
+            if (Test-Path -LiteralPath $downloadRoot) {
+                Remove-Item -LiteralPath $downloadRoot -Recurse -Force
+            }
+        }
+    }
+    $runtime = [PSCustomObject]@{
+        Version = [string]$Release.Version
+        TorExecutable = (Resolve-Path -LiteralPath $tor).Path
+        TransportExecutable = (Resolve-Path -LiteralPath $transport).Path
+        CheckedAt = [DateTime]::UtcNow.ToString("o")
+    }
+    Save-ProjectTorRuntimeManifest -Runtime $runtime
+    return $runtime
+}
+
+function Update-ProjectTorBridgeConfig {
+    param([object]$Release)
+    $managedConfigPath = Join-Path $TorExpertRoot "pt_config.json"
+    if ($env:DARKWEB_TOR_PT_CONFIG_PATH -and
+        [System.IO.Path]::GetExtension($env:DARKWEB_TOR_PT_CONFIG_PATH) -ieq ".json" -and
+        (Test-Path -LiteralPath $env:DARKWEB_TOR_PT_CONFIG_PATH -PathType Leaf) -and
+        ([System.IO.Path]::GetFullPath($env:DARKWEB_TOR_PT_CONFIG_PATH) -ine [System.IO.Path]::GetFullPath($managedConfigPath))) {
+        return (Resolve-Path -LiteralPath $env:DARKWEB_TOR_PT_CONFIG_PATH).Path
+    }
+    New-Item -ItemType Directory -Force -Path $TorExpertRoot | Out-Null
+    $updated = $false
+    $git = Resolve-OptionalCommand "git"
+    if ($Release -and $git -and $env:DARKWEB_TOR_BRIDGE_AUTO_UPDATE -ne "0") {
+        $sourceCache = Join-Path $TorExpertRoot "bridge-config-source"
+        $tempConfig = Join-Path $TorExpertRoot "pt_config.json.tmp"
+        try {
+            if (-not (Test-Path -LiteralPath (Join-Path $sourceCache ".git"))) {
+                New-Item -ItemType Directory -Force -Path $sourceCache | Out-Null
+                & $git -C $sourceCache init --quiet
+                & $git -C $sourceCache remote add origin $TorBrowserBuildRepo
+            }
+            & $git -C $sourceCache fetch --quiet --depth 1 --filter=blob:none origin "refs/tags/$($Release.GitTag)"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not fetch Tor Browser build tag $($Release.GitTag)."
+            }
+            $configText = (& $git -C $sourceCache show "FETCH_HEAD:projects/tor-expert-bundle/pt_config.json") -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not read the Tor bridge configuration from $($Release.GitTag)."
+            }
+            $configPayload = $configText | ConvertFrom-Json
+            if (-not $configPayload.bridges) {
+                throw "The downloaded Tor bridge configuration is invalid."
+            }
+            [System.IO.File]::WriteAllText($tempConfig, $configText, (New-Object System.Text.UTF8Encoding($false)))
+            Move-Item -LiteralPath $tempConfig -Destination $TorBridgePtConfigPath -Force
+            $updated = $true
+            Write-Info "Built-in bridge configuration updated from official Tor release $($Release.Version)."
+        }
+        catch {
+            Write-Warn "Built-in bridge configuration update failed: $($_.Exception.Message)"
+        }
+    }
+    if (-not $updated -and -not (Test-Path -LiteralPath $TorBridgePtConfigPath -PathType Leaf)) {
+        Copy-Item -LiteralPath $BundledTorPtConfigPath -Destination $TorBridgePtConfigPath
+    }
+    return (Resolve-Path -LiteralPath $TorBridgePtConfigPath).Path
 }
 
 function Ensure-TorBridgeRuntime {
@@ -421,11 +769,50 @@ function Ensure-TorBridgeRuntime {
         return
     }
 
+    $release = $null
+    $projectRuntime = Get-InstalledProjectTorRuntime
+    $needsUpdateCheck = -not $projectRuntime
+    if ($projectRuntime -and $projectRuntime.CheckedAt) {
+        try {
+            $needsUpdateCheck = ([DateTime]::Parse($projectRuntime.CheckedAt).ToUniversalTime() -lt [DateTime]::UtcNow.AddDays(-1))
+        }
+        catch {
+            $needsUpdateCheck = $true
+        }
+    }
+    elseif ($projectRuntime) {
+        $needsUpdateCheck = $true
+    }
+    if ($env:DARKWEB_TOR_BRIDGE_AUTO_INSTALL -ne "0" -and $needsUpdateCheck) {
+        try {
+            $release = Get-TorReleaseInfo
+            $projectRuntime = Install-ProjectTorRuntime -Release $release
+        }
+        catch {
+            Write-Warn "Tor Expert Bundle auto-install/update failed: $($_.Exception.Message)"
+            $projectRuntime = Get-InstalledProjectTorRuntime
+        }
+    }
+    if (-not $release -and $env:DARKWEB_TOR_BRIDGE_AUTO_UPDATE -ne "0" -and $needsUpdateCheck) {
+        try {
+            $release = Get-TorReleaseInfo
+        }
+        catch {
+            Write-Warn "Could not check the current Tor release: $($_.Exception.Message)"
+        }
+    }
+    $bridgeConfig = Update-ProjectTorBridgeConfig -Release $release
+    Set-UserEnv -Name "DARKWEB_TOR_PT_CONFIG_PATH" -Value $bridgeConfig
+
+    if ($projectRuntime) {
+        $script:TorBridgeTorExecutable = $projectRuntime.TorExecutable
+        $script:TorBridgeTransportExecutable = $projectRuntime.TransportExecutable
+    }
     $torExecutable = Resolve-TorBridgeTorExecutable
     if (-not $torExecutable) {
         $script:TorBridgeTorExecutable = ""
         $script:TorBridgeTransportExecutable = ""
-        Write-Warn "Tor bridge runtime not found. Install Tor Browser or Tor Expert Bundle before using built-in bridges on Windows."
+        Write-Warn "Tor bridge runtime is unavailable. The project could not install or recover its private Tor Expert Bundle."
         return
     }
 
@@ -437,7 +824,7 @@ function Ensure-TorBridgeRuntime {
     $transportExecutable = Resolve-TorBridgeTransportExecutable -TorExecutable $torExecutable
     if (-not $transportExecutable) {
         $script:TorBridgeTransportExecutable = ""
-        Write-Warn "Tor was found at $torExecutable, but no pluggable transport was found. Install Tor Browser with Snowflake or set DARKWEB_TOR_TRANSPORT_EXECUTABLE."
+        Write-Warn "Tor was found at $torExecutable, but no pluggable transport was found. Retry the project runtime update or set DARKWEB_TOR_TRANSPORT_EXECUTABLE."
         return
     }
 
@@ -630,7 +1017,7 @@ function Test-DarkwebApiReady {
 function Test-DarkwebFrontendReady {
     try {
         $response = Invoke-WebRequest -Uri $FrontendUrl -UseBasicParsing -TimeoutSec 3
-        $htmlReady = ($response.Content -match "全球威胁情报监控系统" -or $response.Content -match "/src/main.js")
+        $htmlReady = $response.Content.Contains($NewUiMarker) -and $response.Content.Contains('/src/main.js')
         if (-not $htmlReady) {
             return $false
         }
@@ -1741,6 +2128,10 @@ function Ensure-Environment {
     if (-not (Test-Path -LiteralPath (Join-Path $DashboardRoot "package.json"))) {
         Stop-WithError "Dashboard package.json not found."
     }
+    $dashboardIndex = Join-Path $DashboardRoot "index.html"
+    if (-not (Test-Path -LiteralPath $dashboardIndex) -or -not (Get-Content -LiteralPath $dashboardIndex -Raw).Contains($NewUiMarker)) {
+        Stop-WithError "Xuanjian new UI was not found under $DashboardRoot."
+    }
 
     Ensure-Directory $RuntimeDir
     Ensure-Directory $LogDir
@@ -1863,6 +2254,139 @@ function Stop-Services {
     Write-Info "Services stopped"
 }
 
+function Stop-TorBridgeForUninstall {
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+        $pythonCode = "from darkweb_collector.tor_bridge_control import stop_tor_bridge; stop_tor_bridge()"
+        try {
+            Push-Location $CollectorRoot
+            & $VenvPython -c $pythonCode *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return
+            }
+        }
+        catch {
+            Write-Warn "Tor bridge process could not be stopped cleanly: $($_.Exception.Message)"
+        }
+        finally {
+            Pop-Location
+        }
+    }
+
+    $pidPath = Join-Path $DefaultTorBridgeRuntimeDir "tor.pid"
+    if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+        return
+    }
+    $pidText = (Get-Content -LiteralPath $pidPath -Raw).Trim()
+    $pidValue = 0
+    if (-not [int]::TryParse($pidText, [ref]$pidValue) -or $pidValue -le 0) {
+        return
+    }
+    $processRows = @(Get-ProcessRows)
+    $process = $processRows | Where-Object { [int]$_.ProcessId -eq $pidValue } | Select-Object -First 1
+    $managedTorrc = Join-Path $DefaultTorBridgeRuntimeDir "torrc"
+    if ($process -and ([string]$process.CommandLine).IndexOf($managedTorrc, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $processRowMap = New-ProcessRowMap -ProcessRows $processRows
+        Stop-ProcessTree -ProcessId $pidValue -ProcessRows $processRows -ProcessRowMap $processRowMap -Label "Tor bridge"
+    }
+    elseif ($process) {
+        Write-Warn "Preserving PID $pidValue because it is not the managed Tor bridge process"
+    }
+}
+
+function Remove-DarkwebRegistration {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+    param()
+
+    Remove-UserPathEntry -Path $CommandBinDir -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DarkwebCommandPath -ExpectedPath (Join-Path $DefaultUserDataDir "bin\darkweb.cmd") -Label "darkweb command" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-EmptyManagedDirectory -Path $CommandBinDir -ExpectedPath (Join-Path $DefaultUserDataDir "bin") -WhatIf:$WhatIfPreference -Confirm:$false
+
+    $managedVariables = @(
+        @{ Name = "DARKWEB_PROJECT_ROOT"; Values = @($ProjectRoot) },
+        @{ Name = "DARKWEB_HOME"; Values = @($ProjectRoot) },
+        @{ Name = "DARKWEB_COLLECTOR_ROOT"; Values = @($CollectorRoot) },
+        @{ Name = "DARKWEB_DASHBOARD_ROOT"; Values = @($DashboardRoot) },
+        @{ Name = "DARKWEB_COLLECTOR_DB_PATH"; Values = @($CollectorDbPath, (Join-Path $DefaultUserDataDir "collector.db")) },
+        @{ Name = "DARKWEB_COLLECTOR_SITES_FILE"; Values = @($CollectorSitesFile, (Join-Path $CollectorRoot "sites.yaml")) },
+        @{ Name = "DARKWEB_COLLECTOR_OUTPUT_ROOT"; Values = @($CollectorOutputRoot, $ProjectCollectorOutputRoot, $LegacyCollectorOutputRoot) },
+        @{ Name = "DARKWEB_AUTH_PASSWORD_FILE"; Values = @($AuthPasswordFile, (Join-Path $DefaultUserDataDir "auth-password.txt")) },
+        @{ Name = "REDIS_URL"; Values = @($RedisUrl) },
+        @{ Name = "DARKWEB_API_PORT"; Values = @([string]$ApiPort) },
+        @{ Name = "DARKWEB_API_TARGET"; Values = @($ApiBaseUrl) },
+        @{ Name = "DARKWEB_FRONTEND_PORT"; Values = @([string]$FrontendPort) },
+        @{ Name = "DARKWEB_FRONTEND_URL"; Values = @($FrontendUrl) },
+        @{ Name = "PANSOU_API_BASE"; Values = @($PansouApiBase) }
+    )
+    foreach ($variable in $managedVariables) {
+        Remove-ManagedUserEnv -Name $variable.Name -ExpectedValues $variable.Values -WhatIf:$WhatIfPreference -Confirm:$false
+    }
+    foreach ($name in @("DARKWEB_TOR_EXECUTABLE", "DARKWEB_TOR_TRANSPORT_EXECUTABLE", "DARKWEB_TOR_PT_CONFIG_PATH")) {
+        Remove-ManagedUserEnv -Name $name -ExpectedRoot $DefaultTorExpertRoot -WhatIf:$WhatIfPreference -Confirm:$false
+    }
+}
+
+function Uninstall-Darkweb {
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "Low")]
+    param(
+        [ValidateSet("keep-data", "purge-data")]
+        [string]$Mode,
+        [switch]$ForceDelete
+    )
+
+    if ($Mode -eq "purge-data" -and -not $ForceDelete -and -not $WhatIfPreference) {
+        $answer = Read-Host "This permanently deletes the darkweb database, collected output, sessions, and local account settings. Type DELETE to continue"
+        if ($answer -cne "DELETE") {
+            Stop-WithError "Uninstall cancelled; no data was deleted"
+        }
+    }
+
+    if ($PSCmdlet.ShouldProcess("darkweb managed services", "Stop before uninstall")) {
+        Stop-TorBridgeForUninstall
+        Stop-Services
+    }
+
+    Remove-DarkwebRegistration -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $VenvDir -ExpectedPath (Join-Path $CollectorRoot "venv") -Label "Python virtual environment" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DashboardNodeModulesDir -ExpectedPath (Join-Path $DashboardRoot "node_modules") -Label "dashboard dependencies" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DashboardDistDir -ExpectedPath (Join-Path $DashboardRoot "dist") -Label "dashboard build output" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $RuntimeDir -ExpectedPath (Join-Path $CollectorRoot ".runtime\windows") -Label "Windows runtime files" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DefaultTorBridgeRuntimeDir -ExpectedPath (Join-Path $DefaultUserDataDir "tor_bridge_runtime") -Label "Tor bridge runtime files" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DefaultTorBridgeAutoRuntimeDir -ExpectedPath (Join-Path $DefaultUserDataDir "tor_bridge_runtime_auto") -Label "Tor bridge probe runtime files" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DefaultTorExpertRoot -ExpectedPath (Join-Path $DefaultUserDataDir "tor-expert") -Label "project Tor Expert Bundle" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DefaultNpmCacheDir -ExpectedPath (Join-Path $DefaultUserDataDir "npm-cache") -Label "project npm cache" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path (Join-Path $CollectorRoot "dump.rdb") -ExpectedPath (Join-Path $CollectorRoot "dump.rdb") -Label "project Redis cache" -WhatIf:$WhatIfPreference -Confirm:$false
+
+    if (-not (Test-SamePath -Left $TorExpertRoot -Right $DefaultTorExpertRoot)) {
+        Write-Warn "Preserving custom Tor runtime outside the managed data directory: $TorExpertRoot"
+    }
+
+    if ($Mode -eq "purge-data") {
+        if (-not (Test-SamePath -Left $CollectorOutputRoot -Right $ProjectCollectorOutputRoot) -and
+            -not (Test-SamePath -Left $CollectorOutputRoot -Right $LegacyCollectorOutputRoot)) {
+            Write-Warn "Preserving custom output directory outside managed locations: $CollectorOutputRoot"
+        }
+        if (-not (Test-SamePath -Left $CollectorDbPath -Right (Join-Path $DefaultUserDataDir "collector.db")) -and
+            -not (Test-SamePath -Left $CollectorDbPath -Right $ProjectCollectorDbPath)) {
+            Write-Warn "Preserving custom database outside managed locations: $CollectorDbPath"
+        }
+
+        Remove-ManagedPath -Path $ProjectCollectorOutputRoot -ExpectedPath (Join-Path $CollectorRoot "output") -Label "collected output" -WhatIf:$WhatIfPreference -Confirm:$false
+        Remove-ManagedPath -Path $ProjectCollectorOutputArchiveRoot -ExpectedPath (Join-Path $CollectorRoot "output-archive") -Label "archived collected output" -WhatIf:$WhatIfPreference -Confirm:$false
+        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
+            $dbFile = "$ProjectCollectorDbPath$suffix"
+            Remove-ManagedPath -Path $dbFile -ExpectedPath ((Join-Path $CollectorRoot "data\collector.db") + $suffix) -Label "project database file" -WhatIf:$WhatIfPreference -Confirm:$false
+        }
+        Remove-ManagedPath -Path $DefaultUserDataDir -ExpectedPath (Join-Path $LocalAppDataRoot "DarkWebThreatIntel") -Label "darkweb user data" -WhatIf:$WhatIfPreference -Confirm:$false
+        Write-Info "Uninstall complete: managed runtime and data were removed"
+    }
+    else {
+        Write-Info "Uninstall complete: data was preserved"
+        Write-Info "Preserved database: $CollectorDbPath"
+        Write-Info "Preserved collected output: $CollectorOutputRoot"
+    }
+    Write-Info "The source checkout and shared system dependencies were not removed"
+}
+
 function Show-Status {
     Load-RuntimePorts
     $records = @(Get-ServiceRecords)
@@ -1904,7 +2428,7 @@ function Show-Status {
         Write-Info "tor-bridge-runtime: missing transport plugin"
     }
     else {
-        Write-Info "tor-bridge-runtime: missing Tor Browser or Tor Expert Bundle"
+        Write-Info "tor-bridge-runtime: project Tor Expert Bundle unavailable"
     }
 
     if (Test-DarkwebApiReady) {
@@ -1931,4 +2455,5 @@ switch ($Action) {
         Write-Info "Environment is ready. Run 'darkweb' to start the system."
     }
     "register" { Register-DarkwebCommand }
+    "uninstall" { Uninstall-Darkweb -Mode $UninstallMode -ForceDelete:$Force -WhatIf:$WhatIfPreference -Confirm:$false }
 }

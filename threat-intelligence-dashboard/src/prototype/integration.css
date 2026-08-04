@@ -1,0 +1,192 @@
+.library-data-table {
+  width: 100%;
+  min-width: 1240px;
+  table-layout: fixed;
+}
+
+.library-data-table th,
+.library-data-table td {
+  overflow: hidden;
+}
+
+.library-data-table th:nth-child(1) { width: 26%; }
+.library-data-table th:nth-child(2) { width: 10%; }
+.library-data-table th:nth-child(3) { width: 8%; }
+.library-data-table th:nth-child(4) { width: 5%; }
+.library-data-table th:nth-child(5) { width: 11%; }
+.library-data-table th:nth-child(6) { width: 8%; }
+.library-data-table th:nth-child(7) { width: 7%; }
+.library-data-table th:nth-child(8) { width: 8%; }
+.library-data-table th:nth-child(9) { width: 12%; }
+.library-data-table th:nth-child(10) { width: 5%; }
+
+.library-data-table .table-title {
+  display: table-cell;
+  min-width: 0;
+  max-width: 0;
+  white-space: normal;
+}
+
+.library-data-table .document-title-cell {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+.library-data-table .document-title-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-data-table .source-site {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.library-data-table .source-site > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-legend > div > span:not(.source-logo) {
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.runtime-data-state {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runtime-data-state[data-state="error"] {
+  border-color: color-mix(in oklch, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.runtime-data-state[hidden] {
+  display: none;
+}
+
+.runtime-disabled {
+  opacity: .5;
+  cursor: not-allowed !important;
+}
+
+.situation-donut::before {
+  background: var(--runtime-donut, conic-gradient(var(--border) 0 100%));
+}
+
+.runtime-file-list {
+  display: grid;
+  gap: 4px;
+}
+
+.split-rail.runtime-single-column {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.runtime-file-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.runtime-file-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.runtime-file-row small,
+.runtime-file-empty {
+  color: var(--muted);
+}
+
+.runtime-file-icon {
+  color: var(--secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.runtime-mirror-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.mirror-image-slot:has(> .runtime-mirror-image) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: clamp(220px, 55vh, 620px);
+  min-height: 220px;
+  aspect-ratio: auto;
+  padding: 12px;
+  overflow: hidden;
+}
+
+.mirror-image-slot > .runtime-mirror-image {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.detail-hero > div:first-child {
+  min-width: 0;
+}
+
+.detail-hero h1,
+.detail-breadcrumbs {
+  overflow-wrap: anywhere;
+}
+
+/* Keep the wide monitoring result tables inside their own scroll container on
+   narrow screens instead of letting their min-content width stretch the page. */
+.page-monitoring .app-main,
+.page-monitoring .monitor-surface,
+.page-monitoring .monitor-kpi-grid,
+.page-monitoring .monitor-visual-grid,
+.page-monitoring .monitor-trend-card,
+.page-monitoring .monitor-donut-card,
+.page-monitoring .monitor-table-card,
+.page-monitoring .monitor-table-card .table-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.page-monitoring .monitor-table-card .table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.page-monitoring .monitor-trend-chart,
+.page-monitoring .code-trend-chart {
+  max-width: 100%;
+}

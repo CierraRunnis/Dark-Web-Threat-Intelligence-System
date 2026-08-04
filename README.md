@@ -19,7 +19,6 @@
 ├── darkweb_collector/              # 后端 API、采集器、任务队列、运行脚本
 │   ├── scripts/                    # Windows / WSL 启动脚本和采集辅助脚本
 │   ├── src/darkweb_collector/      # 后端应用源码
-│   ├── tests/                      # 后端测试
 │   └── requirements.txt            # Python 依赖
 ├── threat-intelligence-dashboard/  # 前端工作台
 │   ├── src/                        # 前端源码
@@ -39,10 +38,7 @@
 
 使用 Windows / WSL 启动脚本时，脚本会尽量自动检测和补齐缺失依赖。
 
-如需使用内置 Tor 网桥：
-
-- Linux / WSL：需要 `tor`、`snowflake-client`、`obfs4proxy`。
-- Windows：需要安装 Tor Browser 或 Tor Expert Bundle，并能检测到 `tor.exe` 和 `lyrebird.exe` / `snowflake-client.exe` / `obfs4proxy.exe`。
+如需使用内置 Tor 网桥，Windows、Linux 和 WSL 启动脚本会自动下载、校验并更新项目私有的 Tor Expert Bundle，不要求主机预装 Tor Browser。
 
 ## 手动启动
 
@@ -127,6 +123,33 @@ darkweb stop
 
 Windows 脚本会优先复用本机已有环境。缺少 Python、Node.js 或 Redis 兼容服务且本机有 `winget` 时，会自动安装 Python 3.12、Node.js LTS 和 Memurai Developer；没有 `winget` 时，需要按错误提示手动安装缺失组件。
 
+## 安全卸载
+
+默认使用“保留数据”模式，只停止项目服务并移除 `darkweb` 命令、项目虚拟环境、前端依赖、运行时文件和项目私有 Tor 组件；数据库、采集输出、登录会话和账户配置会保留，重新安装后可继续使用：
+
+```powershell
+darkweb uninstall
+# 等同于
+darkweb uninstall keep-data
+```
+
+需要同时删除数据库、采集输出、登录会话和账户配置时，必须显式选择“彻底删除数据”并按提示输入 `DELETE`；自动化环境可增加 `-Force`：
+
+```powershell
+darkweb uninstall purge-data
+darkweb uninstall purge-data -Force
+```
+
+WSL / Linux 使用相同的两种模式：
+
+```bash
+darkweb uninstall keep-data
+darkweb uninstall purge-data
+darkweb uninstall purge-data --yes
+```
+
+卸载只处理项目明确管理的路径。指向项目目录和默认数据目录之外的自定义数据库、输出目录或 Tor 运行时会保留并给出提示；源码目录和 Python、Node.js、Redis、Docker 等共享系统依赖不会被删除。Windows 可用 `-WhatIf`、WSL / Linux 可用 `--dry-run` 预览操作。
+
 ## 一键更新
 
 登录系统后，侧边栏的版本信息区域提供“一键更新”按钮。点击后系统会：
@@ -177,12 +200,13 @@ $env:DARKWEB_GITHUB_TOKEN_FILE = "C:\ProgramData\DarkWebThreatIntel\github-token
 socks5h://127.0.0.1:9050
 ```
 
-Windows 脚本会自动检测 Tor Browser / Tor Expert Bundle 中的 `tor.exe` 和传输插件，并写入：
+Windows 脚本会从 Tor Project 官方发布源自动安装并每天检查项目私有的 Tor Expert Bundle，同时从对应的官方构建标签更新内置网桥配置，并写入：
 
 - `DARKWEB_TOR_EXECUTABLE`
 - `DARKWEB_TOR_TRANSPORT_EXECUTABLE`
+- `DARKWEB_TOR_PT_CONFIG_PATH`
 
-Windows 不会静默安装 Tor Browser。如需使用内置网桥，请先安装 Tor Browser，或在页面 / 环境变量中填写 Tor 可执行文件路径。
+默认安装位置是 `%LOCALAPPDATA%\DarkWebThreatIntel\tor-expert`。本机 Tor Browser 仅作为自动安装失败时的兼容回退；项目不会读取其 `Browser/omni.ja`。设置 `DARKWEB_TOR_BRIDGE_AUTO_INSTALL=0` 或 `DARKWEB_TOR_BRIDGE_AUTO_UPDATE=0` 可以分别关闭运行时安装或更新检查。
 
 ## 运行数据
 

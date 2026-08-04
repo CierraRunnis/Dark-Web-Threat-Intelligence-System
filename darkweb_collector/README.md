@@ -66,7 +66,7 @@ pip install -r requirements.txt
 
 ### 2. Tor 环境
 
-如果要抓取 `.onion` 站点，需要先确保 Windows 侧 Tor Browser 已启动，并且 WSL 可以访问：
+启动脚本会自动安装并更新项目私有的 Tor Expert Bundle，不要求 Windows 侧预装或启动 Tor Browser。默认由脚本设置 SOCKS 地址；仅在连接外部 Tor 时才需要手动覆盖：
 
 ```bash
 export TOR_SOCKS_HOST=127.0.0.1
@@ -130,6 +130,12 @@ bash scripts/start_all_services_wsl.sh attach
 
 # 停止
 bash scripts/start_all_services_wsl.sh stop
+
+# 卸载运行组件但保留数据库、采集输出和登录配置
+bash scripts/start_all_services_wsl.sh uninstall keep-data
+
+# 彻底删除项目管理的数据（需要输入 DELETE）
+bash scripts/start_all_services_wsl.sh uninstall purge-data
 ```
 
 默认启动后可访问：

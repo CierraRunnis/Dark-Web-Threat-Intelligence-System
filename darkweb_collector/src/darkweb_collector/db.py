@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import os
@@ -150,6 +151,17 @@ ON crawl_jobs(site_name, job_type, status);
 
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_finished_at
 ON crawl_jobs(finished_at);
+
+CREATE TABLE IF NOT EXISTS site_connectivity_probes (
+    site_name TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    available INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    last_success_at TEXT,
+    failure_reason TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT ''
+);
 
 CREATE TABLE IF NOT EXISTS vulnerability_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -723,6 +735,58 @@ def connect(db_path: Path) -> sqlite3.Connection:
 def get_db_connection() -> sqlite3.Connection:
     """Get database connection"""
     return connect(default_db_path())
+
+
+def get_site_connectivity_probe_map(connection: sqlite3.Connection) -> dict[str, dict]:
+    rows = connection.execute(
+        """
+        SELECT site_name, url, available, status, checked_at, last_success_at, failure_reason, error
+        FROM site_connectivity_probes
+        """
+    ).fetchall()
+    return {
+        str(row["site_name"]): {
+            **dict(row),
+            "available": bool(row["available"]),
+        }
+        for row in rows
+    }
+
+
+def upsert_site_connectivity_probe(connection: sqlite3.Connection, payload: dict) -> None:
+    site_name = str(payload.get("site_name") or "").strip()
+    checked_at = str(payload.get("checked_at") or "").strip()
+    if not site_name or not checked_at:
+        raise ValueError("site connectivity probe requires site_name and checked_at")
+    available = bool(payload.get("available"))
+    connection.execute(
+        """
+        INSERT INTO site_connectivity_probes (
+            site_name, url, available, status, checked_at, last_success_at, failure_reason, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(site_name) DO UPDATE SET
+            url = excluded.url,
+            available = excluded.available,
+            status = excluded.status,
+            checked_at = excluded.checked_at,
+            last_success_at = CASE
+                WHEN excluded.available = 1 THEN excluded.checked_at
+                ELSE site_connectivity_probes.last_success_at
+            END,
+            failure_reason = excluded.failure_reason,
+            error = excluded.error
+        """,
+        (
+            site_name,
+            str(payload.get("url") or ""),
+            int(available),
+            str(payload.get("status") or ("available" if available else "unavailable")),
+            checked_at,
+            checked_at if available else None,
+            str(payload.get("failure_reason") or ""),
+            str(payload.get("error") or ""),
+        ),
+    )
 
 
 def insert_collection_run(connection: sqlite3.Connection, payload: dict) -> int:
@@ -1365,6 +1429,61 @@ def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str
     return dict(row) if row else None
 
 
+def _parse_crawl_job_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def reconcile_stale_crawl_jobs(
+    connection: sqlite3.Connection,
+    *,
+    now: datetime | None = None,
+    running_timeout_minutes: int = 30,
+    enqueued_timeout_minutes: int = 60,
+) -> int:
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    observed_at = observed_at.astimezone(timezone.utc)
+
+    rows = connection.execute(
+        """
+        SELECT job_id, job_type, status, enqueued_at, started_at
+        FROM crawl_jobs
+        WHERE status IN ('enqueued', 'running') AND finished_at IS NULL
+        """
+    ).fetchall()
+    stale_jobs: list[tuple[str, str, str]] = []
+    for row in rows:
+        status = str(row["status"] or "")
+        timestamp = _parse_crawl_job_timestamp(row["started_at"] if status == "running" else row["enqueued_at"])
+        timeout_minutes = running_timeout_minutes if status == "running" else enqueued_timeout_minutes
+        if timestamp is None or timestamp >= observed_at - timedelta(minutes=timeout_minutes):
+            continue
+        job_type = str(row["job_type"] or "").strip()
+        task_label = f"{job_type} task" if job_type else "task"
+        stale_jobs.append(
+            (observed_at.isoformat(), f"stale {task_label} auto-cleared", str(row["job_id"]))
+        )
+
+    connection.executemany(
+        """
+        UPDATE crawl_jobs
+        SET status = 'stale', finished_at = ?, error_message = ?
+        WHERE job_id = ? AND status IN ('enqueued', 'running') AND finished_at IS NULL
+        """,
+        stale_jobs,
+    )
+    return len(stale_jobs)
+
+
 def get_active_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
     cursor = connection.execute(
         """
@@ -1798,6 +1917,33 @@ def upsert_exposure_watchlist(connection: sqlite3.Connection, payload: dict) -> 
         values,
     )
     return int(cursor.lastrowid)
+
+
+def delete_exposure_watchlist(connection: sqlite3.Connection, watchlist_id: int) -> None:
+    target_id = int(watchlist_id)
+    connection.execute(
+        """
+        DELETE FROM document_hit_reviews
+        WHERE hit_id IN (
+            SELECT id FROM document_hits WHERE watchlist_id = ?
+        )
+        """,
+        (target_id,),
+    )
+    connection.execute(
+        """
+        DELETE FROM document_hit_snapshots
+        WHERE hit_id IN (
+            SELECT id FROM document_hits WHERE watchlist_id = ?
+        )
+        """,
+        (target_id,),
+    )
+    connection.execute("DELETE FROM document_hits WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM exposure_scan_runs WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM netdisk_source_states WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM exposure_watch_terms WHERE watchlist_id = ?", (target_id,))
+    connection.execute("DELETE FROM exposure_watchlists WHERE id = ?", (target_id,))
 
 
 def list_exposure_watch_terms(connection: sqlite3.Connection, watchlist_id: int | None = None) -> list[dict]:

@@ -38,11 +38,13 @@ from darkweb_collector.api_actions import (
     get_code_monitoring_continuous_status,
     get_continuous_dispatch_status,
     get_netdisk_monitoring_continuous_status,
+    probe_site_connectivity,
     get_ransomware_sync_status,
     get_vulnerability_sync_status,
     start_code_monitoring_dispatch,
     start_netdisk_monitoring_dispatch,
     start_ransomware_sync_dispatch,
+    start_site_connectivity_monitor,
     start_continuous_dispatch,
     start_vulnerability_sync_dispatch,
     stop_code_monitoring_dispatch,
@@ -65,6 +67,7 @@ from darkweb_collector.document_exposure import (
     list_watchlists_payload,
     netdisk_source_policy,
     reset_netdisk_source_states_payload,
+    delete_watchlist_payload,
     save_watchlist_payload,
     scan_watchlist_once,
 )
@@ -85,6 +88,7 @@ from darkweb_collector.document_exposure_sessions import (
     launch_platform_login,
     remove_platform_session,
     save_platform_session,
+    visible_platform_login_available,
     verify_platform_session,
 )
 from darkweb_collector.document_exposure_platforms import list_exposure_platforms
@@ -101,11 +105,16 @@ from darkweb_collector.remote_browser_sessions import (
     finish_remote_browser_login,
     get_remote_browser_state,
     proxy_remote_browser_rfb,
+    proxy_remote_browser_stream,
     start_remote_browser_login,
 )
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
-from darkweb_collector.db import get_db_connection, list_monitoring_keyword_notifications
+from darkweb_collector.db import (
+    get_db_connection,
+    list_monitoring_keyword_notifications,
+    reconcile_stale_crawl_jobs,
+)
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
 from darkweb_collector.runtime import output_root
 from darkweb_collector.tor_bridge_control import (
@@ -309,6 +318,14 @@ def _run_payload_warmup() -> None:
 @app.on_event("startup")
 def warm_payloads_on_startup() -> None:
     try:
+        with get_db_connection() as connection:
+            reconciled_jobs = reconcile_stale_crawl_jobs(connection)
+            connection.commit()
+        if reconciled_jobs:
+            logger.warning("reconciled %s stale crawl jobs during API startup", reconciled_jobs)
+    except Exception:
+        logger.exception("failed to reconcile stale crawl jobs during API startup")
+    try:
         ensure_wecom_aibot_listener()
     except Exception:
         logger.exception("failed to start WeCom AI Bot listener")
@@ -316,6 +333,10 @@ def warm_payloads_on_startup() -> None:
         ensure_netdisk_source_health_defaults()
     except Exception:
         logger.exception("failed to initialize netdisk source health records")
+    try:
+        start_site_connectivity_monitor()
+    except Exception:
+        logger.exception("failed to start daily site connectivity monitor")
     global _warmup_started
     if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
         logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
@@ -408,6 +429,14 @@ def auth_change_password(payload: AuthPasswordChangeRequest) -> dict[str, bool]:
 @app.get("/api/intelligence")
 def intelligence() -> dict:
     return _reload_api_modules().build_intelligence_payload()
+
+
+@app.get("/api/intelligence/{page}")
+def intelligence_page(page: str) -> dict:
+    try:
+        return _reload_api_modules().build_intelligence_page_payload(page)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/jobs")
@@ -551,6 +580,7 @@ class ExposureWatchlistRequest(BaseModel):
     file_types: list[str] = []
     page_limit: int = 4
     detail_fetch: bool = True
+    source_policies: dict[str, dict[str, object]] = Field(default_factory=dict)
     terms: list[ExposureWatchTermRequest] = []
 
 
@@ -783,6 +813,14 @@ def set_site_enabled(site_name: str, payload: SetSiteEnabledRequest) -> dict:
     return update_site_enabled(site_name=site_name, enabled=payload.enabled)
 
 
+@app.post("/api/sites/{site_name}/probe")
+def probe_site(site_name: str) -> dict:
+    try:
+        return probe_site_connectivity(site_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/monitoring/keywords")
 def monitoring_keywords() -> list[dict]:
     _reload_api_modules()
@@ -874,6 +912,11 @@ async def platform_session_remote_login_rfb(websocket: WebSocket, session_id: st
     await proxy_remote_browser_rfb(session_id, websocket)
 
 
+@app.websocket("/api/platform-sessions/remote-login/{session_id}/stream")
+async def platform_session_remote_login_stream(websocket: WebSocket, session_id: str) -> None:
+    await proxy_remote_browser_stream(session_id, websocket)
+
+
 @app.post("/api/platform-sessions/remote-login/{session_id}/control")
 def platform_session_remote_login_control(session_id: str, payload: RemoteBrowserActionRequest) -> dict:
     try:
@@ -946,6 +989,35 @@ def exposure_watchlists() -> list[dict]:
 @app.post("/api/exposure-watchlists")
 def save_exposure_watchlist(payload: ExposureWatchlistRequest) -> dict:
     return save_watchlist_payload(payload.model_dump())
+
+
+@app.delete("/api/exposure-watchlists/{watchlist_id}")
+def delete_exposure_watchlist_route(watchlist_id: int) -> dict:
+    try:
+        return delete_watchlist_payload(watchlist_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/platform-sessions/{platform}/adaptive-login/start")
+def platform_session_adaptive_login_start(platform: str) -> dict:
+    fallback_reason = "interactive desktop browser is unavailable"
+    if visible_platform_login_available():
+        try:
+            return launch_platform_login(platform)
+        except Exception as exc:
+            fallback_reason = str(exc) or "visible browser startup failed"
+    try:
+        payload = start_remote_browser_login(platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        **payload,
+        "mode": "embedded_browser",
+        "fallback_reason": fallback_reason,
+    }
 
 
 @app.post("/api/exposure-watchlists/{watchlist_id}/scan")

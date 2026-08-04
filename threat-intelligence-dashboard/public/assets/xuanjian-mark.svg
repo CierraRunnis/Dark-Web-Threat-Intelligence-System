@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title desc">
+  <title id="title">玄鉴检测平台图标</title>
+  <desc id="desc">左亮右暗的双色红色圆形内，由扫描取景框、中心探测目标与双层雷达波纹组成</desc>
+  <defs>
+    <linearGradient id="brand-field" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d71422"/>
+      <stop offset="49.9%" stop-color="#d71422"/>
+      <stop offset="50%" stop-color="#aa0d18"/>
+      <stop offset="100%" stop-color="#aa0d18"/>
+    </linearGradient>
+  </defs>
+  <circle cx="24" cy="24" r="22" fill="url(#brand-field)"/>
+  <g>
+    <path d="M18 13h-3a2 2 0 0 0-2 2v3M30 13h3a2 2 0 0 1 2 2v3M13 26v3a2 2 0 0 0 2 2h3M35 26v3a2 2 0 0 1-2 2h-3" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="24" cy="22" r="5.7" fill="none" stroke="#fff" stroke-width="2.3"/>
+    <circle cx="24" cy="22" r="2.3" fill="#fff"/>
+    <path d="M18.5 33.5Q24 36.9 29.5 33.5M16.5 37.4Q24 41.8 31.5 37.4" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  </g>
+</svg>

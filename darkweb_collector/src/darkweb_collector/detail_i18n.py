@@ -77,10 +77,22 @@ def _split_for_translation(text: str, *, max_chunk_length: int = 900) -> list[st
     chunks: list[str] = []
     current = ""
     for sentence in sentences:
-        candidate = f"{current} {sentence}".strip()
+        remaining = sentence
+        while len(remaining) > max_chunk_length:
+            split_at = remaining.rfind(" ", 0, max_chunk_length + 1)
+            if split_at <= 0:
+                split_at = max_chunk_length
+            part = remaining[:split_at].strip()
+            if current:
+                chunks.append(current)
+                current = ""
+            if part:
+                chunks.append(part)
+            remaining = remaining[split_at:].strip()
+        candidate = f"{current} {remaining}".strip()
         if current and len(candidate) > max_chunk_length:
             chunks.append(current)
-            current = sentence
+            current = remaining
         else:
             current = candidate
     if current:
@@ -98,8 +110,8 @@ def translate_event_detail_text_with_meta(value: str | None) -> tuple[str, bool,
     with _CACHE_LOCK:
         cache = _load_cache()
         cached = cache.get(raw)
-        if cached:
-            return cached, cached != raw, None
+        if cached and cached != raw:
+            return cached, True, None
 
     translated_parts: list[str] = []
     try:
@@ -114,12 +126,13 @@ def translate_event_detail_text_with_meta(value: str | None) -> tuple[str, bool,
 
     translated = "\n\n".join(part for part in translated_parts if part).strip() or raw
     applied = translated != raw
-    with _CACHE_LOCK:
-        cache = _load_cache()
-        cache[raw] = translated
-        global _CACHE_DIRTY
-        _CACHE_DIRTY = True
-        _save_cache()
+    if applied:
+        with _CACHE_LOCK:
+            cache = _load_cache()
+            cache[raw] = translated
+            global _CACHE_DIRTY
+            _CACHE_DIRTY = True
+            _save_cache()
     return translated, applied, None if applied else "unchanged"
 
 

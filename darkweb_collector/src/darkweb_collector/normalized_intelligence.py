@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from html import unescape
 from hashlib import sha1
 import json
@@ -513,7 +514,7 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-07-13-changan-source-v1"
+NORMALIZATION_VERSION = "2026-07-29-mirror-artifact-v5"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -1206,12 +1207,17 @@ def _filter_country_candidate_domains(domains: list[str], *source_urls: str) -> 
     return list(dict.fromkeys(filtered))
 
 
-def _count_keyword_matches(text: str, keyword: str) -> int:
+@lru_cache(maxsize=None)
+def _keyword_match_pattern(keyword: str) -> re.Pattern[str]:
     escaped = re.escape(keyword.lower())
-    pattern = rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
-    return len(re.findall(pattern, text.lower()))
+    return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])")
 
 
+def _count_keyword_matches(text: str, keyword: str) -> int:
+    return len(_keyword_match_pattern(keyword).findall(text))
+
+
+@lru_cache(maxsize=8192)
 def _infer_industry_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
     scores: dict[str, int] = defaultdict(int)
     sources: dict[str, list[str]] = defaultdict(list)
@@ -1248,6 +1254,7 @@ def _infer_industry_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
     return {"industry": industry, "source": source, "score": scores[industry]}
 
 
+@lru_cache(maxsize=8192)
 def _infer_country_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
     scores: dict[str, int] = defaultdict(int)
     sources: dict[str, list[str]] = defaultdict(list)
@@ -1446,6 +1453,7 @@ def _coerce_resource_list(value: Any) -> list[dict[str, str]]:
     return []
 
 
+@lru_cache(maxsize=None)
 def _site_output_dir(site_name: str) -> Path | None:
     try:
         return get_site_config(site_name).output_dir
@@ -1900,8 +1908,10 @@ def _victim_rows(connection) -> list[dict[str, Any]]:
         """
         SELECT v.id, v.site_name, v.source_url, v.detail_url, v.name, v.display_label, v.domain,
                v.status, v.published_at_utc, v.claimed_size, v.claimed_size_gb, v.content_hash,
-               v.raw_json, vd.text_excerpt, vd.page_title, vd.fetched_at_utc, vd.raw_json AS detail_raw_json
+               v.raw_json, vd.text_excerpt, vd.page_title, vd.fetched_at_utc,
+               cr.collected_at_utc AS last_seen_at_utc, vd.raw_json AS detail_raw_json
         FROM victims v
+        LEFT JOIN collection_runs cr ON cr.id = v.last_seen_run_id
         LEFT JOIN victim_details vd
           ON vd.id = (
               SELECT vd2.id
@@ -2104,9 +2114,15 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
     status = _normalize_label(row.get("status") or raw_json.get("status") or "unknown").lower()
     category = STATUS_LABELS.get(status, _normalize_label(row.get("status")) or "未知")
     detail_text = _normalize_whitespace(row.get("text_excerpt") or detail_raw_json.get("text_excerpt") or raw_json.get("description"))
-    website_url = _normalize_label(raw_json.get("website_url"))
-    location = _normalize_label(raw_json.get("location"))
     detail_url = _normalize_label(row.get("detail_url") or raw_json.get("detail_url"))
+    website_url = _normalize_label(
+        raw_json.get("website_url") or detail_raw_json.get("website") or raw_json.get("website")
+    )
+    if website_url and not re.match(r"^[a-z][a-z0-9+.-]*://", website_url, re.IGNORECASE):
+        website_url = f"https://{website_url.lstrip('/')}"
+    location = _normalize_label(raw_json.get("location"))
+    source_url = _normalize_label(row.get("source_url") or raw_json.get("source_url"))
+    disclosure_url = detail_url or source_url
     domain = _normalize_label(row.get("domain"))
     title = _normalize_label(row.get("display_label")) or victim
     industry_bundle = _infer_industry_bundle(
@@ -2153,9 +2169,10 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
     mirror_resources.extend(local_resources)
     screenshot_resources = _coerce_resource_list(raw_json.get("thumbnails"))
     screenshot_resources.extend(local_screenshots)
-    disclosure_time = row.get("published_at_utc") or row.get("fetched_at_utc") or ""
+    last_seen_at = row.get("last_seen_at_utc") or row.get("fetched_at_utc") or ""
+    disclosure_time = row.get("published_at_utc") or row.get("fetched_at_utc") or last_seen_at
     if isinstance(disclosure_time, str) and disclosure_time.strip().upper() in {"PUBLISHED", "GOING", "TRANSFERING", "TRANSFERRING", "STOPPED"}:
-        disclosure_time = row.get("fetched_at_utc") or ""
+        disclosure_time = row.get("fetched_at_utc") or last_seen_at
     event = {
         "event_id": f"victim:{row['site_name']}:{_event_hash(str(detail_url or victim))}",
         "source_kind": "victim",
@@ -2175,7 +2192,7 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
         "region": region,
         "disclosure_time": disclosure_time,
         "severity": severity,
-        "source_url": detail_url or _normalize_label(row.get("source_url")),
+        "source_url": disclosure_url,
         "detail_text": detail_text,
         "mirror_resources": mirror_resources,
         "screenshot_resources": screenshot_resources,
@@ -2192,8 +2209,9 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
             "claimed_size_gb": row.get("claimed_size_gb"),
             "source": str(row.get("site_name") or ""),
             "source_label": _label_source(row.get("site_name")),
-            "updated_time": row.get("fetched_at_utc") or detail_raw_json.get("fetched_at_utc") or disclosure_time,
+            "updated_time": last_seen_at or detail_raw_json.get("fetched_at_utc") or disclosure_time,
             "published_label": _format_date(disclosure_time),
+            "website_url": website_url,
             "resource_count": len(mirror_resources),
             "country_source": geo_bundle["source"],
             "country_score": geo_bundle["score"],
@@ -2949,10 +2967,11 @@ def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -
     return merged
 
 
-def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
+def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None = None) -> list[dict[str, Any]]:
     source_signature = _build_source_signature(connection)
     domain_cache = _load_domain_enrichment_cache()
-    domain_cache["__remaining__"] = DOMAIN_ENRICHMENT_BUDGET
+    effective_enrichment_budget = DOMAIN_ENRICHMENT_BUDGET if enrichment_budget is None else max(0, int(enrichment_budget))
+    domain_cache["__remaining__"] = effective_enrichment_budget
     base_events: list[dict[str, Any]] = []
     for row in _forum_rows(connection):
         base_events.append(_build_forum_base_event(row, domain_cache=domain_cache))
@@ -2964,7 +2983,7 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
         base_events.append(_build_vulnerability_base_event(row))
 
     _propagate_entity_context(base_events)
-    domain_cache["__remaining__"] = DOMAIN_ENRICHMENT_BUDGET
+    domain_cache["__remaining__"] = effective_enrichment_budget
     _apply_domain_enrichment(base_events, domain_cache)
     _score_events(base_events)
     deduped_events: dict[str, dict[str, Any]] = {}
@@ -3047,9 +3066,14 @@ def refresh_normalized_intelligence(connection) -> list[dict[str, Any]]:
     return refreshed_events
 
 
-def ensure_normalized_intelligence(connection, force: bool = False) -> list[dict[str, Any]]:
+def ensure_normalized_intelligence(
+    connection,
+    force: bool = False,
+    *,
+    enrichment_budget: int | None = None,
+) -> list[dict[str, Any]]:
     if force or should_refresh_normalized_intelligence(connection):
-        return refresh_normalized_intelligence(connection)
+        return refresh_normalized_intelligence(connection, enrichment_budget=enrichment_budget)
     return load_normalized_events(connection, refresh=False)
 
 
@@ -3080,6 +3104,7 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
     display_title = build_display_title(event)
     updated_time_raw = _event_updated_time(event)
+    summary = str(metadata.get("summary") or event.get("detail_text") or "")
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
@@ -3120,7 +3145,7 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
         "cvss": metadata.get("cvss"),
         "isExploited": bool(metadata.get("is_exploited")),
         "patchAvailable": bool(metadata.get("patch_available")),
-        "summary": metadata.get("summary") or event.get("detail_text") or "",
+        "summary": summary[:500],
     }
 
 

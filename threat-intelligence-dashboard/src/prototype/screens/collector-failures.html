@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>任务列表 · 玄鉴</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-collector">
+  <a class="skip-link" href="#content">跳到主要内容</a>
+  <div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" data-od-id="collector-failures-sidebar">
+      <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><path d="M24 3 40 9v12c0 11-6.7 18.5-16 23-9.3-4.5-16-12-16-23V9L24 3Z"/><circle cx="24" cy="22" r="8"/><path d="M14 22h20M24 12v20m-6-4 12-12"/></svg></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span></a>
+      <nav class="sidebar-nav" aria-label="主导航" data-od-id="collector-tasks-nav"><a class="nav-link active" href="collector-failures.html">任务列表</a></nav>
+      <div class="sidebar-footer"></div>
+    </aside>
+    <button class="sidebar-backdrop" data-sidebar-toggle aria-label="关闭导航"></button>
+    <div class="app-stage">
+      <header class="app-header" data-od-id="collector-failures-header">
+        <button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+        <div class="header-actions"><span class="app-version" data-od-id="collector-failures-version">版本 <strong>v0.20.0</strong></span><button class="avatar" type="button" aria-label="个人账户" data-od-id="collector-failures-account"></button></div>
+      </header>
+
+      <main class="app-main collector-main collector-page" id="content" data-collector-surface data-needs-jobs data-od-id="collector-tasks-main">
+        <section class="collector-pagebar" data-od-id="collector-tasks-actions"><div class="collector-page-actions"><button class="btn btn-ghost" data-collector-action="refresh">刷新</button><a class="btn btn-secondary" href="collector-sites.html">站点管理</a></div></section>
+
+        <section class="domain-summary" data-od-id="collector-tasks-summary">
+          <div><span>运行中</span><strong class="num accent-value" data-bind="task-running-count">0</strong></div>
+          <div><span>队列等待</span><strong class="num warning-value" data-bind="task-pending-count">0</strong></div>
+          <div><span>最近完成</span><strong class="num success-value" data-bind="task-succeeded-count">0</strong></div>
+          <div><span>失败任务</span><strong class="num danger-value" data-bind="task-failed-count">0</strong></div>
+          <div><span>异常挂起</span><strong class="num warning-value" data-bind="task-stale-count">0</strong></div>
+          <div><span>涉及站点</span><strong class="num" data-bind="task-site-count">0</strong></div>
+        </section>
+
+        <section class="task-failure-alert" data-task-failure-alert data-od-id="collector-task-failure-alert" hidden>
+          <span class="task-failure-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10.3 4.2 2.8 17.3A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.7L13.7 4.2a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 16.5h.01"/></svg></span>
+          <div><strong><span class="num" data-task-alert-count>0</span> 个任务执行失败</strong><span data-task-alert-detail>请及时检查采集链路与站点状态。</span></div>
+          <button class="btn btn-ghost" type="button" data-collector-action="filter-failed">仅看失败任务</button>
+        </section>
+
+        <section class="task-surface" data-od-id="collector-task-list-section">
+          <header class="collector-table-toolbar">
+            <div><span>采集任务</span><strong data-bind="task-count">0 条</strong></div>
+            <div class="collector-filter-row">
+              <label class="compact-search"><span class="sr-only">搜索任务</span><input class="input" type="search" placeholder="搜索站点、任务或目标" data-table-search="collector-task-list"></label>
+              <button class="btn task-failed-filter" type="button" data-collector-action="filter-failed" aria-label="仅查看失败任务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 21 19H3L12 3Z"/><path d="M12 9v4M12 16.5h.01"/></svg><span>失败任务</span><strong class="num" data-bind="task-failed-count">0</strong></button>
+              <select class="select" aria-label="按任务状态筛选" data-filter-target="collector-task-list" data-filter-key="status"><option value="">全部状态</option><option value="running">运行中</option><option value="enqueued">等待中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="stale">异常挂起</option></select>
+            </div>
+          </header>
+          <div class="task-list" id="collector-task-list" data-table data-task-list data-od-id="collector-task-list"></div>
+          <div class="collector-table-empty" data-table-empty="collector-task-list">暂无任务记录，连接采集服务后将显示各状态任务。</div>
+          <footer class="collector-table-foot"><span>任务状态由采集服务实时更新，失败记录保留最近 24 小时。</span><a href="collector-run-detail.html">打开运行详情 →</a></footer>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

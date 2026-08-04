@@ -26,18 +26,19 @@
     },
     {
       "site_name": "dragonforce",
-      "enabled": false,
+      "enabled": true,
       "seed_urls": [
-        "http://dragonforxxbp3awc7mzs5dkswrua3znqyx5roefmi4smjrsdi22xwqd.onion/"
+        "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog?page=1"
       ],
       "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "tor_http",
-      "profile": "hot",
-      "max_topics_per_run": 25,
-      "max_detail_pages_per_run": 15,
-      "cooldown_seconds": 300,
+      "detail_fetch_mode": "browser",
+      "profile": "warm",
+      "max_topics_per_run": 15,
+      "max_detail_pages_per_run": 6,
+      "cooldown_seconds": 600,
       "output_dir": "output/dragonforce",
-      "dedupe_window_minutes": 120
+      "dedupe_window_minutes": 120,
+      "render_wait_seconds": 15
     },
     {
       "site_name": "darkforums",
@@ -86,22 +87,6 @@
       "max_detail_pages_per_run": 6,
       "cooldown_seconds": 600,
       "output_dir": "output/lynx",
-      "dedupe_window_minutes": 120,
-      "render_wait_seconds": 15
-    },
-    {
-      "site_name": "dragonforceblog",
-      "enabled": true,
-      "seed_urls": [
-        "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog?page=1"
-      ],
-      "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "browser",
-      "profile": "warm",
-      "max_topics_per_run": 15,
-      "max_detail_pages_per_run": 6,
-      "cooldown_seconds": 600,
-      "output_dir": "output/dragonforceblog",
       "dedupe_window_minutes": 120,
       "render_wait_seconds": 15
     }

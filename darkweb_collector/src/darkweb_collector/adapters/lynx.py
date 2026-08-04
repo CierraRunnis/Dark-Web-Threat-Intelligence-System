@@ -11,6 +11,11 @@ from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url
 from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
 
+def _detail_artifacts_exist(output_dir, artifact_stem: str) -> bool:
+    details_dir = output_dir / "details"
+    return all((details_dir / f"{artifact_stem}.{suffix}").exists() for suffix in ("html", "json", "png"))
+
+
 class LynxAdapter(SiteAdapter):
     """Adapter for Lynx darkweb site."""
 
@@ -71,6 +76,9 @@ class LynxAdapter(SiteAdapter):
 
         with get_db_connection() as connection:
             for victim in seed_result.payload["victims"]:
+                artifact_stem = safe_stem(
+                    f"{victim.get('content_hash', '')[:10]}_{victim['name'][:30]}"
+                )
                 # Check if this victim already exists with same content hash
                 snapshot = get_victim_snapshot(
                     connection,
@@ -86,6 +94,7 @@ class LynxAdapter(SiteAdapter):
                     snapshot
                     and snapshot.get("content_hash") == victim.get("content_hash")
                     and snapshot.get("last_detail_fetch_status") == "ok"
+                    and _detail_artifacts_exist(config.output_dir, artifact_stem)
                 ):
                     continue
 
@@ -100,9 +109,7 @@ class LynxAdapter(SiteAdapter):
                             "domain": victim.get("domain", ""),
                             "display_label": victim.get("display_label", victim["name"]),
                             "content_hash": victim.get("content_hash", ""),
-                            "artifact_stem": safe_stem(
-                                f"{victim.get('content_hash', '')[:10]}_{victim['name'][:30]}"
-                            ),
+                            "artifact_stem": artifact_stem,
                         },
                     )
                 )

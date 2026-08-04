@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · 玄鉴威胁情报平台</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="login-page">
+  <main class="login-shell" id="content" data-od-id="login-main">
+    <section class="login-visual" data-od-id="login-visual">
+      <div class="login-brand" data-od-id="login-brand">
+        <span class="brand-emblem" aria-hidden="true"><img src="assets/xuanjian-mark.svg?v=8" alt=""></span>
+        <span><strong>玄鉴</strong><small>THREAT INTELLIGENCE</small></span>
+      </div>
+      <div class="signal-field" aria-hidden="true">
+        <span class="signal-orbit orbit-one"></span><span class="signal-orbit orbit-two"></span><span class="signal-orbit orbit-three"></span>
+        <span class="signal-core"><svg viewBox="0 0 48 48" fill="none"><path class="brand-mark-line" d="M18 13h-3a2 2 0 0 0-2 2v3M30 13h3a2 2 0 0 1 2 2v3M13 26v3a2 2 0 0 0 2 2h3M35 26v3a2 2 0 0 1-2 2h-3"/><circle class="brand-mark-line" cx="24" cy="22" r="5.7"/><circle class="brand-mark-dot" cx="24" cy="22" r="2.3"/><path class="brand-mark-line brand-mark-wave" d="M18.5 33.5Q24 36.9 29.5 33.5M16.5 37.4Q24 41.8 31.5 37.4"/></svg></span>
+        <i style="--x:13%;--y:27%;--delay:.2s"></i><i style="--x:78%;--y:18%;--delay:.8s"></i><i style="--x:86%;--y:68%;--delay:1.3s"></i><i style="--x:23%;--y:77%;--delay:1.8s"></i><i style="--x:57%;--y:88%;--delay:2.2s"></i>
+      </div>
+      <div class="login-visual-copy"><span>态势感知 · 暴露监测 · 情报研判</span><h1>看见风险，先于影响。</h1></div>
+    </section>
+
+    <section class="login-panel" data-od-id="login-panel">
+      <form class="login-form" data-login-form novalidate>
+        <div class="login-heading"><span class="login-seal" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M16 3 27 7v8c0 7-4.4 12-11 15C9.4 27 5 22 5 15V7l11-4Z"/><path d="m11 16 3 3 7-8"/></svg></span><div><h2 data-od-id="login-title">欢迎登录</h2><p>玄鉴威胁情报平台</p></div></div>
+        <label class="login-field" data-od-id="login-account-field"><span>账号</span><div><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="4"/><path d="M4 21c.8-5 3.5-7 8-7s7.2 2 8 7"/></svg><input name="account" type="text" autocomplete="username" placeholder="请输入账号" required></div></label>
+        <label class="login-field" data-od-id="login-password-field"><span>密码</span><div><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required><button type="button" class="password-toggle" data-password-toggle aria-label="显示密码"><svg viewBox="0 0 24 24" fill="none"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></svg></button></div></label>
+        <div class="login-options"><label><input type="checkbox" name="remember" checked><span>记住登录状态</span></label><button type="button" data-toast="请联系平台管理员重置凭据" data-od-id="login-support">登录支持</button></div>
+        <p class="login-error" data-login-error role="alert"></p>
+        <button class="login-submit" type="submit" data-od-id="login-submit"><span>进入平台</span><svg viewBox="0 0 24 24" fill="none"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button>
+        <div class="login-foot"><span data-login-service data-state="checking"><i></i><span data-login-service-label>正在检测服务</span></span><span>v0.20.0</span></div>
+      </form>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

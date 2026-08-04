@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 from darkweb_collector.db import (
     add_document_hit_review,
+    delete_exposure_watchlist,
     ensure_netdisk_source_health_records,
     get_db_connection,
     get_document_hit,
@@ -299,11 +300,6 @@ NETDISK_SCAN_MODE_ENV = "NETDISK_SCAN_MODE"
 NETDISK_SCAN_MODE_LEGACY = "legacy"
 NETDISK_SCAN_MODE_INCREMENTAL = "incremental"
 DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_ENV = "DARKWEB_DOCUMENT_LIBRARY_INCLUDE_RESTRICTED_SOURCES"
-DEFAULT_TERMS = [
-    {"term": "示例企业", "term_type": "company_name", "weight": 15, "enabled": True},
-    {"term": "example.com", "term_type": "domain", "weight": 12, "enabled": True},
-    {"term": "内部", "term_type": "sensitive_keyword", "weight": 6, "enabled": True},
-]
 DEFAULT_SOURCE_FAMILIES = ["netdisk_aggregator", "document_library"]
 SUPPORTED_SOURCE_FAMILIES = set(DEFAULT_SOURCE_FAMILIES)
 DEFAULT_PAGE_LIMIT = 4
@@ -392,6 +388,59 @@ def _parse_json(value: Any, default: Any) -> Any:
 def _watchlist_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
     data = _parse_json((payload or {}).get("metadata_json"), {})
     return data if isinstance(data, dict) else {}
+
+
+def _is_seed_placeholder_watchlist(payload: dict[str, Any] | None) -> bool:
+    item = payload or {}
+    return (
+        _normalize_text(item.get("name") or item.get("watchlist_name") or item.get("watchlistName")) == "默认监测对象"
+        and _normalize_text(item.get("organization_name") or item.get("organizationName")) == "示例企业"
+    )
+
+
+def _watchlist_public_identity(
+    payload: dict[str, Any] | None,
+    terms: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    item = payload or {}
+    name = _normalize_text(item.get("name") or item.get("watchlist_name") or item.get("watchlistName"))
+    organization = _normalize_text(item.get("organization_name") or item.get("organizationName"))
+    if not _is_seed_placeholder_watchlist(item):
+        return name, organization
+    rows = [
+        row if isinstance(row, dict) else {"term": row, "term_type": ""}
+        for row in (terms or [])
+        if not isinstance(row, dict) or bool(row.get("enabled", True))
+    ]
+    for term_type in ("company_name", "domain"):
+        value = next(
+            (
+                _normalize_text(row.get("term"))
+                for row in rows
+                if _normalize_text(row.get("term_type")) == term_type
+                and _normalize_text(row.get("term")) not in {"示例企业", "example.com"}
+            ),
+            "",
+        )
+        if value:
+            return value, value
+    fallback = next(
+        (
+            _normalize_text(row.get("term"))
+            for row in rows
+            if _normalize_text(row.get("term")) not in {"", "示例企业", "example.com", "内部"}
+        ),
+        "",
+    )
+    if fallback:
+        return fallback, fallback
+    return "", ""
+
+
+def _is_seed_placeholder_hit(payload: dict[str, Any] | None, matched_terms: list[dict[str, Any]]) -> bool:
+    if not _is_seed_placeholder_watchlist(payload):
+        return False
+    return any(_normalize_text(item.get("term")) == "示例企业" for item in matched_terms if isinstance(item, dict))
 
 
 def _source_family_for_source(source: DiscoverySource | None = None, platform_type: str | None = None) -> str:
@@ -756,6 +805,35 @@ def _normalize_file_types(value: Any) -> list[str]:
             seen.add(normalized)
             rows.append(normalized)
     return rows or list(DEFAULT_FILE_TYPES)
+
+
+def _normalized_source_policies(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_policies = metadata.get("source_policies")
+    if not isinstance(raw_policies, dict):
+        raw_policies = {}
+    shared_file_types = _normalize_file_types(metadata.get("file_types"))
+    shared_detail_fetch = bool(metadata.get("detail_fetch", True))
+
+    def policy(source_family: str) -> dict[str, Any]:
+        value = raw_policies.get(source_family)
+        if not isinstance(value, dict):
+            value = {}
+        result: dict[str, Any] = {
+            "file_types": _normalize_file_types(value.get("file_types") or shared_file_types),
+            "detail_fetch": bool(value.get("detail_fetch", shared_detail_fetch)),
+        }
+        if source_family == "document_library":
+            try:
+                candidate_limit = int(value.get("candidate_limit") or metadata.get("page_limit") or DOCUMENT_LIBRARY_DEFAULT_PAGE_LIMIT)
+            except (TypeError, ValueError):
+                candidate_limit = DOCUMENT_LIBRARY_DEFAULT_PAGE_LIMIT
+            result["candidate_limit"] = max(1, min(200, candidate_limit))
+        return result
+
+    return {
+        "netdisk_aggregator": policy("netdisk_aggregator"),
+        "document_library": policy("document_library"),
+    }
 
 
 def _format_day_bucket(value: str | None) -> str:
@@ -2748,39 +2826,14 @@ def ensure_default_watchlist() -> dict[str, Any]:
                 "file_types": metadata.get("file_types") or list(DEFAULT_FILE_TYPES),
                 "page_limit": int(metadata.get("page_limit") or _default_page_limit_for_source_families(source_families)),
                 "detail_fetch": bool(metadata.get("detail_fetch", True)),
+                "source_policies": _normalized_source_policies(metadata),
             }
-        now = _now_utc_iso()
-        watchlist_id = upsert_exposure_watchlist(
-            connection,
-            {
-                "name": "默认监测对象",
-                "organization_name": "示例企业",
-                "enabled": True,
-                "notes": "文件监测默认对象",
-                "metadata_json": _json_dumps(
-                    {
-                        "source_families": DEFAULT_SOURCE_FAMILIES,
-                        "file_types": DEFAULT_FILE_TYPES,
-                        "page_limit": 4,
-                        "detail_fetch": True,
-                    }
-                ),
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
-        replace_exposure_watch_terms(
-            connection,
-            watchlist_id,
-            [{**row, "created_at": now, "updated_at": now} for row in DEFAULT_TERMS],
-        )
-        connection.commit()
         return {
-            "id": watchlist_id,
-            "name": "默认监测对象",
-            "organization_name": "示例企业",
-            "enabled": True,
-            "notes": "文件监测默认对象",
+            "id": None,
+            "name": "",
+            "organization_name": "",
+            "enabled": False,
+            "notes": "",
             "metadata_json": _json_dumps(
                 {
                     "source_families": DEFAULT_SOURCE_FAMILIES,
@@ -2789,13 +2842,16 @@ def ensure_default_watchlist() -> dict[str, Any]:
                     "detail_fetch": True,
                 }
             ),
-            "created_at": now,
-            "updated_at": now,
-            "terms": list_exposure_watch_terms(connection, watchlist_id),
+            "created_at": "",
+            "updated_at": "",
+            "terms": [],
             "source_families": list(DEFAULT_SOURCE_FAMILIES),
             "file_types": list(DEFAULT_FILE_TYPES),
             "page_limit": 4,
             "detail_fetch": True,
+            "source_policies": _normalized_source_policies(
+                {"file_types": DEFAULT_FILE_TYPES, "page_limit": 4, "detail_fetch": True}
+            ),
         }
 
 
@@ -2803,18 +2859,37 @@ def list_watchlists_payload() -> list[dict[str, Any]]:
     ensure_default_watchlist()
     with get_db_connection() as connection:
         rows = list_exposure_watchlists(connection)
+        terms_by_watchlist = {
+            int(row["id"]): list_exposure_watch_terms(connection, int(row["id"]))
+            for row in rows
+        }
+        preferred_identities = {
+            _watchlist_public_identity(row, terms_by_watchlist[int(row["id"])])
+            for row in rows
+            if not _is_seed_placeholder_watchlist(row)
+        }
         payloads = []
         for row in rows:
+            terms = terms_by_watchlist[int(row["id"])]
+            public_name, public_organization = _watchlist_public_identity(row, terms)
+            if _is_seed_placeholder_watchlist(row) and (
+                not public_name or (public_name, public_organization) in preferred_identities
+            ):
+                continue
             metadata = _watchlist_metadata(row)
             source_families = _normalize_source_families(metadata.get("source_families"))
+            source_policies = _normalized_source_policies(metadata)
             payloads.append(
                 {
                     **row,
-                    "terms": list_exposure_watch_terms(connection, int(row["id"])),
+                    "name": public_name,
+                    "organization_name": public_organization,
+                    "terms": terms,
                     "source_families": source_families,
                     "file_types": metadata.get("file_types") or list(DEFAULT_FILE_TYPES),
                     "page_limit": int(metadata.get("page_limit") or _default_page_limit_for_source_families(source_families)),
                     "detail_fetch": bool(metadata.get("detail_fetch", True)),
+                    "source_policies": source_policies,
                 }
             )
         return payloads
@@ -2823,7 +2898,24 @@ def list_watchlists_payload() -> list[dict[str, Any]]:
 def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
     now = _now_utc_iso()
     source_families = _normalize_source_families(payload.get("source_families"))
-    page_limit = int(payload.get("page_limit") or _default_page_limit_for_source_families(source_families))
+    source_policies = _normalized_source_policies(
+        {
+            "source_policies": payload.get("source_policies"),
+            "file_types": payload.get("file_types"),
+            "page_limit": payload.get("page_limit"),
+            "detail_fetch": payload.get("detail_fetch", True),
+        }
+    )
+    page_limit = int(source_policies["document_library"]["candidate_limit"])
+    file_types = list(dict.fromkeys(
+        source_policies["netdisk_aggregator"]["file_types"]
+        + source_policies["document_library"]["file_types"]
+    ))
+    detail_fetch = all(
+        bool(source_policies[source_family]["detail_fetch"])
+        for source_family in source_families
+        if source_family in source_policies
+    )
     with get_db_connection() as connection:
         watchlist_id = upsert_exposure_watchlist(
             connection,
@@ -2836,9 +2928,10 @@ def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "metadata_json": _json_dumps(
                     {
                         "source_families": source_families,
-                        "file_types": payload.get("file_types") or list(DEFAULT_FILE_TYPES),
+                        "file_types": file_types,
                         "page_limit": page_limit,
-                        "detail_fetch": bool(payload.get("detail_fetch", True)),
+                        "detail_fetch": detail_fetch,
+                        "source_policies": source_policies,
                     }
                 ),
                 "created_at": payload.get("created_at") or now,
@@ -2865,6 +2958,7 @@ def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
         watchlist = get_exposure_watchlist(connection, watchlist_id)
         metadata = _watchlist_metadata(watchlist or {})
         saved_source_families = _normalize_source_families(metadata.get("source_families"))
+        saved_source_policies = _normalized_source_policies(metadata)
         return {
             **(watchlist or {}),
             "terms": list_exposure_watch_terms(connection, watchlist_id),
@@ -2872,7 +2966,18 @@ def save_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "file_types": metadata.get("file_types") or list(DEFAULT_FILE_TYPES),
             "page_limit": int(metadata.get("page_limit") or _default_page_limit_for_source_families(saved_source_families)),
             "detail_fetch": bool(metadata.get("detail_fetch", True)),
+            "source_policies": saved_source_policies,
         }
+
+
+def delete_watchlist_payload(watchlist_id: int) -> dict[str, Any]:
+    with get_db_connection() as connection:
+        watchlist = get_exposure_watchlist(connection, int(watchlist_id))
+        if watchlist is None:
+            raise ValueError(f"watchlist not found: {watchlist_id}")
+        delete_exposure_watchlist(connection, int(watchlist_id))
+        connection.commit()
+    return {"id": int(watchlist_id), "deleted": True}
 
 
 def scan_watchlist_once(
@@ -2894,6 +2999,7 @@ def scan_watchlist_once(
             return {"watchlist_id": watchlist_id, "scanned_terms": 0, "candidates": 0, "hits": 0, "message": "watchlist disabled"}
         terms = [item for item in list_exposure_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
     watchlist_meta = _watchlist_metadata(watchlist)
+    source_policies = _normalized_source_policies(watchlist_meta)
     explicit_source_family_request = bool(source_families)
     selected_source_families = _normalize_source_families(
         source_families or watchlist_meta.get("source_families"),
@@ -2966,12 +3072,22 @@ def scan_watchlist_once(
             source_family = _source_family_for_source(source)
             if source_family not in selected_source_families:
                 continue
+            source_policy = source_policies.get(source_family, {})
+            source_page_limit = selected_page_limit
+            if page_limit is None and source_family == "document_library":
+                source_page_limit = int(source_policy.get("candidate_limit") or selected_page_limit)
+            source_file_types = selected_file_types if file_types is not None else _normalize_file_types(
+                source_policy.get("file_types") or selected_file_types
+            )
+            source_detail_fetch = selected_detail_fetch if detail_fetch is not None else bool(
+                source_policy.get("detail_fetch", selected_detail_fetch)
+            )
             candidates = _search_candidate_pages_for_source(
                 source,
                 url,
                 term,
                 source_family,
-                selected_page_limit,
+                source_page_limit,
                 errors=errors,
                 source_stats=source_stats,
                 watchlist_id=int(watchlist["id"]),
@@ -2998,7 +3114,7 @@ def scan_watchlist_once(
                 if candidate_resource_fingerprint and candidate_resource_fingerprint in seen_resource_fingerprints:
                     continue
                 try:
-                    should_fetch_detail = selected_detail_fetch and detail_platform.platform_type != "netdisk_share"
+                    should_fetch_detail = source_detail_fetch and detail_platform.platform_type != "netdisk_share"
                     if should_fetch_detail:
                         detail = _detail_payload_from_page(
                             platform=detail_platform,
@@ -3133,7 +3249,7 @@ def scan_watchlist_once(
                         detail.get("preview_text"),
                     )
                 detail["share_type"] = "password_share" if detail["share_code"] else "public_share"
-                if not is_unavailable_share and not _matches_file_type(detail["file_names"], selected_file_types):
+                if not is_unavailable_share and not _matches_file_type(detail["file_names"], source_file_types):
                     continue
                 resource_fingerprint = (
                     _netdisk_resource_fingerprint(
@@ -3279,6 +3395,7 @@ def scan_watchlist_once(
         "file_types": selected_file_types,
         "page_limit": selected_page_limit,
         "detail_fetch": selected_detail_fetch,
+        "source_policies": source_policies,
         "netdisk_scan_mode": selected_netdisk_scan_mode,
         "source_stats": source_stats_payload,
     }
@@ -3343,9 +3460,12 @@ def list_document_exposures_payload(
     payloads = []
     refresh_legacy_netdisk_state = source_family == "netdisk_aggregator"
     for row in rows:
+        matched_terms = json.loads(str(row.get("matched_terms_json") or "[]"))
+        if _is_seed_placeholder_hit(row, matched_terms):
+            continue
         if refresh_legacy_netdisk_state:
             row = _refresh_legacy_netdisk_access_state(row)
-        matched_terms = json.loads(str(row.get("matched_terms_json") or "[]"))
+        public_watchlist_name, public_organization_name = _watchlist_public_identity(row, matched_terms)
         raw_payload = json.loads(str(row.get("raw_json") or "{}"))
         file_names = [
             _normalize_text(item)
@@ -3410,8 +3530,8 @@ def list_document_exposures_payload(
         payload = {
             "id": int(row["id"]),
             "watchlistId": int(row["watchlist_id"]),
-            "watchlistName": row.get("watchlist_name") or "",
-            "organizationName": row.get("organization_name") or "",
+            "watchlistName": public_watchlist_name,
+            "organizationName": public_organization_name,
             "platform": platform_key,
             "platformLabel": platform_label,
             "platformType": row.get("platform_type") or "",
@@ -3461,6 +3581,8 @@ def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
             return None
         watchlist = get_exposure_watchlist(connection, int(row["watchlist_id"]))
         matched_terms_for_mirror = json.loads(str(row.get("matched_terms_json") or "[]"))
+        if _is_seed_placeholder_hit(watchlist, matched_terms_for_mirror):
+            return None
         raw_payload_for_mirror = json.loads(str(row.get("raw_json") or "{}"))
         snapshots = list_document_hit_snapshots(connection, hit_id)
         if row.get("platform_type") == "netdisk_share":
@@ -3515,7 +3637,7 @@ def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
                 connection.commit()
                 snapshots = list_document_hit_snapshots(connection, hit_id)
         reviews = list_document_hit_reviews(connection, hit_id)
-    matched_terms = json.loads(str(row.get("matched_terms_json") or "[]"))
+    matched_terms = matched_terms_for_mirror
     raw_payload = json.loads(str(row.get("raw_json") or "{}"))
     formatted_snapshots = []
     for item in snapshots:
@@ -3654,12 +3776,17 @@ def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
         risk_reasons.append("目标页面可公开访问")
     elif detail_access_state == "login_required":
         risk_reasons.append("目标页面需要登录复核")
+    public_watchlist_name, public_organization_name = _watchlist_public_identity(watchlist, matched_terms)
+    public_watchlist = {**(watchlist or {})}
+    if _is_seed_placeholder_watchlist(watchlist):
+        public_watchlist["name"] = public_watchlist_name
+        public_watchlist["organization_name"] = public_organization_name
     return {
         "id": int(row["id"]),
-        "watchlist": watchlist or {},
+        "watchlist": public_watchlist,
         "watchlistId": int(row["watchlist_id"]),
-        "watchlistName": watchlist.get("name") if watchlist else "",
-        "organizationName": watchlist.get("organization_name") if watchlist else "",
+        "watchlistName": public_watchlist_name,
+        "organizationName": public_organization_name,
         "platform": row.get("platform") or "",
         "platformLabel": platform_label,
         "platformType": row.get("platform_type") or "",
@@ -3848,14 +3975,19 @@ def list_exposure_scan_runs_payload(watchlist_id: int | None = None, limit: int 
         rows = list_exposure_scan_runs(connection, watchlist_id=watchlist_id, limit=limit)
     payloads: list[dict[str, Any]] = []
     for row in rows:
+        requested_terms = _parse_json(row.get("requested_terms_json"), [])
+        term_rows = [item if isinstance(item, dict) else {"term": item, "term_type": ""} for item in requested_terms]
+        if _is_seed_placeholder_hit(row, term_rows):
+            continue
+        public_name, public_organization = _watchlist_public_identity(row, term_rows)
         payloads.append(
             {
                 "id": int(row["id"]),
                 "watchlistId": int(row["watchlist_id"]),
-                "watchlistName": row.get("watchlist_name") or "",
-                "organizationName": row.get("organization_name") or "",
+                "watchlistName": public_name,
+                "organizationName": public_organization,
                 "sourceFamilies": _normalize_source_families(row.get("source_families_json"), default_when_empty=False),
-                "requestedTerms": _parse_json(row.get("requested_terms_json"), []),
+                "requestedTerms": requested_terms,
                 "candidateCount": int(row.get("candidate_count") or 0),
                 "hitCount": int(row.get("hit_count") or 0),
                 "errorCount": int(row.get("error_count") or 0),
@@ -3882,12 +4014,16 @@ def list_netdisk_source_states_payload(watchlist_id: int | None = None) -> list[
         rows = list_netdisk_source_states(connection, watchlist_id=watchlist_id)
     payloads: list[dict[str, Any]] = []
     for row in rows:
+        term_rows = [{"term": str(row.get("term") or ""), "term_type": ""}]
+        if _is_seed_placeholder_hit(row, term_rows):
+            continue
+        public_name, public_organization = _watchlist_public_identity(row, term_rows)
         payloads.append(
             {
                 "id": int(row.get("id") or 0),
                 "watchlistId": int(row.get("watchlist_id") or 0),
-                "watchlistName": str(row.get("watchlist_name") or ""),
-                "organizationName": str(row.get("organization_name") or ""),
+                "watchlistName": public_name,
+                "organizationName": public_organization,
                 "sourceKey": str(row.get("source_key") or ""),
                 "sourceLabel": _netdisk_source_label(str(row.get("source_key") or "")),
                 "term": str(row.get("term") or ""),

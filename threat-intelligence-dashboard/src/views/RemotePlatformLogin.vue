@@ -27,6 +27,9 @@
         </div>
         <div class="ti-card-body">
           <div v-if="state?.rfb_ws_path" ref="browserDesktopRef" class="browser-desktop" />
+          <div v-else-if="state?.stream_ws_path" ref="browserDesktopRef" class="browser-desktop" tabindex="0">
+            <img ref="browserStreamImageRef" class="browser-stream-image" alt="内部浏览器实时画面" />
+          </div>
           <el-empty v-else class="browser-empty" description="等待内置浏览器启动" />
           <div class="browser-footer">
             <span>{{ rfbError || '点击浏览器画面后可以直接输入、滚动和完成二次验证。' }}</span>
@@ -86,12 +89,14 @@ import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import RFB from '@novnc/novnc'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
+import { createRemoteBrowserStream } from '@/utils/remoteBrowserStream'
 
 const api = useCodeMonitoringApi()
 const route = useRoute()
 const router = useRouter()
 
 const browserDesktopRef = ref(null)
+const browserStreamImageRef = ref(null)
 const state = ref(null)
 const sessionId = ref(String(route.query.session_id || '').trim())
 const accountLabel = ref('')
@@ -102,6 +107,8 @@ const rfbStatus = ref('idle')
 const rfbError = ref('')
 let refreshTimer = null
 let rfb = null
+let browserStream = null
+let streamPath = ''
 
 const platform = computed(() => String(route.query.platform || state.value?.platform || '').trim())
 const platformLabel = computed(() => state.value?.label || platform.value || '代码平台')
@@ -147,6 +154,45 @@ function disconnectRfb() {
     // noVNC disconnect can throw if the socket is already closed.
   }
   rfb = null
+}
+
+function disconnectStream() {
+  browserStream?.close()
+  browserStream = null
+  streamPath = ''
+}
+
+async function connectStream() {
+  const path = state.value?.stream_ws_path
+  if (!path || path === streamPath) return
+  await nextTick()
+  if (!browserDesktopRef.value || !browserStreamImageRef.value) return
+  disconnectRfb()
+  disconnectStream()
+  streamPath = path
+  rfbError.value = ''
+  browserStream = createRemoteBrowserStream({
+    image: browserStreamImageRef.value,
+    focusTarget: browserDesktopRef.value,
+    websocketUrl: buildWebsocketUrl(path),
+    onStatus: (status) => {
+      rfbStatus.value = status
+      if (status === 'connected') rfbError.value = ''
+    },
+    onError: (message) => {
+      rfbStatus.value = 'error'
+      rfbError.value = message
+    },
+  })
+}
+
+async function connectBrowser() {
+  if (state.value?.stream_ws_path) {
+    await connectStream()
+  } else if (state.value?.rfb_ws_path) {
+    disconnectStream()
+    await connectRfb()
+  }
 }
 
 async function connectRfb() {
@@ -210,7 +256,7 @@ async function ensureSession() {
       name: 'RemotePlatformLogin',
       query: { platform: platform.value, session_id: sessionId.value, return_to: returnTo.value },
     })
-    await connectRfb()
+    await connectBrowser()
   } catch (error) {
     ElMessage.error(error.message || '创建内置浏览器会话失败')
   } finally {
@@ -236,6 +282,7 @@ async function finishSession() {
   try {
     await api.finishRemoteLogin(sessionId.value, accountLabel.value || platform.value)
     disconnectRfb()
+    disconnectStream()
     ElMessage.success('内置浏览器会话已保存')
     router.push(returnTo.value)
   } catch (error) {
@@ -250,6 +297,7 @@ async function closeSession() {
   closing.value = true
   try {
     disconnectRfb()
+    disconnectStream()
     await api.closeRemoteLogin(sessionId.value)
     ElMessage.success('内置浏览器会话已关闭')
     router.push(returnTo.value)
@@ -265,9 +313,9 @@ function returnToPrevious() {
 }
 
 watch(
-  () => state.value?.rfb_ws_path,
-  async (path) => {
-    if (path) await connectRfb()
+  () => [state.value?.rfb_ws_path, state.value?.stream_ws_path],
+  async ([rfbPath, livePath]) => {
+    if (rfbPath || livePath) await connectBrowser()
   },
 )
 
@@ -278,6 +326,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   disconnectRfb()
+  disconnectStream()
   if (refreshTimer) {
     window.clearInterval(refreshTimer)
     refreshTimer = null
@@ -341,6 +390,16 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+  outline: none;
+}
+
+.browser-stream-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  cursor: default;
 }
 
 .browser-desktop :deep(.rfb_screen) {

@@ -11,13 +11,18 @@ from typing import Any
 
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 from darkweb_collector.config import get_site_config, load_site_configs
-from darkweb_collector.detail_i18n import translate_event_detail_text_live
+from darkweb_collector.detail_i18n import translate_event_detail_text_with_meta
 from darkweb_collector.document_exposure import (
     build_document_exposure_event_detail,
     build_document_exposure_event_records,
     build_document_exposure_summary,
 )
-from darkweb_collector.db import get_db_connection, get_normalized_intelligence_cache_state, list_vulnerability_records
+from darkweb_collector.db import (
+    get_db_connection,
+    get_normalized_intelligence_cache_state,
+    get_site_connectivity_probe_map,
+    list_vulnerability_records,
+)
 from darkweb_collector.job_diagnostics import (
     classify_error,
     consecutive_failures,
@@ -378,7 +383,7 @@ def _recent_problem_rows(crawl_jobs: list[dict[str, Any]]) -> list[dict[str, Any
     return [
         row
         for row in crawl_jobs
-        if _effective_job_status(row) in {"failed", "stale"}
+        if _effective_job_status(row) == "failed"
         and _is_recent(row.get("finished_at") or row.get("started_at"), RECENT_FAILURE_WINDOW_HOURS)
     ]
 
@@ -390,7 +395,7 @@ def _latest_succeeded_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _latest_unresolved_problem_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     latest_success_dt = _job_event_dt(_latest_succeeded_row(rows))
     for row in rows:
-        if _effective_job_status(row) not in {"failed", "stale"}:
+        if _effective_job_status(row) != "failed":
             continue
         row_dt = _job_event_dt(row)
         if row_dt is None:
@@ -532,7 +537,7 @@ def _victim_output_resources(row_dict: dict[str, Any], raw_json: dict[str, Any])
     content_hash = str(raw_json.get("content_hash") or row_dict.get("content_hash") or "")
     domain = str(raw_json.get("domain") or row_dict.get("domain") or "")
     name = str(raw_json.get("name") or row_dict.get("name") or "")
-    if row_dict["site_name"] == "lynx":
+    if row_dict["site_name"] in {"dragonforce", "lynx"}:
         artifact_stem = safe_stem(f"{content_hash[:10]}_{name[:30]}")
     else:
         artifact_stem = safe_stem(f"{content_hash[:10]}_{domain or name}")
@@ -594,6 +599,8 @@ def _build_forum_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
 def _build_victim_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
     raw_json = _parse_json(row_dict.get("raw_json"))
     detail_url = row_dict.get("detail_url") or raw_json.get("detail_url") or ""
+    source_url = row_dict.get("source_url") or raw_json.get("source_url") or ""
+    disclosure_url = detail_url or source_url
     event_id = f"victim:{row_dict['site_name']}:{_event_hash(str(detail_url or row_dict.get('name', '')))}"
     local_mirror_resources, local_screenshot_resources = _victim_output_resources(row_dict, raw_json)
     mirror_resources = _coerce_resource_list(detail_url)
@@ -608,7 +615,7 @@ def _build_victim_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
         "title": row_dict.get("display_label") or row_dict.get("name") or "未知受害者",
         "disclosure_time": _format_dt(row_dict.get("published_at_utc") or row_dict.get("fetched_at_utc")),
         "attacker": _label_source(row_dict.get("site_name")),
-        "disclosure_url": detail_url,
+        "disclosure_url": disclosure_url,
         "detail_text": row_dict.get("text_excerpt") or raw_json.get("description") or "",
         "category": STATUS_LABELS.get(row_dict.get("status", ""), row_dict.get("status", "未知")),
         "source": _label_source(row_dict.get("site_name")),
@@ -642,7 +649,7 @@ def _build_forum_event_records(connection) -> list[dict[str, Any]]:
 def _build_victim_event_records(connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
-        SELECT v.site_name, v.name, v.display_label, v.detail_url, v.status, v.published_at_utc, v.raw_json,
+        SELECT v.site_name, v.source_url, v.name, v.display_label, v.detail_url, v.status, v.published_at_utc, v.raw_json,
                v.last_detail_fetch_status, vd.text_excerpt, vd.page_title, vd.fetched_at_utc
         FROM victims v
         LEFT JOIN victim_details vd
@@ -664,9 +671,13 @@ def _build_victim_event_records(connection) -> list[dict[str, Any]]:
 
 def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
     with get_db_connection() as connection:
+        cache_key = _payload_cache_key(connection, "events")
+        cached_payload = _get_cached_payload("events", cache_key)
+        if cached_payload is not None:
+            return cached_payload[:limit] if limit is not None else cached_payload
         normalized_events, _ = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
 
-    events = build_document_exposure_event_records(limit=None) + [normalized_event_to_detail(item) for item in normalized_events]
+    events = build_document_exposure_event_records(limit=None) + [normalized_event_to_list_item(item) for item in normalized_events]
     events.sort(
         key=lambda item: _parse_dt(
             str(
@@ -682,6 +693,7 @@ def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
         or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
+    _set_cached_payload("events", cache_key, events)
     if limit is not None:
         return events[:limit]
     return events
@@ -723,7 +735,7 @@ def _build_victim_event_detail_by_id(
 ) -> dict[str, Any] | None:
     rows = connection.execute(
         """
-        SELECT v.site_name, v.name, v.display_label, v.detail_url, v.status, v.published_at_utc, v.raw_json,
+        SELECT v.site_name, v.source_url, v.name, v.display_label, v.detail_url, v.status, v.published_at_utc, v.raw_json,
                v.last_detail_fetch_status, v.content_hash, v.domain, vd.text_excerpt, vd.page_title, vd.fetched_at_utc
         FROM victims v
         LEFT JOIN victim_details vd
@@ -791,7 +803,10 @@ def build_event_detail(event_id: str, *, translate_detail: bool = False) -> dict
         if payload is None:
             return None
         if translate_detail and payload.get("detail_text"):
-            payload["detail_text"] = translate_event_detail_text_live(payload.get("detail_text"))
+            translated, applied, error = translate_event_detail_text_with_meta(payload.get("detail_text"))
+            payload["detail_text"] = translated
+            payload["translation_applied"] = applied
+            payload["translation_error"] = error or ""
         return payload
     with get_db_connection() as connection:
         event = load_normalized_event_detail(connection, event_id)
@@ -807,7 +822,10 @@ def build_event_detail(event_id: str, *, translate_detail: bool = False) -> dict
                 payload = _merge_event_detail_payload(payload, fallback_payload)
         payload.setdefault("identifier", payload.get("id") or event_id)
         if translate_detail and payload.get("normalized_event_type") != "vulnerability":
-            payload["detail_text"] = translate_event_detail_text_live(payload.get("detail_text"))
+            translated, applied, error = translate_event_detail_text_with_meta(payload.get("detail_text"))
+            payload["detail_text"] = translated
+            payload["translation_applied"] = applied
+            payload["translation_error"] = error or ""
         return payload
 
 
@@ -1300,6 +1318,18 @@ def _latest_job_marker(connection) -> str:
 def _payload_cache_key(connection, namespace: str) -> str:
     cache_state = get_normalized_intelligence_cache_state(connection) or {}
     latest_jobs = _latest_job_marker(connection) if namespace == "intelligence" else ""
+    document_state = {}
+    if namespace in {"events", "intelligence"}:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS count, MAX(last_seen_at) AS latest,
+                   SUM(risk_score) AS risk_total, SUM(evidence_count) AS evidence_total,
+                   SUM(CASE WHEN review_status = 'new' THEN 1 ELSE 0 END) AS new_reviews,
+                   SUM(CASE WHEN access_state = 'public' THEN 1 ELSE 0 END) AS public_hits
+            FROM document_hits
+            """
+        ).fetchone()
+        document_state = dict(row) if row else {}
     monitoring_state = connection.execute(
         """
         SELECT COUNT(*) AS count, MAX(updated_at) AS latest
@@ -1317,6 +1347,7 @@ def _payload_cache_key(connection, namespace: str) -> str:
         "latest_jobs": latest_jobs,
         "monitoring_keyword_count": monitoring_count,
         "monitoring_keyword_latest": monitoring_latest,
+        "document_state": document_state,
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
@@ -1484,10 +1515,81 @@ def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[st
     }
 
 
+def build_intelligence_page_payload(page: str) -> dict[str, Any]:
+    page_config = {
+        "ransomware": ("ransomware", "ransomwareEvents", RANSOMWARE_EVENT_LIMIT),
+        "data-leak": ("data_leak", "dataLeakEvents", DATA_LEAK_EVENT_LIMIT),
+    }
+    if page not in page_config:
+        raise ValueError(f"unsupported intelligence page: {page}")
+
+    event_type, payload_key, event_limit = page_config[page]
+    namespace = f"intelligence:{page}"
+    with get_db_connection() as connection:
+        cache_key = _payload_cache_key(connection, namespace)
+        cached_payload = _get_cached_payload(namespace, cache_key)
+        if cached_payload is not None:
+            return cached_payload
+        source_events = [
+            item
+            for item in load_normalized_events(connection)
+            if item.get("event_type") == event_type
+        ]
+
+    source_events.sort(
+        key=lambda item: _parse_dt(
+            str((item.get("metadata") or {}).get("updated_time") or item.get("disclosure_time") or "")
+        )
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    source_events = _apply_event_limit(source_events, event_limit)
+    common_fields = (
+        "id",
+        "event_type",
+        "normalized_event_type",
+        "raw_source_type",
+        "disclosureTimeRaw",
+        "disclosureDate",
+        "updatedTimeRaw",
+        "title",
+        "category",
+        "victim",
+        "attacker",
+        "sourceSite",
+        "industry",
+    )
+    page_fields = common_fields + (
+        ("region", "country")
+        if page == "ransomware"
+        else ("confidenceScore",)
+    )
+    events = [
+        {key: value for key in page_fields if (value := item.get(key)) is not None}
+        for item in (normalized_event_to_list_item(source_event) for source_event in source_events)
+    ]
+    payload: dict[str, Any] = {payload_key: events}
+    if page == "ransomware":
+        actors = Counter(item.get("attacker") or "未知" for item in events if item.get("attacker"))
+        industries = Counter(item.get("industry") or "未知" for item in events if item.get("industry"))
+        payload["ransomwareActorRanking"] = [
+            {"name": name, "value": value} for name, value in actors.most_common(6)
+        ]
+        payload["ransomwareIndustryImpact"] = [
+            {"name": name, "value": value} for name, value in industries.most_common(6)
+        ]
+
+    _set_cached_payload(namespace, cache_key, payload)
+    return payload
+
+
 def build_intelligence_payload() -> dict[str, Any]:
     with get_db_connection() as connection:
-        normalized_events, monitoring_payload = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
         cache_key = _payload_cache_key(connection, "intelligence")
+        cached_payload = _get_cached_payload("intelligence", cache_key)
+        if cached_payload is not None:
+            return cached_payload
+        normalized_events, monitoring_payload = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
         vulnerability_rows = list_vulnerability_records(connection)
         crawl_jobs = [
             dict(row)
@@ -1741,8 +1843,11 @@ def warm_api_payloads() -> None:
     # Prime normalized intelligence and top-level payloads once during startup
     # so the first page load is not blocked on cold work or stale cache.
     with get_db_connection() as connection:
-        ensure_normalized_intelligence(connection, force=False)
+        ensure_normalized_intelligence(connection, force=False, enrichment_budget=0)
+    build_intelligence_page_payload("ransomware")
+    build_intelligence_page_payload("data-leak")
     build_intelligence_payload()
+    build_event_records()
 
 
 def _runtime_db_status() -> dict[str, Any]:
@@ -1804,6 +1909,7 @@ def build_jobs_payload() -> dict[str, Any]:
         vulnerability_count_row = connection.execute(
             "SELECT COUNT(*) AS count, MAX(disclosure_time) AS latest_disclosure_time FROM vulnerability_records"
         ).fetchone()
+        connectivity_probe_map = get_site_connectivity_probe_map(connection)
 
     from darkweb_collector.api_actions import (
         get_browser_runtime_status,
@@ -1822,15 +1928,33 @@ def build_jobs_payload() -> dict[str, Any]:
         config_map = {}
 
     running_jobs = sum(1 for row in crawl_jobs if _effective_job_status(row) == "running")
-    stale_jobs = sum(1 for row in crawl_jobs if _effective_job_status(row) == "stale")
+    stale_jobs = sum(
+        1
+        for row in crawl_jobs
+        if _effective_job_status(row) == "stale" and not row.get("finished_at")
+    )
 
     site_health = []
     unresolved_problem_rows: list[dict[str, Any]] = []
     for site_name in configured_sites:
         site_rows = [row for row in crawl_jobs if row.get("site_name") == site_name]
         seed_rows = [row for row in site_rows if row.get("job_type") == "seed"]
-        latest_seed = next((row for row in site_rows if row.get("job_type") == "seed"), None)
-        latest_detail = next((row for row in site_rows if row.get("job_type") == "detail"), None)
+        latest_seed = next(
+            (
+                row
+                for row in site_rows
+                if row.get("job_type") == "seed" and _effective_job_status(row) != "stale"
+            ),
+            None,
+        )
+        latest_detail = next(
+            (
+                row
+                for row in site_rows
+                if row.get("job_type") == "detail" and _effective_job_status(row) != "stale"
+            ),
+            None,
+        )
         latest_success = next((row for row in site_rows if row.get("status") == "succeeded"), None)
         latest_unresolved_problem = _latest_unresolved_problem_row(site_rows)
         if latest_unresolved_problem is not None:
@@ -1854,6 +1978,7 @@ def build_jobs_payload() -> dict[str, Any]:
         active_cooldown_until_dt = cooldown_until_dt if circuit_breaker_open else None
         active_running = sum(1 for row in site_rows if _effective_job_status(row) == "running")
         active_enqueued = sum(1 for row in site_rows if _effective_job_status(row) == "enqueued")
+        connectivity_probe = connectivity_probe_map.get(site_name) or {}
 
         latest_seed_dt = _job_event_dt(latest_seed)
         latest_detail_dt = _job_event_dt(latest_detail)
@@ -1891,6 +2016,15 @@ def build_jobs_payload() -> dict[str, Any]:
                 "site_name": site_name,
                 "display_name": site_display_name(config) if config is not None else site_name,
                 "enabled": enabled_map.get(site_name, True),
+                "seed_urls": list(config.seed_urls) if config is not None else [],
+                "seed_fetch_mode": config.seed_fetch_mode if config is not None else "",
+                "detail_fetch_mode": config.detail_fetch_mode if config is not None else "",
+                "profile": config.profile if config is not None else "",
+                "connectivity_available": connectivity_probe.get("available"),
+                "connectivity_checked_at": _format_dt(connectivity_probe.get("checked_at")),
+                "connectivity_last_success_at": _format_dt(connectivity_probe.get("last_success_at")),
+                "connectivity_failure_reason": connectivity_probe.get("failure_reason") or "",
+                "connectivity_error": connectivity_probe.get("error") or "",
                 "overall_status": (
                     "待登录"
                     if auth_required and auth_waiting
@@ -1898,8 +2032,6 @@ def build_jobs_payload() -> dict[str, Any]:
                     if auth_required
                     else "异常"
                     if latest_unresolved_problem
-                    else "陈旧任务"
-                    if effective_seed_status == "stale"
                     else "运行中"
                     if active_running
                     else "等待中"
@@ -1915,7 +2047,6 @@ def build_jobs_payload() -> dict[str, Any]:
                 "last_success_at": _format_dt(latest_success.get("finished_at") if latest_success else None),
                 "last_error": (
                     (latest_unresolved_problem.get("error_message") if latest_unresolved_problem else "")
-                    or ("stale seed task auto-cleared" if effective_seed_status == "stale" else "")
                 ),
                 "auth_required": auth_required,
                 "auth_status": auth["auth_status"],
@@ -1937,8 +2068,6 @@ def build_jobs_payload() -> dict[str, Any]:
                     if auth_required
                     else "failure_cooldown"
                     if circuit_breaker_open
-                    else "stale_seed_job"
-                    if effective_seed_status == "stale"
                     else ("active_seed_job" if effective_seed_status in {"running", "enqueued"} else "")
                 ),
             }

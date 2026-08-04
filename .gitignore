@@ -19,6 +19,11 @@ threat-intelligence-dashboard/dist/
 .npm-cache/
 .playwright-cli/
 output/
+*.db
+*.sqlite
+*.sqlite3
+*.rdb
+*.log
 darkweb_collector/.runtime/
 darkweb_collector/data/
 darkweb_collector/output/
@@ -30,6 +35,18 @@ darkweb_collector/samples/dragonforceblog/test_*_parsed.json
 threat-intelligence-dashboard/.npm-cache/
 threat-intelligence-dashboard/.codex*.log
 **/storage_state.json
+
+# Local secrets and authentication state
+.env
+.env.*
+!.env.example
+**/auth-password.txt
+**/cookies.json
+**/credentials.json
+**/services.json
+*.pem
+*.p12
+*.pfx
 
 # OS / editor
 .DS_Store

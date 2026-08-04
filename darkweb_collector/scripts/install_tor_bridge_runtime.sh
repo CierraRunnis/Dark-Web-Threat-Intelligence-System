@@ -5,6 +5,9 @@ SNOWFLAKE_GO_PACKAGE="${SNOWFLAKE_GO_PACKAGE:-gitlab.torproject.org/tpo/anti-cen
 TOR_RELEASE_METADATA_URL="${TOR_RELEASE_METADATA_URL:-https://aus1.torproject.org/torbrowser/update_3/release/downloads.json}"
 TOR_DIST_BASE_URL="${TOR_DIST_BASE_URL:-https://dist.torproject.org/torbrowser}"
 TOR_EXPERT_ROOT="${DARKWEB_TOR_EXPERT_DIR:-$HOME/.local/share/darkweb-threat-intel/tor-expert}"
+TOR_BROWSER_BUILD_REPO="${TOR_BROWSER_BUILD_REPO:-https://gitlab.torproject.org/tpo/applications/tor-browser-build.git}"
+BRIDGE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUNDLED_PT_CONFIG="$BRIDGE_SCRIPT_DIR/../src/darkweb_collector/tor_bridge_control/pt_config.json"
 
 bridge_info() {
   echo "[INFO] $*"
@@ -145,6 +148,51 @@ bridge_latest_tor_version() {
     python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])' 2>/dev/null
 }
 
+bridge_latest_tor_tag() {
+  local metadata
+  metadata="$(curl -fsSL "$TOR_RELEASE_METADATA_URL")" || return 1
+  printf '%s' "$metadata" |
+    python3 -c 'import json, sys; data=json.load(sys.stdin); print(data.get("git_tag") or data.get("tag") or "")' 2>/dev/null
+}
+
+bridge_update_pt_config() {
+  local tag="${TOR_BROWSER_BUILD_TAG:-}" cache destination temp_config
+  destination="$TOR_EXPERT_ROOT/pt_config.json"
+  mkdir -p "$TOR_EXPERT_ROOT"
+
+  if [[ -n "${DARKWEB_TOR_PT_CONFIG_PATH:-}" && "$DARKWEB_TOR_PT_CONFIG_PATH" != "$destination" && -f "$DARKWEB_TOR_PT_CONFIG_PATH" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$tag" ]]; then
+    tag="$(bridge_latest_tor_tag 2>/dev/null || true)"
+  fi
+  if [[ "${DARKWEB_TOR_BRIDGE_AUTO_UPDATE:-1}" != "0" && -n "$tag" && -x "$(command -v git || true)" ]]; then
+    cache="$TOR_EXPERT_ROOT/bridge-config-source"
+    temp_config="$TOR_EXPERT_ROOT/pt_config.json.tmp"
+    if [[ ! -d "$cache/.git" ]]; then
+      mkdir -p "$cache"
+      git -C "$cache" init --quiet
+      git -C "$cache" remote add origin "$TOR_BROWSER_BUILD_REPO"
+    else
+      git -C "$cache" remote set-url origin "$TOR_BROWSER_BUILD_REPO"
+    fi
+    if git -C "$cache" fetch --quiet --depth 1 --filter=blob:none origin "refs/tags/$tag" &&
+      git -C "$cache" show "FETCH_HEAD:projects/tor-expert-bundle/pt_config.json" >"$temp_config" &&
+      python3 -c 'import json,sys; assert json.load(open(sys.argv[1], encoding="utf-8")).get("bridges")' "$temp_config"; then
+      mv "$temp_config" "$destination"
+      bridge_info "built-in bridge configuration updated from official Tor release $tag"
+    else
+      rm -f "$temp_config"
+      bridge_warn "could not refresh the built-in bridge configuration from $tag"
+    fi
+  fi
+  if [[ ! -f "$destination" ]]; then
+    cp "$BUNDLED_PT_CONFIG" "$destination"
+  fi
+  export DARKWEB_TOR_PT_CONFIG_PATH="$destination"
+}
+
 bridge_configure_expert_runtime() {
   local runtime_root="$1"
   local wrapper="$HOME/.local/bin/darkweb-tor"
@@ -167,6 +215,7 @@ bridge_configure_expert_runtime() {
 bridge_use_installed_expert_runtime() {
   local current="$TOR_EXPERT_ROOT/current"
   if bridge_configure_expert_runtime "$current"; then
+    bridge_update_pt_config
     bridge_warn "using the previously installed Tor Expert Bundle"
     return 0
   fi
@@ -229,6 +278,7 @@ bridge_install_tor_expert_bundle() {
     return 1
   fi
   ln -sfn "$target" "$current"
+  bridge_update_pt_config
   bridge_configure_expert_runtime "$current"
 }
 
@@ -238,6 +288,7 @@ install_tor_bridge_runtime() {
   command -v python3 >/dev/null 2>&1 || prerequisites+=("python3")
   command -v tar >/dev/null 2>&1 || prerequisites+=("tar")
   command -v sha256sum >/dev/null 2>&1 || prerequisites+=("coreutils")
+  command -v git >/dev/null 2>&1 || prerequisites+=("git")
   if (( ${#prerequisites[@]} > 0 )); then
     if ! command -v apt-get >/dev/null 2>&1; then
       bridge_warn "missing Tor Expert Bundle prerequisites: ${prerequisites[*]}"

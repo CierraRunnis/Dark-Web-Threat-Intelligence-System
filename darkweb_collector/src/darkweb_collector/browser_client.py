@@ -12,6 +12,28 @@ class BrowserProxyConfig:
     server: str | None = None
 
 
+_CAPTURE_READY_SCRIPT = r"""
+() => {
+    const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' &&
+            Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+    };
+    const loadingText = /^(loading(?:[,.\u2026\s]+please wait)?|please wait)[.!\u2026]*$/i;
+    const hasVisibleLoadingState = Array.from(document.body?.querySelectorAll('*') || []).some((element) => {
+        if (!isVisible(element)) return false;
+        const text = String(element.textContent || '').replace(/\s+/g, ' ').trim();
+        return text.length <= 80 && loadingText.test(text);
+    });
+    const hasPendingImage = Array.from(document.images || []).some(
+        (image) => isVisible(image) && Boolean(image.currentSrc || image.src) && !image.complete
+    );
+    return document.readyState !== 'loading' && !hasVisibleLoadingState && !hasPendingImage;
+}
+"""
+
+
 class BrowserClient:
     def __init__(self, proxy: BrowserProxyConfig) -> None:
         self._proxy = proxy
@@ -50,9 +72,11 @@ class BrowserClient:
         url: str,
         wait_seconds: int,
         timeout_seconds: int,
+        capture_screenshot: bool = True,
         screenshot_selector: str | None = None,
         screenshot_selectors: tuple[str, ...] = (),
         hide_selectors: tuple[str, ...] = (),
+        screenshot_styles: str = "",
         storage_state_path: str | None = None,
     ) -> tuple[str, bytes]:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -70,27 +94,35 @@ class BrowserClient:
             context_kwargs["storage_state"] = storage_state_path
         context = self._browser.new_context(**context_kwargs)
         page = context.new_page()
+        selector_timeout_ms = min(timeout_seconds * 1000, 10_000)
         try:
-            try:
-                page.goto(url, wait_until="networkidle", timeout=timeout_seconds * 1000)
-            except PlaywrightTimeoutError:
-                # Some .onion pages keep polling or streaming content, so
-                # networkidle never triggers. Fall back to DOM readiness.
-                page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
+            # Onion sites commonly keep polling or streaming connections open,
+            # so waiting for networkidle adds a full timeout to otherwise loaded
+            # pages. The configured render wait and selectors below handle the
+            # dynamic content after DOM readiness.
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
             _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
             if hide_selectors:
                 selector_rules = ", ".join(hide_selectors)
                 page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
                 page.wait_for_timeout(500)
+            if screenshot_styles:
+                page.add_style_tag(content=screenshot_styles)
+                page.wait_for_timeout(500)
+            if not capture_screenshot:
+                html = _read_page_content(page)
+                self._task_count += 1
+                return html, b""
+            _wait_for_capture_ready(page, timeout_ms=selector_timeout_ms)
             screenshot_png = None
             if screenshot_selectors:
                 try:
                     clip_boxes = []
                     for selector in screenshot_selectors:
-                        page.wait_for_selector(selector, timeout=timeout_seconds * 1000)
+                        page.wait_for_selector(selector, timeout=selector_timeout_ms)
                         locator = page.locator(selector).first
-                        locator.scroll_into_view_if_needed(timeout=timeout_seconds * 1000)
+                        locator.scroll_into_view_if_needed(timeout=selector_timeout_ms)
                         box = locator.bounding_box()
                         if box is not None:
                             clip_boxes.append(box)
@@ -101,6 +133,8 @@ class BrowserClient:
                         max_y = max(box["y"] + box["height"] for box in clip_boxes)
                         screenshot_png = page.screenshot(
                             type="png",
+                            timeout=selector_timeout_ms,
+                            animations="disabled",
                             clip={
                                 "x": min_x,
                                 "y": min_y,
@@ -112,14 +146,23 @@ class BrowserClient:
                     screenshot_png = None
             elif screenshot_selector:
                 try:
-                    page.wait_for_selector(screenshot_selector, timeout=timeout_seconds * 1000)
+                    page.wait_for_selector(screenshot_selector, timeout=selector_timeout_ms)
                     locator = page.locator(screenshot_selector).first
-                    locator.scroll_into_view_if_needed(timeout=timeout_seconds * 1000)
-                    screenshot_png = locator.screenshot(type="png")
+                    locator.scroll_into_view_if_needed(timeout=selector_timeout_ms)
+                    screenshot_png = locator.screenshot(
+                        type="png",
+                        timeout=selector_timeout_ms,
+                        animations="disabled",
+                    )
                 except PlaywrightTimeoutError:
                     screenshot_png = None
             if screenshot_png is None:
-                screenshot_png = page.screenshot(type="png", full_page=True)
+                screenshot_png = page.screenshot(
+                    type="png",
+                    full_page=True,
+                    timeout=selector_timeout_ms,
+                    animations="disabled",
+                )
             # Capture HTML after the page-specific selectors have had a chance to
             # appear. Some forum pages finish rendering well after the initial
             # DOMContentLoaded/networkidle checkpoint, which made us persist a
@@ -139,6 +182,7 @@ class BrowserClient:
         screenshot_selector: str | None = None,
         screenshot_selectors: tuple[str, ...] = (),
         hide_selectors: tuple[str, ...] = (),
+        screenshot_styles: str = "",
     ) -> bytes:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -150,26 +194,35 @@ class BrowserClient:
                 "Gecko/20100101 Firefox/123.0"
             ),
             viewport={"width": 1440, "height": 960},
+            # The supplied HTML is already the rendered evidence document.
+            # Re-running its application bundle can replace that content with
+            # a loading screen while the app hydrates.
+            java_script_enabled=False,
         )
         page = context.new_page()
+        selector_timeout_ms = min(timeout_seconds * 1000, 10_000)
         try:
             rendered_html = _inject_base_href(html, base_url)
+            capture_styles = []
+            if hide_selectors:
+                selector_rules = ", ".join(hide_selectors)
+                capture_styles.append(f"{selector_rules} {{ display: none !important; }}")
+            if screenshot_styles:
+                capture_styles.append(screenshot_styles)
+            rendered_html = _inject_capture_styles(rendered_html, "\n".join(capture_styles))
             page.set_content(rendered_html, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
             page.wait_for_timeout(wait_seconds * 1000)
             _clear_browser_check_interstitial(page, timeout_ms=timeout_seconds * 1000)
-            if hide_selectors:
-                selector_rules = ", ".join(hide_selectors)
-                page.add_style_tag(content=f"{selector_rules} {{ display: none !important; }}")
-                page.wait_for_timeout(500)
 
+            _wait_for_capture_ready(page, timeout_ms=selector_timeout_ms)
             screenshot_png = None
             if screenshot_selectors:
                 try:
                     clip_boxes = []
                     for selector in screenshot_selectors:
-                        page.wait_for_selector(selector, timeout=timeout_seconds * 1000)
+                        page.wait_for_selector(selector, timeout=selector_timeout_ms)
                         locator = page.locator(selector).first
-                        locator.scroll_into_view_if_needed(timeout=timeout_seconds * 1000)
+                        locator.scroll_into_view_if_needed(timeout=selector_timeout_ms)
                         box = locator.bounding_box()
                         if box is not None:
                             clip_boxes.append(box)
@@ -180,6 +233,8 @@ class BrowserClient:
                         max_y = max(box["y"] + box["height"] for box in clip_boxes)
                         screenshot_png = page.screenshot(
                             type="png",
+                            timeout=selector_timeout_ms,
+                            animations="disabled",
                             clip={
                                 "x": min_x,
                                 "y": min_y,
@@ -191,14 +246,23 @@ class BrowserClient:
                     screenshot_png = None
             elif screenshot_selector:
                 try:
-                    page.wait_for_selector(screenshot_selector, timeout=timeout_seconds * 1000)
+                    page.wait_for_selector(screenshot_selector, timeout=selector_timeout_ms)
                     locator = page.locator(screenshot_selector).first
-                    locator.scroll_into_view_if_needed(timeout=timeout_seconds * 1000)
-                    screenshot_png = locator.screenshot(type="png")
+                    locator.scroll_into_view_if_needed(timeout=selector_timeout_ms)
+                    screenshot_png = locator.screenshot(
+                        type="png",
+                        timeout=selector_timeout_ms,
+                        animations="disabled",
+                    )
                 except PlaywrightTimeoutError:
                     screenshot_png = None
             if screenshot_png is None:
-                screenshot_png = page.screenshot(type="png", full_page=True)
+                screenshot_png = page.screenshot(
+                    type="png",
+                    full_page=True,
+                    timeout=selector_timeout_ms,
+                    animations="disabled",
+                )
             self._task_count += 1
             return screenshot_png
         finally:
@@ -239,6 +303,16 @@ def _read_page_content(page, *, attempts: int = 6, wait_ms: int = 250) -> str:
     return ""
 
 
+def _wait_for_capture_ready(page, *, timeout_ms: int) -> None:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    try:
+        page.wait_for_function(_CAPTURE_READY_SCRIPT, timeout=max(timeout_ms, 1_000))
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError("page remained in a loading state; screenshot skipped") from exc
+    page.wait_for_timeout(500)
+
+
 def _inject_base_href(html: str, base_url: str) -> str:
     base_tag = f'<base href="{base_url}">'
     if "<head>" in html:
@@ -246,6 +320,15 @@ def _inject_base_href(html: str, base_url: str) -> str:
     if "<html>" in html:
         return html.replace("<html>", f"<html><head>{base_tag}</head>", 1)
     return f"<head>{base_tag}</head>{html}"
+
+
+def _inject_capture_styles(html: str, styles: str) -> str:
+    if not styles:
+        return html
+    style_tag = f"<style>{styles}</style>"
+    if "</head>" in html:
+        return html.replace("</head>", f"{style_tag}</head>", 1)
+    return f"{style_tag}{html}"
 
 
 def _looks_like_browser_check_page(html: str | None) -> bool:
@@ -342,6 +425,7 @@ def fetch_html_with_browser(
             url=url,
             wait_seconds=wait_seconds,
             timeout_seconds=timeout_seconds,
+            capture_screenshot=False,
         )
         return html
     except Exception:
@@ -357,6 +441,7 @@ def fetch_page_artifacts_with_browser(
     screenshot_selector: str | None = None,
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
+    screenshot_styles: str = "",
     storage_state_path: str | None = None,
 ) -> tuple[str, bytes]:
     requested_proxy = BrowserProxyConfig(server=proxy_server)
@@ -369,6 +454,7 @@ def fetch_page_artifacts_with_browser(
             screenshot_selector=screenshot_selector,
             screenshot_selectors=screenshot_selectors,
             hide_selectors=hide_selectors,
+            screenshot_styles=screenshot_styles,
             storage_state_path=storage_state_path,
         )
     except Exception:
@@ -385,6 +471,7 @@ def screenshot_html_with_browser(
     screenshot_selector: str | None = None,
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
+    screenshot_styles: str = "",
 ) -> bytes:
     requested_proxy = BrowserProxyConfig(server=proxy_server)
     client = _get_or_create_client(requested_proxy)
@@ -397,6 +484,7 @@ def screenshot_html_with_browser(
             screenshot_selector=screenshot_selector,
             screenshot_selectors=screenshot_selectors,
             hide_selectors=hide_selectors,
+            screenshot_styles=screenshot_styles,
         )
     except Exception:
         close_browser_client()

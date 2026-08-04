@@ -85,10 +85,10 @@ def consecutive_failures(rows: list[dict[str, Any]]) -> int:
         status = str(row.get("status") or "")
         if status == "succeeded":
             break
-        if status in {"failed", "stale"}:
+        if status == "failed":
             count += 1
             continue
-        if status in {"running", "enqueued"}:
+        if status in {"running", "enqueued", "stale"}:
             continue
         break
     return count
@@ -101,7 +101,7 @@ def failure_cooldown_until(config: SiteConfig, rows: list[dict[str, Any]]) -> da
         (
             row
             for row in rows
-            if str(row.get("status") or "") in {"failed", "stale"}
+            if str(row.get("status") or "") == "failed"
         ),
         None,
     )

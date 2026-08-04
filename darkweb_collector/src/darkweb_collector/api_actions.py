@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
+import logging
 import time
 from typing import Any
 
@@ -16,6 +17,8 @@ from darkweb_collector.db import (
     get_active_crawl_job,
     get_db_connection,
     get_ransomware_live_sync_state,
+    get_site_connectivity_probe_map,
+    upsert_site_connectivity_probe,
     upsert_crawl_job,
 )
 from darkweb_collector.document_exposure import list_watchlists_payload, scan_watchlist_once
@@ -25,6 +28,7 @@ from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_f
 from darkweb_collector.queueing import BROWSER_RENDER_QUEUE, browser_concurrency, queue_for_seed
 from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
 from darkweb_collector.site_auth import site_auth_readiness
+from darkweb_collector.tor_fetch import fetch_url, is_onion_url
 from darkweb_collector.utils import utc_now_iso
 
 
@@ -41,6 +45,11 @@ DEFAULT_CODE_MONITORING_CONTINUOUS_SEARCH_PAGE_LIMIT = 2
 DEFAULT_CODE_MONITORING_CONTINUOUS_MAX_RESULTS_PER_TERM = 5
 DEFAULT_NETDISK_MONITORING_INTERVAL_SECONDS = 3600
 WORKER_QUEUE_CACHE_TTL_SECONDS = 5
+SITE_CONNECTIVITY_PROBE_INTERVAL_SECONDS = 24 * 60 * 60
+SITE_CONNECTIVITY_MONITOR_POLL_SECONDS = 10 * 60
+
+
+logger = logging.getLogger("darkweb_collector.api_actions")
 
 
 _continuous_lock = Lock()
@@ -109,6 +118,60 @@ _worker_queue_cache_checked_at = 0.0
 _worker_queue_cache: set[str] = set()
 _worker_queue_worker_counts: dict[str, int] = {}
 _worker_queue_worker_names: dict[str, list[str]] = {}
+_worker_queue_refresh_thread: Thread | None = None
+_site_connectivity_monitor_lock = Lock()
+_site_connectivity_monitor_thread: Thread | None = None
+
+
+def _persist_site_connectivity_probe(payload: dict[str, Any]) -> None:
+    with get_db_connection() as connection:
+        upsert_site_connectivity_probe(connection, payload)
+
+
+def probe_site_connectivity(site_name: str) -> dict[str, Any]:
+    config = get_site_config(site_name)
+    url = config.seed_urls[0]
+    fetch_mode = "tor_http" if is_onion_url(url) else config.seed_fetch_mode
+    started = time.perf_counter()
+    try:
+        html = fetch_url(
+            url=url,
+            mode=fetch_mode,
+            timeout_seconds=min(max(config.fetch_timeout_seconds, 5), 30),
+            render_wait_seconds=min(max(config.render_wait_seconds, 1), 5),
+            retries=0,
+        )
+        available = True
+        error = ""
+    except Exception as exc:
+        html = ""
+        available = False
+        error = str(exc).strip()[:500] or type(exc).__name__
+    error_lower = error.lower()
+    failure_reason = (
+        ""
+        if available
+        else "route_unavailable"
+        if any(marker in error_lower for marker in ("socks", "proxy", "tor connection"))
+        else "timeout"
+        if any(marker in error_lower for marker in ("timed out", "timeout"))
+        else "fetch_failed"
+    )
+    latency_ms = max(0, round((time.perf_counter() - started) * 1000))
+    payload = {
+        "site_name": config.site_name,
+        "url": url,
+        "fetch_mode": fetch_mode,
+        "available": available,
+        "status": "available" if available else "unavailable",
+        "latency_ms": latency_ms,
+        "checked_at": utc_now_iso(),
+        "response_bytes": len(html.encode("utf-8", errors="replace")),
+        "failure_reason": failure_reason,
+        "error": error,
+    }
+    _persist_site_connectivity_probe(payload)
+    return payload
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -121,6 +184,79 @@ def _parse_dt(value: str | None) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _tor_route_ready_for_probe(url: str) -> bool:
+    if not is_onion_url(url):
+        return True
+    try:
+        from darkweb_collector.tor_bridge_control import get_tor_bridge_status, load_tor_bridge_settings
+
+        settings = load_tor_bridge_settings()
+        if not settings.get("enabled"):
+            return True
+        return bool(get_tor_bridge_status().get("connected"))
+    except Exception:
+        return True
+
+
+def run_due_site_connectivity_probes(*, now: datetime | None = None) -> dict[str, list[str]]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    with get_db_connection() as connection:
+        latest = get_site_connectivity_probe_map(connection)
+
+    result: dict[str, list[str]] = {
+        "probed": [],
+        "skipped_recent": [],
+        "skipped_route": [],
+        "errors": [],
+    }
+    for config in load_site_configs():
+        if not config.enabled or not config.seed_urls:
+            continue
+        previous = latest.get(config.site_name) or {}
+        checked_at = _parse_dt(str(previous.get("checked_at") or ""))
+        if checked_at is not None and (current - checked_at).total_seconds() < SITE_CONNECTIVITY_PROBE_INTERVAL_SECONDS:
+            result["skipped_recent"].append(config.site_name)
+            continue
+        if not _tor_route_ready_for_probe(config.seed_urls[0]):
+            result["skipped_route"].append(config.site_name)
+            continue
+        try:
+            probe_site_connectivity(config.site_name)
+            result["probed"].append(config.site_name)
+        except Exception as exc:
+            result["errors"].append(config.site_name)
+            logger.warning("daily site connectivity probe failed for %s: %s", config.site_name, exc)
+    return result
+
+
+def _site_connectivity_monitor_loop(stop_event: Event) -> None:
+    while not stop_event.is_set():
+        try:
+            run_due_site_connectivity_probes()
+        except Exception:
+            logger.exception("daily site connectivity monitor failed")
+        if stop_event.wait(SITE_CONNECTIVITY_MONITOR_POLL_SECONDS):
+            break
+
+
+def start_site_connectivity_monitor() -> None:
+    global _site_connectivity_monitor_thread
+    with _site_connectivity_monitor_lock:
+        if _site_connectivity_monitor_thread and _site_connectivity_monitor_thread.is_alive():
+            return
+        stop_event = Event()
+        thread = Thread(
+            target=_site_connectivity_monitor_loop,
+            args=(stop_event,),
+            name="site-connectivity-monitor",
+            daemon=True,
+        )
+        _site_connectivity_monitor_thread = thread
+        thread.start()
 
 
 def _has_recent_running_job_in_queue(connection, queue_name: str, *, exclude_job_id: str = "") -> bool:
@@ -243,6 +379,30 @@ def _refresh_worker_queue_cache_if_needed(*, force: bool = False) -> None:
             _worker_queue_worker_names,
         ) = _refresh_worker_queue_cache()
         _worker_queue_cache_checked_at = now
+
+
+def _refresh_worker_queue_cache_in_background() -> None:
+    global _worker_queue_cache_checked_at, _worker_queue_cache, _worker_queue_worker_counts, _worker_queue_worker_names
+    queues, worker_counts, worker_names = _refresh_worker_queue_cache()
+    with _worker_queue_cache_lock:
+        _worker_queue_cache = queues
+        _worker_queue_worker_counts = worker_counts
+        _worker_queue_worker_names = worker_names
+        _worker_queue_cache_checked_at = time.monotonic()
+
+
+def _schedule_worker_queue_cache_refresh() -> None:
+    global _worker_queue_refresh_thread
+    with _worker_queue_cache_lock:
+        cache_is_fresh = (time.monotonic() - _worker_queue_cache_checked_at) <= WORKER_QUEUE_CACHE_TTL_SECONDS
+        if cache_is_fresh or (_worker_queue_refresh_thread and _worker_queue_refresh_thread.is_alive()):
+            return
+        _worker_queue_refresh_thread = Thread(
+            target=_refresh_worker_queue_cache_in_background,
+            name="worker-queue-status-refresh",
+            daemon=True,
+        )
+        _worker_queue_refresh_thread.start()
 
 
 def _has_queue_worker(queue_name: str) -> bool:
@@ -464,8 +624,8 @@ def get_continuous_dispatch_status() -> dict[str, Any]:
 
 
 def get_browser_runtime_status() -> dict[str, Any]:
+    _schedule_worker_queue_cache_refresh()
     with _worker_queue_cache_lock:
-        _refresh_worker_queue_cache_if_needed(force=True)
         worker_queues = sorted(_worker_queue_cache)
         worker_counts = dict(_worker_queue_worker_counts)
         worker_names = {name: list(names) for name, names in _worker_queue_worker_names.items()}
@@ -1250,8 +1410,6 @@ def _run_netdisk_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict
                 result = scan_watchlist_once(
                     int(watchlist["id"]),
                     source_families=["netdisk_aggregator"],
-                    file_types=list(watchlist.get("file_types") or []),
-                    detail_fetch=False,
                 )
                 errors = list(result.get("errors") or [])
                 aggregate["candidate_count"] += int(result.get("candidates") or 0)

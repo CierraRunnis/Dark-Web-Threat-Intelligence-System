@@ -34,14 +34,14 @@ def _enqueue_detail_task(config: SiteConfig, detail_task: DetailTask) -> str | N
 def crawl_seed(self, site_name: str, force: bool = False) -> dict[str, object]:
     queue_name = _queue_name_from_request(self)
     start_perf = time.perf_counter()
-    mark_job_running(
-        job_id=self.request.id,
-        site_name=site_name,
-        job_type="seed",
-        queue_name=queue_name,
-        target=site_name,
-    )
     try:
+        mark_job_running(
+            job_id=self.request.id,
+            site_name=site_name,
+            job_type="seed",
+            queue_name=queue_name,
+            target=site_name,
+        )
         result = execute_seed_job(
             site_name=site_name,
             queue_name=queue_name,
@@ -102,14 +102,14 @@ def crawl_detail(self, site_name: str, detail_task_payload: dict[str, object]) -
     detail_task = DetailTask.from_dict(detail_task_payload)
     queue_name = _queue_name_from_request(self)
     start_perf = time.perf_counter()
-    mark_job_running(
-        job_id=self.request.id,
-        site_name=site_name,
-        job_type="detail",
-        queue_name=queue_name,
-        target=detail_task.target_url,
-    )
     try:
+        mark_job_running(
+            job_id=self.request.id,
+            site_name=site_name,
+            job_type="detail",
+            queue_name=queue_name,
+            target=detail_task.target_url,
+        )
         result = execute_detail_job(
             site_name=site_name,
             detail_task=detail_task,

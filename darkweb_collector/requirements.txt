@@ -7,3 +7,4 @@ pycountry>=24.6,<25
 Babel>=2.11,<3
 wecom-aibot-sdk>=1.0.8,<2
 PyJWT[crypto]>=2.9,<3
+psutil>=5.9,<8

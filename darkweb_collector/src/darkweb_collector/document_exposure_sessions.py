@@ -7,6 +7,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import time
 from typing import Any
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
@@ -26,10 +27,27 @@ from darkweb_collector.tor_fetch import browser_proxy_server_for_url, is_onion_u
 
 
 LOGIN_WORKER_MODULE = "darkweb_collector.platform_session_login"
+LOGIN_PROCESS_STARTUP_GRACE_SECONDS = 2.0
 
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def visible_platform_login_available() -> bool:
+    if os.environ.get("DARKWEB_FORCE_EMBEDDED_BROWSER") == "1":
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            session_id = ctypes.c_ulong()
+            if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session_id)):
+                return int(session_id.value) != 0
+        except Exception:
+            pass
+        return str(os.environ.get("SESSIONNAME") or "").strip().lower() != "services"
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _normalize_text(value: Any) -> str:
@@ -339,6 +357,8 @@ def build_platform_session_payloads(
 
 def launch_platform_login(platform_name: str) -> dict[str, Any]:
     platform = get_exposure_platform(platform_name)
+    if not visible_platform_login_available():
+        raise ValueError("interactive desktop browser is unavailable")
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
     except Exception as exc:
@@ -359,6 +379,7 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
             "log_path": str(log_path),
             "storage_state_path": str(storage_state_path),
             "user_data_dir": str(user_data_dir),
+            "mode": "external_browser",
             "message": "已有登录窗口在运行，请直接在现有窗口中完成登录。",
         }
     command = [
@@ -389,12 +410,26 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
     }
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    process = subprocess.Popen(command, **popen_kwargs)
+    try:
+        process = subprocess.Popen(command, **popen_kwargs)
+    finally:
+        log_handle.close()
+    startup_deadline = time.monotonic() + LOGIN_PROCESS_STARTUP_GRACE_SECONDS
+    while process.poll() is None and time.monotonic() < startup_deadline:
+        time.sleep(0.1)
+    if process.poll() is not None:
+        log_tail = ""
+        try:
+            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-1200:].strip()
+        except Exception:
+            pass
+        raise ValueError(log_tail or "visible browser exited during startup")
     metadata = {
         "login_pid": int(process.pid),
         "launch_command": command,
         "log_path": str(log_path),
         "user_data_dir": str(user_data_dir),
+        "mode": "external_browser",
         "launched_at": _now_utc_iso(),
     }
     _dump_json_file(launch_meta_path, metadata)
@@ -423,6 +458,7 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
         "log_path": str(log_path),
         "storage_state_path": str(storage_state_path),
         "user_data_dir": str(user_data_dir),
+        "mode": "external_browser",
         "message": "已启动可见浏览器登录会话，请在浏览器中完成登录后关闭窗口，再点击保存会话。",
     }
 

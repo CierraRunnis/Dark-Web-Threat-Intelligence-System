@@ -10,6 +10,7 @@ API_JOBS_URL="${API_BASE_URL}/api/jobs"
 FRONTEND_HOST="127.0.0.1"
 FRONTEND_PORT="${DARKWEB_FRONTEND_PORT:-5173}"
 FRONTEND_URL="http://${FRONTEND_HOST}:${FRONTEND_PORT}"
+NEW_UI_MARKER='<meta name="darkweb-ui" content="xuanjian-new-ui"'
 SERVICE_WAIT_SECONDS=45
 SCHEDULER_INTERVAL_SECONDS="${SCHEDULER_INTERVAL_SECONDS:-60}"
 VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
@@ -32,8 +33,11 @@ TOR_BRIDGE_INSTALLER="$SCRIPT_DIR/install_tor_bridge_runtime.sh"
 COLLECTOR_VENV="$COLLECTOR_ROOT/venv"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 DEFAULT_PROJECT_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
+DEFAULT_USER_DATA_DIR="$HOME/.local/share/bishe"
+DEFAULT_TOR_EXPERT_ROOT="$HOME/.local/share/darkweb-threat-intel/tor-expert"
+DEFAULT_TOR_BRIDGE_RUNTIME_DIR="$DEFAULT_USER_DATA_DIR/tor_bridge_runtime"
 COLLECTOR_SOURCE_DB="${DARKWEB_COLLECTOR_SOURCE_DB_PATH:-}"
-COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$HOME/.local/share/bishe/collector.db}"
+COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$DEFAULT_USER_DATA_DIR/collector.db}"
 COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_DB}.meta.json}"
 COLLECTOR_SITES_FILE="${DARKWEB_COLLECTOR_SITES_FILE:-$COLLECTOR_ROOT/sites.yaml}"
 COLLECTOR_OUTPUT_ROOT="${DARKWEB_COLLECTOR_OUTPUT_ROOT:-$COLLECTOR_ROOT/output}"
@@ -44,6 +48,7 @@ NPM_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/darkweb-threat-intel/npm"
 USER_BIN_DIR="$HOME/.local/bin"
 USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/darkweb-threat-intel"
 USER_ENV_FILE="$USER_CONFIG_DIR/env.sh"
+USER_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/darkweb-threat-intel"
 USER_COMMAND_PATH="$USER_BIN_DIR/darkweb"
 PROFILE_MARKER_BEGIN="# >>> darkweb bootstrap >>>"
 PROFILE_MARKER_END="# <<< darkweb bootstrap <<<"
@@ -51,6 +56,7 @@ RUNTIME_DIR="$COLLECTOR_ROOT/.runtime/wsl"
 LOG_DIR="$RUNTIME_DIR/logs"
 RUNTIME_PORTS_FILE="$RUNTIME_DIR/ports.env"
 SERVICE_STATE_FILE="$RUNTIME_DIR/services.state"
+UNINSTALL_DRY_RUN=0
 
 if [[ -f "$TOR_BRIDGE_INSTALLER" ]]; then
   # shellcheck disable=SC1090
@@ -68,6 +74,46 @@ info() {
 
 warn() {
   echo "[WARN] $*"
+}
+
+normalize_path() {
+  readlink -m -- "$1"
+}
+
+paths_equal() {
+  [[ -n "${1:-}" && -n "${2:-}" ]] || return 1
+  [[ "$(normalize_path "$1")" == "$(normalize_path "$2")" ]]
+}
+
+remove_managed_path() {
+  local path="$1"
+  local expected="$2"
+  local label="$3"
+  local normalized
+  paths_equal "$path" "$expected" || die "refusing to remove unexpected path for ${label}: $path"
+  normalized="$(normalize_path "$path")"
+  case "$normalized" in
+    "" | / | "$HOME") die "refusing to remove unsafe path for ${label}: $normalized" ;;
+  esac
+  [[ -e "$path" || -L "$path" ]] || return 0
+  if [[ "$UNINSTALL_DRY_RUN" == "1" ]]; then
+    info "would remove ${label}: $normalized"
+    return 0
+  fi
+  rm -rf -- "$path"
+}
+
+remove_empty_managed_directory() {
+  local path="$1"
+  local expected="$2"
+  paths_equal "$path" "$expected" || die "refusing to remove unexpected directory: $path"
+  [[ -d "$path" ]] || return 0
+  [[ -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]] || return 0
+  if [[ "$UNINSTALL_DRY_RUN" == "1" ]]; then
+    info "would remove empty directory: $(normalize_path "$path")"
+    return 0
+  fi
+  rmdir -- "$path"
 }
 
 require_command() {
@@ -710,6 +756,33 @@ $PROFILE_MARKER_END
 EOF
 }
 
+remove_shell_startup_marker() {
+  local rc_file="$1"
+  local temp_file
+  [[ -f "$rc_file" ]] || return 0
+  grep -Fq "$PROFILE_MARKER_BEGIN" "$rc_file" || return 0
+  if ! grep -Fq "$PROFILE_MARKER_END" "$rc_file"; then
+    warn "preserving $rc_file because the darkweb startup block is incomplete"
+    return 0
+  fi
+  if [[ "$UNINSTALL_DRY_RUN" == "1" ]]; then
+    info "would remove darkweb startup block from $rc_file"
+    return 0
+  fi
+  temp_file="${rc_file}.tmp.$$"
+  if ! awk -v begin="$PROFILE_MARKER_BEGIN" -v end="$PROFILE_MARKER_END" '
+      $0 == begin { if (skip) invalid = 1; skip = 1; next }
+      $0 == end { if (!skip) invalid = 1; skip = 0; next }
+      !skip { print }
+      END { if (skip || invalid) exit 42 }
+    ' "$rc_file" > "$temp_file"; then
+    rm -f -- "$temp_file"
+    warn "preserving $rc_file because the darkweb startup block is malformed"
+    return 0
+  fi
+  mv "$temp_file" "$rc_file"
+}
+
 register_darkweb_command() {
   load_runtime_ports
   validate_positive_integer "$API_PORT" "DARKWEB_API_PORT"
@@ -792,6 +865,7 @@ ensure_environment() {
   ensure_collector_venv
   [[ -f "$COLLECTOR_ROOT/scripts/serve_api.py" ]] || die "API launcher not found"
   [[ -f "$DASHBOARD_ROOT/package.json" ]] || die "dashboard package.json not found"
+  grep -Fq "$NEW_UI_MARKER" "$DASHBOARD_ROOT/index.html" || die "Xuanjian new UI was not found under $DASHBOARD_ROOT"
 
   ensure_collector_python_dependencies
   ensure_playwright_runtime
@@ -922,7 +996,7 @@ PY
 }
 
 frontend_ready() {
-  curl -fsS "$FRONTEND_URL" >/dev/null 2>&1 || return 1
+  curl -fsS "$FRONTEND_URL" 2>/dev/null | grep -Fq "$NEW_UI_MARKER" || return 1
   api_ready "$FRONTEND_URL/api/health"
 }
 
@@ -1194,7 +1268,7 @@ PY" "$SERVICE_WAIT_SECONDS"; then
   )
   save_service_records "${service_records[@]}"
 
-  if ! wait_for_condition "curl -fsS '$FRONTEND_URL' >/dev/null 2>&1 && python3 - <<'PY'
+  if ! wait_for_condition "curl -fsS '$FRONTEND_URL' 2>/dev/null | grep -Fq '$NEW_UI_MARKER' && python3 - <<'PY'
 import json
 import sys
 from urllib.request import urlopen
@@ -1228,6 +1302,122 @@ stop_services() {
   sync_runtime_db_to_source
   rm -f -- "$SERVICE_STATE_FILE"
   info "tmux session stopped: $SESSION_NAME"
+}
+
+stop_tor_bridge_for_uninstall() {
+  local pid_file="$DEFAULT_TOR_BRIDGE_RUNTIME_DIR/tor.pid"
+  if [[ -x "$COLLECTOR_VENV/bin/python" ]]; then
+    if ! (
+      cd "$COLLECTOR_ROOT"
+      PYTHONPATH="$COLLECTOR_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+        "$COLLECTOR_VENV/bin/python" -c 'from darkweb_collector.tor_bridge_control import stop_tor_bridge; stop_tor_bridge()'
+    ) >/dev/null 2>&1; then
+      warn "Tor bridge process could not be stopped cleanly"
+    fi
+    return 0
+  fi
+  if [[ -f "$pid_file" ]]; then
+    local tor_pid cmdline
+    tor_pid="$(tr -dc '0-9' < "$pid_file")"
+    if [[ -n "$tor_pid" && -r "/proc/$tor_pid/cmdline" ]]; then
+      cmdline="$(tr '\0' ' ' < "/proc/$tor_pid/cmdline")"
+      if [[ "$cmdline" == *"$DEFAULT_TOR_BRIDGE_RUNTIME_DIR/torrc"* ]]; then
+        kill "$tor_pid" 2>/dev/null || true
+      else
+        warn "preserving PID $tor_pid because it is not the managed Tor bridge process"
+      fi
+    fi
+  fi
+}
+
+remove_pansou_container_for_uninstall() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local image
+  image="$(docker inspect --format '{{.Config.Image}}' "$PANSOU_CONTAINER_NAME" 2>/dev/null || true)"
+  [[ "$image" == "$PANSOU_IMAGE" ]] || return 0
+  if [[ "$UNINSTALL_DRY_RUN" == "1" ]]; then
+    info "would remove project PanSou container: $PANSOU_CONTAINER_NAME"
+    return 0
+  fi
+  docker rm -f "$PANSOU_CONTAINER_NAME" >/dev/null 2>&1 || warn "could not remove PanSou container $PANSOU_CONTAINER_NAME"
+}
+
+remove_darkweb_registration() {
+  remove_shell_startup_marker "$HOME/.profile"
+  remove_shell_startup_marker "$HOME/.bashrc"
+  remove_managed_path "$USER_COMMAND_PATH" "$HOME/.local/bin/darkweb" "darkweb command"
+  remove_managed_path "$USER_ENV_FILE" "${XDG_CONFIG_HOME:-$HOME/.config}/darkweb-threat-intel/env.sh" "darkweb environment file"
+  remove_empty_managed_directory "$USER_CONFIG_DIR" "${XDG_CONFIG_HOME:-$HOME/.config}/darkweb-threat-intel"
+}
+
+uninstall_project() {
+  local mode="keep-data"
+  local confirmed=0
+  local argument
+  for argument in "$@"; do
+    case "$argument" in
+      keep-data | purge-data) mode="$argument" ;;
+      --yes | -y) confirmed=1 ;;
+      --dry-run) UNINSTALL_DRY_RUN=1 ;;
+      *) die "unsupported uninstall option: $argument (use keep-data|purge-data [--yes] [--dry-run])" ;;
+    esac
+  done
+
+  if [[ "$mode" == "purge-data" && "$confirmed" != "1" && "$UNINSTALL_DRY_RUN" != "1" ]]; then
+    local answe
+    read -r -p "This permanently deletes the darkweb database, collected output, sessions, and local account settings. Type DELETE to continue: " answe
+    [[ "$answer" == "DELETE" ]] || die "uninstall cancelled; no data was deleted"
+  fi
+
+  if [[ "$UNINSTALL_DRY_RUN" == "1" ]]; then
+    info "would stop darkweb managed services"
+  else
+    stop_tor_bridge_for_uninstall
+    if command -v tmux >/dev/null 2>&1; then
+      stop_services
+    else
+      cleanup_stray_processes
+      warn "tmux is unavailable; no tmux session cleanup was needed"
+    fi
+  fi
+
+  remove_pansou_container_for_uninstall
+  remove_darkweb_registration
+  remove_managed_path "$COLLECTOR_VENV" "$COLLECTOR_ROOT/venv" "Python virtual environment"
+  remove_managed_path "$DASHBOARD_ROOT/node_modules" "$DASHBOARD_ROOT/node_modules" "dashboard dependencies"
+  remove_managed_path "$DASHBOARD_ROOT/dist" "$DASHBOARD_ROOT/dist" "dashboard build output"
+  remove_managed_path "$RUNTIME_DIR" "$COLLECTOR_ROOT/.runtime/wsl" "WSL/Linux runtime files"
+  remove_managed_path "$NPM_CACHE_DIR" "${XDG_CACHE_HOME:-$HOME/.cache}/darkweb-threat-intel/npm" "project npm cache"
+  remove_managed_path "$USER_STATE_DIR" "${XDG_STATE_HOME:-$HOME/.local/state}/darkweb-threat-intel" "project update state"
+  remove_managed_path "$DEFAULT_TOR_BRIDGE_RUNTIME_DIR" "$HOME/.local/share/bishe/tor_bridge_runtime" "Tor bridge runtime files"
+  remove_managed_path "$DEFAULT_TOR_EXPERT_ROOT" "$HOME/.local/share/darkweb-threat-intel/tor-expert" "project Tor Expert Bundle"
+  remove_managed_path "$HOME/.local/bin/darkweb-tor" "$HOME/.local/bin/darkweb-tor" "project Tor launcher"
+  remove_managed_path "$COLLECTOR_ROOT/dump.rdb" "$COLLECTOR_ROOT/dump.rdb" "project Redis cache"
+
+  if ! paths_equal "${TOR_EXPERT_ROOT:-$DEFAULT_TOR_EXPERT_ROOT}" "$DEFAULT_TOR_EXPERT_ROOT"; then
+    warn "preserving custom Tor runtime outside the managed data directory: $TOR_EXPERT_ROOT"
+  fi
+
+  if [[ "$mode" == "purge-data" ]]; then
+    if ! paths_equal "$COLLECTOR_OUTPUT_ROOT" "$COLLECTOR_ROOT/output"; then
+      warn "preserving custom output directory outside the managed project location: $COLLECTOR_OUTPUT_ROOT"
+    fi
+    if ! paths_equal "$COLLECTOR_RUNTIME_DB" "$DEFAULT_USER_DATA_DIR/collector.db"; then
+      warn "preserving custom database outside the managed data directory: $COLLECTOR_RUNTIME_DB"
+    fi
+    remove_managed_path "$COLLECTOR_ROOT/output" "$COLLECTOR_ROOT/output" "collected output"
+    remove_managed_path "$COLLECTOR_ROOT/output-archive" "$COLLECTOR_ROOT/output-archive" "archived collected output"
+    for argument in "" "-wal" "-shm" "-journal"; do
+      remove_managed_path "$DEFAULT_PROJECT_SOURCE_DB$argument" "$COLLECTOR_ROOT/data/collector.db$argument" "project database file"
+    done
+    remove_managed_path "$DEFAULT_USER_DATA_DIR" "$HOME/.local/share/bishe" "darkweb user data"
+    info "uninstall complete: managed runtime and data were removed"
+  else
+    info "uninstall complete: data was preserved"
+    info "preserved database: $COLLECTOR_RUNTIME_DB"
+    info "preserved collected output: $COLLECTOR_OUTPUT_ROOT"
+  fi
+  info "the source checkout and shared system dependencies were not removed"
 }
 
 attach_session() {
@@ -1271,6 +1461,9 @@ show_status() {
 
 main() {
   local action="${1:-start}"
+  if (( $# > 0 )); then
+    shift
+  fi
   sanitize_path_overrides
   case "$action" in
     start)
@@ -1293,10 +1486,13 @@ main() {
     register)
       register_darkweb_command
       ;;
+    uninstall)
+      uninstall_project "$@"
+      ;;
     *)
-      die "unsupported action: $action (use start|stop|attach|status|install|register)"
+      die "unsupported action: $action (use start|stop|attach|status|install|register|uninstall)"
       ;;
   esac
 }
 
-main "${1:-start}"
+main "$@"

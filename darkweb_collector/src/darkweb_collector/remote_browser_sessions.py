@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import base64
 import json
 import os
-from queue import Queue
+from queue import Empty, Full, Queue
 import shutil
 import socket
 import subprocess
@@ -25,7 +25,7 @@ from darkweb_collector.document_exposure_sessions import (
 from darkweb_collector.tor_fetch import browser_proxy_server_for_url, is_onion_url
 
 
-REMOTE_LOGIN_VIEWPORT = {"width": 1366, "height": 900}
+REMOTE_LOGIN_VIEWPORT = {"width": 1024, "height": 675}
 _REMOTE_SESSIONS: dict[str, "RemoteBrowserSession"] = {}
 _REMOTE_SESSIONS_LOCK = Lock()
 
@@ -228,6 +228,8 @@ class RemoteBrowserSession:
     xvfb_process: subprocess.Popen | None = None
     window_manager_process: subprocess.Popen | None = None
     vnc_process: subprocess.Popen | None = None
+    cdp_stream: bool = False
+    last_error: str = ""
 
 
 def _state_payload(
@@ -247,23 +249,42 @@ def _state_payload(
         url = str(page.url or "")
     except Exception:
         url = ""
-    if include_screenshot:
-        png = page.screenshot(type="png", full_page=False)
-        screenshot = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    cdp_stream = bool(getattr(session, "cdp_stream", False))
+    if include_screenshot and not cdp_stream:
+        try:
+            png = page.screenshot(type="png", full_page=False)
+            screenshot = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        except Exception as exc:
+            if not session.last_error:
+                session.last_error = str(exc)
     return {
         "session_id": session.session_id,
         "platform": session.platform,
         "label": session.label,
-        "mode": "embedded_browser" if session.vnc_port else "headless_control",
+        "mode": "embedded_browser" if session.vnc_port or cdp_stream else "headless_control",
         "title": title,
         "url": url,
+        "login_url": session.login_url,
+        "homepage_url": session.homepage_url,
         "screenshot": screenshot,
         "rfb_ws_path": f"/api/platform-sessions/remote-login/{session.session_id}/rfb" if session.vnc_port else "",
+        "stream_ws_path": f"/api/platform-sessions/remote-login/{session.session_id}/stream" if cdp_stream else "",
         "viewport": dict(REMOTE_LOGIN_VIEWPORT),
         "storage_state_path": session.storage_state_path,
         "user_data_dir": session.user_data_dir,
         "created_at": session.created_at,
+        "last_error": session.last_error,
     }
+
+
+def _navigate_remote_page(session: RemoteBrowserSession, page: Any, url: str) -> bool:
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:
+        session.last_error = str(exc)
+        return False
+    session.last_error = ""
+    return True
 
 
 def _save_platform_session(session: RemoteBrowserSession, account_label: str) -> dict[str, Any]:
@@ -271,7 +292,7 @@ def _save_platform_session(session: RemoteBrowserSession, account_label: str) ->
     metadata = {
         "remote_browser_session": True,
         "remote_session_id": session.session_id,
-        "remote_browser_mode": "embedded_browser" if session.vnc_port else "headless_control",
+        "remote_browser_mode": "embedded_browser" if session.vnc_port or session.cdp_stream else "headless_control",
         "user_data_dir": session.user_data_dir,
         "saved_at": updated_at,
     }
@@ -347,6 +368,69 @@ def _validate_session_before_save(session: RemoteBrowserSession, page: Any) -> N
 def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) -> None:
     playwright = None
     context = None
+    cdp_session = None
+    stream_clients: dict[str, Queue] = {}
+
+    def stop_cdp_stream() -> None:
+        nonlocal cdp_session
+        if cdp_session is None:
+            return
+        try:
+            cdp_session.send("Page.stopScreencast")
+        except Exception:
+            pass
+        try:
+            cdp_session.detach()
+        except Exception:
+            pass
+        cdp_session = None
+
+    def publish_frame(event: dict[str, Any]) -> None:
+        if cdp_session is None:
+            return
+        frame_session_id = int(event.get("sessionId") or 0)
+        try:
+            cdp_session.send("Page.screencastFrameAck", {"sessionId": frame_session_id})
+        except Exception:
+            pass
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+        frame = {
+            "type": "frame",
+            "data": str(event.get("data") or ""),
+            "width": int(metadata.get("deviceWidth") or REMOTE_LOGIN_VIEWPORT["width"]),
+            "height": int(metadata.get("deviceHeight") or REMOTE_LOGIN_VIEWPORT["height"]),
+        }
+        for frame_queue in list(stream_clients.values()):
+            try:
+                frame_queue.put_nowait(frame)
+            except Full:
+                try:
+                    frame_queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    frame_queue.put_nowait(frame)
+                except Full:
+                    pass
+
+    def start_cdp_stream(page: Any) -> None:
+        nonlocal cdp_session
+        if cdp_session is not None:
+            return
+        cdp_session = context.new_cdp_session(page)
+        cdp_session.on("Page.screencastFrame", publish_frame)
+        cdp_session.send("Page.enable")
+        cdp_session.send(
+            "Page.startScreencast",
+            {
+                "format": "jpeg",
+                "quality": 72,
+                "maxWidth": REMOTE_LOGIN_VIEWPORT["width"],
+                "maxHeight": REMOTE_LOGIN_VIEWPORT["height"],
+                "everyNthFrame": 1,
+            },
+        )
+
     try:
         from playwright.sync_api import sync_playwright
 
@@ -374,11 +458,15 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
                 launch_kwargs["proxy"] = {"server": proxy_server}
         context = playwright.chromium.launch_persistent_context(session.user_data_dir, **launch_kwargs)
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(session.login_url or session.homepage_url, wait_until="domcontentloaded", timeout=45000)
+        _navigate_remote_page(session, page, session.login_url or session.homepage_url)
         startup_queue.put(("ok", _state_payload(session, page)))
 
         while True:
-            command = session.commands.get()
+            try:
+                command = session.commands.get(timeout=0.04 if stream_clients else None)
+            except Empty:
+                page.wait_for_timeout(10)
+                continue
             op = str(command.get("op") or "")
             payload = command.get("payload") or {}
             response_queue = command["response_queue"]
@@ -388,6 +476,22 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
                     result = _state_payload(session, page)
                 elif op == "control":
                     result = _apply_remote_action(session, page, payload)
+                elif op == "stream_open":
+                    if not session.cdp_stream:
+                        raise ValueError("CDP browser streaming is not enabled for this session")
+                    stream_id = uuid4().hex
+                    frame_queue: Queue = Queue(maxsize=2)
+                    stream_clients[stream_id] = frame_queue
+                    start_cdp_stream(page)
+                    result = {"stream_id": stream_id, "frame_queue": frame_queue}
+                elif op == "stream_input":
+                    _apply_stream_input(page, payload)
+                    result = {"accepted": True}
+                elif op == "stream_close":
+                    stream_clients.pop(str(payload.get("stream_id") or ""), None)
+                    if not stream_clients:
+                        stop_cdp_stream()
+                    result = {"closed": True}
                 elif op == "finish":
                     _validate_session_before_save(session, page)
                     context.storage_state(path=session.storage_state_path)
@@ -406,6 +510,7 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
     except Exception as exc:
         startup_queue.put(("error", str(exc)))
     finally:
+        stop_cdp_stream()
         if context is not None:
             try:
                 context.storage_state(path=session.storage_state_path)
@@ -423,6 +528,58 @@ def _remote_browser_worker(session: RemoteBrowserSession, startup_queue: Queue) 
         _stop_embedded_display(session)
 
 
+def _apply_stream_input(page: Any, payload: dict[str, Any]) -> None:
+    event_type = str(payload.get("type") or "").strip().lower()
+    action = str(payload.get("action") or payload.get("event") or "").strip().lower()
+    if event_type in {"mouse", "pointer"}:
+        x = float(payload.get("x") or 0)
+        y = float(payload.get("y") or 0)
+        button = str(payload.get("button") or "left").strip().lower()
+        if action == "move":
+            page.mouse.move(x, y)
+        elif action == "down":
+            page.mouse.move(x, y)
+            page.mouse.down(button=button)
+        elif action == "up":
+            page.mouse.move(x, y)
+            page.mouse.up(button=button)
+        elif action == "click":
+            page.mouse.click(x, y, button=button)
+        elif action == "wheel":
+            page.mouse.wheel(
+                float(payload.get("deltaX") or payload.get("delta_x") or 0),
+                float(payload.get("deltaY") or payload.get("delta_y") or 0),
+            )
+        else:
+            raise ValueError(f"unsupported pointer action: {action}")
+    elif event_type == "key":
+        key = str(payload.get("key") or "").strip()
+        text = str(payload.get("text") or "")
+        if text and action == "down" and len(text) == 1:
+            page.keyboard.insert_text(text)
+            return
+        if not key:
+            raise ValueError("key is required")
+        if action == "down":
+            page.keyboard.down(key)
+        elif action == "up":
+            page.keyboard.up(key)
+        elif action == "press":
+            page.keyboard.press(key)
+        else:
+            raise ValueError(f"unsupported key action: {action}")
+    elif event_type == "text":
+        page.keyboard.insert_text(str(payload.get("text") or ""))
+    elif event_type == "navigate":
+        url = str(payload.get("url") or "").strip()
+        if url:
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    elif event_type == "reload":
+        page.reload(wait_until="domcontentloaded", timeout=45000)
+    else:
+        raise ValueError(f"unsupported stream input type: {event_type}")
+
+
 def _apply_remote_action(session: RemoteBrowserSession, page: Any, payload: dict[str, Any]) -> dict[str, Any]:
     action = str(payload.get("action") or "").strip().lower()
     if action == "click":
@@ -438,7 +595,7 @@ def _apply_remote_action(session: RemoteBrowserSession, page: Any, payload: dict
     elif action == "navigate":
         url = str(payload.get("url") or "").strip()
         if url:
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            _navigate_remote_page(session, page, url)
     elif action == "wait":
         page.wait_for_timeout(int(payload.get("ms") or 1000))
     elif action == "fill_login_form":
@@ -566,6 +723,7 @@ def start_remote_browser_login(platform_name: str) -> dict[str, Any]:
         user_data_dir=str(user_data_dir),
         created_at=_now_utc_iso(),
         commands=Queue(),
+        cdp_stream=os.name == "nt",
     )
     if os.name != "nt":
         try:
@@ -665,6 +823,80 @@ async def proxy_remote_browser_rfb(session_id: str, websocket: Any) -> None:
         writer.close()
         try:
             await writer.wait_closed()
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+async def proxy_remote_browser_stream(session_id: str, websocket: Any) -> None:
+    try:
+        session = _get_remote_session(session_id)
+    except ValueError:
+        await websocket.close(code=1008)
+        return
+    if not session.cdp_stream:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    try:
+        stream = await asyncio.to_thread(_call_session, session, "stream_open")
+    except Exception:
+        await websocket.close(code=1011)
+        return
+    stream_id = str(stream["stream_id"])
+    frame_queue: Queue = stream["frame_queue"]
+    await websocket.send_json(
+        {
+            "type": "ready",
+            "width": REMOTE_LOGIN_VIEWPORT["width"],
+            "height": REMOTE_LOGIN_VIEWPORT["height"],
+        }
+    )
+
+    async def websocket_to_browser() -> None:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            text = message.get("text")
+            if text is None:
+                continue
+            try:
+                payload = json.loads(str(text))
+                if not isinstance(payload, dict):
+                    raise ValueError("stream input must be a JSON object")
+                await asyncio.to_thread(_call_session, session, "stream_input", payload)
+            except Exception as exc:
+                await websocket.send_json({"type": "error", "message": str(exc)})
+
+    async def browser_to_websocket() -> None:
+        while True:
+            try:
+                frame = frame_queue.get_nowait()
+            except Empty:
+                await asyncio.sleep(0.015)
+                continue
+            await websocket.send_json(frame)
+
+    tasks = [
+        asyncio.create_task(websocket_to_browser()),
+        asyncio.create_task(browser_to_websocket()),
+    ]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    except Exception:
+        pass
+    finally:
+        try:
+            await asyncio.to_thread(_call_session, session, "stream_close", {"stream_id": stream_id})
         except Exception:
             pass
         try:

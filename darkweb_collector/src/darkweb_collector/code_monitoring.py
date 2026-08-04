@@ -94,10 +94,6 @@ DEFAULT_RULE_KEYS = [
     "internal_url",
     "password",
 ]
-DEFAULT_CODE_TERMS = [
-    {"term": "示例企业", "term_type": "company_name", "weight": 0, "enabled": True},
-    {"term": "example.com", "term_type": "domain", "weight": 0, "enabled": True},
-]
 DEFAULT_ENTERPRISE_PROFILE = {
     "official_names": [],
     "brand_aliases": [],
@@ -692,10 +688,14 @@ def _metadata_enterprise_profile(metadata: dict[str, Any] | None, *, organizatio
     profile_payload = profile_payload if isinstance(profile_payload, dict) else {}
     term_rows = terms if isinstance(terms, list) else []
 
-    official_names = _normalize_profile_list(profile_payload.get("official_names"))
+    official_names = [item for item in _normalize_profile_list(profile_payload.get("official_names")) if item != "示例企业"]
     brand_aliases = _normalize_profile_list(profile_payload.get("brand_aliases"))
     english_aliases = _normalize_profile_list(profile_payload.get("english_aliases"), lower=True)
-    root_domains = [_normalize_domain_value(item) for item in _normalize_profile_list(profile_payload.get("root_domains"), lower=True)]
+    root_domains = [
+        value
+        for item in _normalize_profile_list(profile_payload.get("root_domains"), lower=True)
+        if (value := _normalize_domain_value(item)) and value != "example.com"
+    ]
     trusted_subdomain_patterns = []
     for item in _normalize_profile_list(profile_payload.get("trusted_subdomain_patterns"), lower=True):
         normalized = _normalize_text(item).lower()
@@ -705,7 +705,7 @@ def _metadata_enterprise_profile(metadata: dict[str, Any] | None, *, organizatio
     negative_aliases = _normalize_profile_list(profile_payload.get("negative_aliases"), lower=True)
     short_alias_guard = _normalize_profile_list(profile_payload.get("short_alias_guard"), lower=True)
 
-    if organization_name:
+    if organization_name and _normalize_text(organization_name) != "示例企业":
         normalized_org = _normalize_text(organization_name)
         if normalized_org and normalized_org not in official_names:
             official_names.append(normalized_org)
@@ -716,6 +716,8 @@ def _metadata_enterprise_profile(metadata: dict[str, Any] | None, *, organizatio
         term = _normalize_text(row.get("term"))
         term_type = _normalize_text(row.get("term_type"))
         if not term:
+            continue
+        if term in {"示例企业", "example.com"}:
             continue
         if term_type == "domain":
             normalized_domain = _normalize_domain_value(term)
@@ -764,6 +766,51 @@ def _watchlist_enterprise_profile(watchlist: dict[str, Any] | None, terms: list[
     )
 
 
+def _is_legacy_code_placeholder(payload: dict[str, Any] | None) -> bool:
+    item = payload or {}
+    return (
+        _normalize_text(item.get("name") or item.get("watchlist_name") or item.get("watchlistName")) == "默认代码监测对象"
+        and _normalize_text(item.get("organization_name") or item.get("organizationName")) == "示例企业"
+    )
+
+
+def _code_watchlist_public_identity(
+    payload: dict[str, Any] | None,
+    terms: list[dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    item = payload or {}
+    name = _normalize_text(item.get("name") or item.get("watchlist_name") or item.get("watchlistName"))
+    organization = _normalize_text(item.get("organization_name") or item.get("organizationName"))
+    if not _is_legacy_code_placeholder(item):
+        return name, organization
+    rows = [row for row in (terms or []) if isinstance(row, dict) and bool(row.get("enabled", True))]
+    for term_type in ("company_name", "domain"):
+        value = next(
+            (
+                _normalize_text(row.get("term"))
+                for row in rows
+                if _normalize_text(row.get("term_type")) == term_type
+                and _normalize_text(row.get("term")) not in {"示例企业", "example.com"}
+            ),
+            "",
+        )
+        if value:
+            return value, value
+    fallback_term = next(
+        (
+            _normalize_text(row.get("term"))
+            for row in rows
+            if _normalize_text(row.get("term")) not in {"", "示例企业", "example.com"}
+        ),
+        "",
+    )
+    if fallback_term:
+        return fallback_term, fallback_term
+    profile = _watchlist_enterprise_profile(item, rows)
+    fallback = next(iter(profile.get("official_names") or profile.get("root_domains") or []), "")
+    return (fallback, fallback) if fallback else ("", "")
+
+
 def _payload_enterprise_profile(payload: dict[str, Any] | None) -> dict[str, Any]:
     profile_payload = ((payload or {}).get("enterprise_profile") or {}) if isinstance(payload, dict) else {}
     return _metadata_enterprise_profile(
@@ -771,6 +818,39 @@ def _payload_enterprise_profile(payload: dict[str, Any] | None) -> dict[str, Any
         organization_name=str((payload or {}).get("organization_name") or ""),
         terms=list((payload or {}).get("terms") or []),
     )
+
+
+def _public_code_watchlist_payload(
+    watchlist: dict[str, Any] | None,
+    terms: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    item = watchlist or {}
+    public_terms = [
+        dict(row)
+        for row in terms or []
+        if _normalize_text(row.get("term")) not in {"", "示例企业", "example.com"}
+    ]
+    public_name, public_organization = _code_watchlist_public_identity(item, public_terms)
+    metadata = _watchlist_metadata(item)
+    public_row = {key: value for key, value in item.items() if key != "metadata_json"}
+    profile_source = {
+        **item,
+        "name": public_name,
+        "organization_name": public_organization,
+    }
+    return {
+        **public_row,
+        "name": public_name,
+        "organization_name": public_organization,
+        "terms": public_terms,
+        "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
+        "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
+        "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
+        "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
+        "detail_fetch": bool(metadata.get("detail_fetch", True)),
+        "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
+        "enterprise_profile": _watchlist_enterprise_profile(profile_source, public_terms),
+    }
 
 
 def _enterprise_profile_enabled(profile: dict[str, Any] | None) -> bool:
@@ -3804,56 +3884,36 @@ def ensure_default_code_watchlist() -> dict[str, Any]:
     with get_db_connection() as connection:
         existing = list_code_watchlists(connection)
         if existing:
-            watchlist = existing[0]
-            terms = list_code_watch_terms(connection, int(watchlist["id"]))
-            metadata = _watchlist_metadata(watchlist)
-            return {
-                **watchlist,
-                "terms": terms,
-                "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
-                "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
-                "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
-                "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
-                "detail_fetch": bool(metadata.get("detail_fetch", True)),
-                "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
-                "enterprise_profile": _watchlist_enterprise_profile(watchlist, terms),
-            }
-        now = _now_utc_iso()
-        watchlist_id = upsert_code_watchlist(
-            connection,
-            {
-                "name": "默认代码监测对象",
-                "organization_name": "示例企业",
-                "enabled": True,
-                "notes": "代码监测默认对象",
-                "metadata_json": _json_dumps(
-                    {
-                        "platforms": DEFAULT_CODE_PLATFORMS,
-                        "file_extensions": DEFAULT_FILE_EXTENSIONS,
-                        "search_page_limit": DEFAULT_SEARCH_PAGE_LIMIT,
-                        "max_results_per_term": DEFAULT_MAX_RESULTS_PER_TERM,
-                        "detail_fetch": True,
-                        "enabled_rule_keys": DEFAULT_RULE_KEYS,
-                        "enterprise_profile": DEFAULT_ENTERPRISE_PROFILE,
+            migrated: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+            changed = False
+            for watchlist in existing:
+                terms = list_code_watch_terms(connection, int(watchlist["id"]))
+                public = _public_code_watchlist_payload(watchlist, terms)
+                if _is_legacy_code_placeholder(watchlist) and public.get("name"):
+                    metadata = _watchlist_metadata(watchlist)
+                    metadata["enterprise_profile"] = public["enterprise_profile"]
+                    watchlist = {
+                        **watchlist,
+                        "name": public["name"],
+                        "organization_name": public["organization_name"],
+                        "metadata_json": _json_dumps(metadata),
                     }
-                ),
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
-        replace_code_watch_terms(
-            connection,
-            watchlist_id,
-            [{**row, "created_at": now, "updated_at": now} for row in DEFAULT_CODE_TERMS],
-        )
-        connection.commit()
+                    upsert_code_watchlist(connection, watchlist)
+                    if len(public["terms"]) != len(terms):
+                        replace_code_watch_terms(connection, int(watchlist["id"]), public["terms"])
+                    terms = public["terms"]
+                    changed = True
+                migrated.append((watchlist, terms))
+            if changed:
+                connection.commit()
+            return _public_code_watchlist_payload(*migrated[0])
     return {
-        "id": watchlist_id,
-        "name": "默认代码监测对象",
-        "organization_name": "示例企业",
-        "enabled": True,
-        "notes": "代码监测默认对象",
-        "terms": DEFAULT_CODE_TERMS,
+        "id": None,
+        "name": "",
+        "organization_name": "",
+        "enabled": False,
+        "notes": "",
+        "terms": [],
         "platforms": list(DEFAULT_CODE_PLATFORMS),
         "file_extensions": list(DEFAULT_FILE_EXTENSIONS),
         "search_page_limit": DEFAULT_SEARCH_PAGE_LIMIT,
@@ -3862,8 +3922,8 @@ def ensure_default_code_watchlist() -> dict[str, Any]:
         "enabled_rule_keys": list(DEFAULT_RULE_KEYS),
         "enterprise_profile": _payload_enterprise_profile(
             {
-                "organization_name": "绀轰緥浼佷笟",
-                "terms": DEFAULT_CODE_TERMS,
+                "organization_name": "",
+                "terms": [],
                 "enterprise_profile": DEFAULT_ENTERPRISE_PROFILE,
             }
         ),
@@ -3876,20 +3936,11 @@ def list_code_watchlists_payload() -> list[dict[str, Any]]:
         rows = list_code_watchlists(connection)
         payloads = []
         for row in rows:
-            metadata = _watchlist_metadata(row)
-            payloads.append(
-                {
-                    **row,
-                    "terms": list_code_watch_terms(connection, int(row["id"])),
-                    "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
-                    "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
-                    "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
-                    "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
-                    "detail_fetch": bool(metadata.get("detail_fetch", True)),
-                    "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
-                    "enterprise_profile": _watchlist_enterprise_profile(row, list_code_watch_terms(connection, int(row["id"]))),
-                }
-            )
+            terms = list_code_watch_terms(connection, int(row["id"]))
+            public_name, public_organization = _code_watchlist_public_identity(row, terms)
+            if _is_legacy_code_placeholder(row) and not public_name:
+                continue
+            payloads.append(_public_code_watchlist_payload(row, terms))
         return payloads
 
 
@@ -3952,18 +4003,10 @@ def save_code_watchlist_payload(payload: dict[str, Any]) -> dict[str, Any]:
         )
         connection.commit()
         watchlist = get_code_watchlist(connection, watchlist_id)
-        metadata = _watchlist_metadata(watchlist or {})
-        return {
-            **(watchlist or {}),
-            "terms": list_code_watch_terms(connection, watchlist_id),
-            "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
-            "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
-            "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
-            "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
-            "detail_fetch": bool(metadata.get("detail_fetch", True)),
-            "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
-            "enterprise_profile": _watchlist_enterprise_profile(watchlist or {}, list_code_watch_terms(connection, watchlist_id)),
-        }
+        return _public_code_watchlist_payload(
+            watchlist,
+            list_code_watch_terms(connection, watchlist_id),
+        )
 
 
 def delete_code_watchlist_payload(watchlist_id: int) -> dict[str, Any]:
@@ -4629,6 +4672,8 @@ def _build_code_hits_payload(
     with get_db_connection() as connection:
         watchlist_profile_cache: dict[int, dict[str, Any]] = {}
         watchlist_rule_cache: dict[int, list[str]] = {}
+        watchlist_terms_cache: dict[int, list[dict[str, Any]]] = {}
+        watchlist_identity_cache: dict[int, tuple[str, str]] = {}
         rows = list_code_hits(
             connection,
             watchlist_id=watchlist_id,
@@ -4638,6 +4683,16 @@ def _build_code_hits_payload(
             limit=query_limit,
         )
         for row in rows:
+            watchlist_key = int(row.get("watchlist_id") or 0)
+            if watchlist_key not in watchlist_identity_cache:
+                watchlist_terms_cache[watchlist_key] = list_code_watch_terms(connection, watchlist_key)
+                watchlist_identity_cache[watchlist_key] = _code_watchlist_public_identity(
+                    row,
+                    watchlist_terms_cache[watchlist_key],
+                )
+            public_watchlist_name, public_organization_name = watchlist_identity_cache[watchlist_key]
+            if _is_legacy_code_placeholder(row) and not public_watchlist_name:
+                continue
             raw_payload = _parse_json(row.get("raw_json"), {})
             stored_payload = _build_stored_code_hit_payload(row, raw_payload)
             if stored_payload is not None:
@@ -4645,16 +4700,17 @@ def _build_code_hits_payload(
                     continue
                 if bool(stored_payload.get("suppressed")) and not include_suppressed:
                     continue
+                stored_payload["watchlistName"] = public_watchlist_name
+                stored_payload["organizationName"] = public_organization_name
                 payloads.append(stored_payload)
                 continue
             latest_snapshot = (list_code_hit_snapshots(connection, int(row["id"])) or [{}])[0]
-            watchlist_key = int(row.get("watchlist_id") or 0)
             if watchlist_key not in watchlist_profile_cache:
                 metadata = _parse_json(row.get("watchlist_metadata_json"), {})
                 watchlist_profile_cache[watchlist_key] = _metadata_enterprise_profile(
                     metadata,
-                    organization_name=str(row.get("organization_name") or ""),
-                    terms=list_code_watch_terms(connection, watchlist_key),
+                    organization_name=public_organization_name,
+                    terms=watchlist_terms_cache[watchlist_key],
                 )
                 watchlist_rule_cache[watchlist_key] = _normalize_string_list(
                     (metadata or {}).get("enabled_rule_keys"),
@@ -4711,8 +4767,8 @@ def _build_code_hits_payload(
                 {
                     "id": int(row["id"]),
                     "watchlistId": int(row["watchlist_id"]),
-                    "watchlistName": row.get("watchlist_name") or "",
-                    "organizationName": row.get("organization_name") or "",
+                    "watchlistName": public_watchlist_name,
+                    "organizationName": public_organization_name,
                     "platform": row.get("platform") or "",
                     "platformLabel": _platform_label(str(row.get("platform") or "")),
                     "repositoryName": row.get("repository_name") or "",
@@ -4976,6 +5032,9 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
             return None
         watchlist = get_code_watchlist(connection, int(row["watchlist_id"]))
         watchlist_terms = list_code_watch_terms(connection, int(row["watchlist_id"]))
+        public_watchlist_name, public_organization_name = _code_watchlist_public_identity(watchlist, watchlist_terms)
+        if _is_legacy_code_placeholder(watchlist) and not public_watchlist_name:
+            return None
         snapshots = list_code_hit_snapshots(connection, hit_id)
         reviews = list_code_hit_reviews(connection, hit_id)
     raw_payload = _parse_json(row.get("raw_json"), {})
@@ -5057,8 +5116,8 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
     return {
         "id": int(row["id"]),
         "watchlistId": int(row["watchlist_id"]),
-        "watchlistName": watchlist.get("name") if watchlist else "",
-        "organizationName": watchlist.get("organization_name") if watchlist else "",
+        "watchlistName": public_watchlist_name,
+        "organizationName": public_organization_name,
         "platform": row.get("platform") or "",
         "platformLabel": _platform_label(str(row.get("platform") or "")),
         "repositoryName": row.get("repository_name") or "",
@@ -5138,14 +5197,19 @@ def list_code_scan_runs_payload(watchlist_id: int | None = None, limit: int | No
         rows = list_code_scan_runs(connection, watchlist_id=watchlist_id, limit=limit)
     payloads: list[dict[str, Any]] = []
     for row in rows:
+        requested_terms = _parse_json(row.get("requested_terms_json"), [])
+        term_rows = [item if isinstance(item, dict) else {"term": item, "term_type": ""} for item in requested_terms]
+        public_name, public_organization = _code_watchlist_public_identity(row, term_rows)
+        if _is_legacy_code_placeholder(row) and not public_name:
+            continue
         payloads.append(
             {
                 "id": int(row["id"]),
                 "watchlistId": int(row["watchlist_id"]),
-                "watchlistName": row.get("watchlist_name") or "",
-                "organizationName": row.get("organization_name") or "",
+                "watchlistName": public_name,
+                "organizationName": public_organization,
                 "platforms": _normalize_string_list(row.get("platforms_json"), fallback=DEFAULT_CODE_PLATFORMS),
-                "requestedTerms": _parse_json(row.get("requested_terms_json"), []),
+                "requestedTerms": requested_terms,
                 "candidateCount": int(row.get("candidate_count") or 0),
                 "hitCount": int(row.get("hit_count") or 0),
                 "clueHitCount": int(row.get("clue_hit_count") or 0),

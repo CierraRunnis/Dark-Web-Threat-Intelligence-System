@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>漏洞预警 · 玄鉴</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-vulnerability page-vulnerability-intel">
+<div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" data-od-id="vulnerability-sidebar"><a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><path d="M24 3 40 9v12c0 11-6.7 18.5-16 23-9.3-4.5-16-12-16-23V9L24 3Z"/><circle cx="24" cy="22" r="8"/><path d="M14 22h20M24 12v20m-6-4 12-12"/></svg></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span></a><nav class="sidebar-nav" aria-label="主导航"></nav><div class="sidebar-footer"></div></aside>
+    <button class="sidebar-backdrop" data-sidebar-toggle aria-label="关闭导航"></button>
+    <div class="app-stage">
+      <header class="app-header" data-od-id="vulnerability-header"><button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航">☰</button><div class="header-actions"><span class="app-version" data-od-id="vulnerability-version">版本 <strong>v0.20.0</strong></span><span class="avatar" data-od-id="vulnerability-account">个人</span></div></header>
+
+      <main class="app-main" id="content" data-od-id="vulnerability-main">
+        <section class="section" data-od-id="vulnerability-action-section"><div class="page-titlebar module-actions-bar"><div class="page-actions"><button class="btn btn-secondary">今日</button><button class="btn btn-primary">近 7 天</button><button class="btn btn-secondary">近 30 天</button></div></div></section>
+
+        <section class="vuln-intel-kpis" data-od-id="vulnerability-kpis">
+          <article><span>新增漏洞</span><strong data-count="12">0</strong><small>公开源披露</small><i class="spark spark-blue"></i></article>
+          <article><span>严重等级</span><strong data-count="5">0</strong><small>CVSS ≥ 9.0</small><i class="spark spark-red"></i></article>
+          <article><span>已确认利用</span><strong data-count="5">0</strong><small>在野利用信号</small><i class="spark spark-orange"></i></article>
+          <article><span>补丁可用</span><strong data-count="9">0</strong><small>厂商已发布</small><i class="spark spark-green"></i></article>
+        </section>
+
+        <section class="vuln-chart-grid" data-od-id="vulnerability-chart-overview">
+          <article class="card vuln-trend-card dense-panel" data-od-id="vulnerability-disclosure-trend">
+            <div class="panel-header"><div><h2>高危漏洞披露趋势</h2><span class="meta">近 7 天</span></div><div class="trend-summary"><strong>42</strong><span>累计披露</span></div></div>
+            <svg class="vuln-trend-chart" viewBox="0 0 720 230" preserveAspectRatio="none" role="img" aria-label="近七天高危漏洞披露趋势"><defs><linearGradient id="vulnArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--accent)" stop-opacity=".24"/><stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs><g class="chart-gridlines"><path d="M34 35H700M34 85H700M34 135H700M34 185H700"/></g><path class="vuln-area-path" d="M34 176 L145 151 L256 162 L367 108 L478 122 L589 70 L700 45 L700 205 L34 205Z"/><path class="vuln-line-path" d="M34 176 L145 151 L256 162 L367 108 L478 122 L589 70 L700 45"/><g class="vuln-points"><circle cx="34" cy="176" r="4"/><circle cx="145" cy="151" r="4"/><circle cx="256" cy="162" r="4"/><circle cx="367" cy="108" r="4"/><circle cx="478" cy="122" r="4"/><circle cx="589" cy="70" r="4"/><circle cx="700" cy="45" r="4"/></g><g class="vuln-chart-values" aria-hidden="true"><text/><text/><text/><text/><text/><text/><text/></g><g class="chart-labels"><text x="34" y="224">03-04</text><text x="145" y="224">03-05</text><text x="256" y="224">03-06</text><text x="367" y="224">03-07</text><text x="478" y="224">03-08</text><text x="589" y="224">03-09</text><text x="700" y="224">03-10</text></g></svg>
+          </article>
+
+          <article class="card severity-donut-card dense-panel" data-od-id="vulnerability-severity-distribution">
+            <div class="panel-header"><h2>严重等级分布</h2><span class="meta">12 条</span></div>
+            <div class="severity-donut-wrap"><div class="severity-donut"><span><strong>12</strong><small>漏洞</small></span></div><div class="severity-legend"><div><i class="sev-critical"></i><span>严重</span><b>5</b></div><div><i class="sev-high"></i><span>高危</span><b>4</b></div><div><i class="sev-medium"></i><span>中危</span><b>2</b></div><div><i class="sev-low"></i><span>低危</span><b>1</b></div></div></div>
+          </article>
+
+          <article class="card industry-map-card dense-panel" data-od-id="vulnerability-industry-distribution">
+            <div class="panel-header"><h2>关联行业分布</h2><span class="meta">受影响场景</span></div>
+            <div class="industry-treemap"><button class="industry-block industry-manufacturing" data-toast="制造业关联漏洞 26 条"><strong>制造业</strong><span>26</span></button><button class="industry-block industry-finance" data-toast="金融行业关联漏洞 22 条"><strong>金融</strong><span>22</span></button><button class="industry-block industry-government" data-toast="政务行业关联漏洞 18 条"><strong>政务</strong><span>18</span></button><button class="industry-block industry-energy" data-toast="能源行业关联漏洞 16 条"><strong>能源</strong><span>16</span></button><button class="industry-block industry-health" data-toast="医疗行业关联漏洞 12 条"><strong>医疗</strong><span>12</span></button></div>
+          </article>
+        </section>
+
+        <section class="vuln-insight-grid" data-od-id="vulnerability-insight-grid">
+          <article class="card vendor-chart-card dense-panel" data-od-id="vulnerability-vendor-ranking"><div class="panel-header"><h2>高频受影响厂商</h2><span class="meta">TOP 5</span></div><div class="vendor-bars"><div><span>Palo Alto</span><i><b style="--value:100%"></b></i><strong>3</strong></div><div><span>Ivanti</span><i><b style="--value:72%"></b></i><strong>2</strong></div><div><span>Fortinet</span><i><b style="--value:68%"></b></i><strong>2</strong></div><div><span>Apache</span><i><b style="--value:64%"></b></i><strong>2</strong></div><div><span>Oracle</span><i><b style="--value:38%"></b></i><strong>1</strong></div></div></article>
+
+          <article class="card product-cluster-card dense-panel" data-od-id="vulnerability-product-cluster"><div class="panel-header"><h2>受影响产品簇</h2><span class="meta">按产品类型</span></div><div class="product-cluster"><button class="product-bubble edge" data-toast="边界设备漏洞 8 条"><strong>边界设备</strong><span>8</span></button><button class="product-bubble middleware" data-toast="中间件漏洞 6 条"><strong>中间件</strong><span>6</span></button><button class="product-bubble identity" data-toast="身份系统漏洞 4 条"><strong>身份系统</strong><span>4</span></button><button class="product-bubble cloud" data-toast="云组件漏洞 3 条"><strong>云组件</strong><span>3</span></button><button class="product-bubble office" data-toast="办公组件漏洞 2 条"><strong>办公组件</strong><span>2</span></button></div></article>
+
+          <article class="card exploit-signal-card dense-panel" data-od-id="vulnerability-exploit-signals"><div class="panel-header"><h2>利用信号来源</h2><span class="meta">近 7 天</span></div><div class="signal-rings"><div class="signal-ring ring-kev"><span><strong>5</strong><small>已利用</small></span></div><div class="signal-ring ring-poc"><span><strong>7</strong><small>PoC</small></span></div><div class="signal-source-list"><div><i></i><span>权威目录</span><b>5</b></div><div><i></i><span>安全通告</span><b>4</b></div><div><i></i><span>公开 PoC</span><b>7</b></div></div></div></article>
+        </section>
+
+        <section data-od-id="vulnerability-list">
+          <article class="card data-table-panel dense-panel"><div class="panel-header"><h2>公开源高危漏洞 <span class="heading-count" data-table-count="vulnerability-table">5</span></h2><button class="btn btn-secondary" data-toast="当前清单已导出">导出</button></div><div class="toolbar"><div class="tabs compact-tabs" data-target="vulnerability-table"><button class="tab active" data-tab="all">全部</button><button class="tab" data-tab="critical">严重</button><button class="tab" data-tab="high">高危</button></div><select class="select" data-filter-target="vulnerability-table" data-filter-key="industry"><option value="">全部行业</option><option value="制造业">制造业</option><option value="金融">金融</option><option value="政务">政务</option><option value="能源">能源</option></select><div class="search-field"><input class="input" data-table-search="vulnerability-table" placeholder="搜索 CVE、厂商、产品或行业"></div></div><div class="table-wrap"><table class="ds-table" id="vulnerability-table" data-table><thead><tr><th>披露时间</th><th>CVE / 漏洞</th><th>厂商 / 产品</th><th>关联行业</th><th>CVSS</th><th>利用状态</th><th>补丁</th><th>查看</th></tr></thead><tbody>
+            <tr data-category="critical" data-industry="制造业"><td class="num">03-10 09:31</td><td class="table-title">CVE-2026-24001<span>GlobalProtect 未授权命令执行</span></td><td>Palo Alto / PAN-OS</td><td><span class="industry-tag">制造业</span></td><td class="num risk-score">10.0</td><td><span class="badge badge-critical vuln-signal vuln-signal--exploited">已利用</span></td><td><span class="badge badge-success vuln-signal vuln-signal--released">已发布</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-24001">详情</a></td></tr>
+            <tr data-category="high" data-industry="金融"><td class="num">03-10 08:54</td><td class="table-title">CVE-2026-18113<span>Tomcat 请求走私</span></td><td>Apache / Tomcat</td><td><span class="industry-tag">金融</span></td><td class="num">8.8</td><td><span class="badge vuln-signal vuln-signal--watch">待观察</span></td><td><span class="badge badge-success vuln-signal vuln-signal--released">已发布</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-18113">详情</a></td></tr>
+            <tr data-category="critical" data-industry="政务"><td class="num">03-10 08:07</td><td class="table-title">CVE-2026-17420<span>Connect Secure 身份认证绕过</span></td><td>Ivanti / Connect Secure</td><td><span class="industry-tag">政务</span></td><td class="num risk-score">9.1</td><td><span class="badge badge-critical vuln-signal vuln-signal--exploited">已利用</span></td><td><span class="badge badge-success vuln-signal vuln-signal--released">已发布</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-17420">详情</a></td></tr>
+            <tr data-category="critical" data-industry="金融"><td class="num">03-10 07:22</td><td class="table-title">CVE-2026-20884<span>WebLogic 反序列化</span></td><td>Oracle / WebLogic</td><td><span class="industry-tag">金融</span></td><td class="num risk-score">9.8</td><td><span class="badge vuln-signal vuln-signal--poc">PoC 可用</span></td><td><span class="badge badge-success vuln-signal vuln-signal--released">已发布</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-20884">详情</a></td></tr>
+            <tr data-category="high" data-industry="能源"><td class="num">03-10 06:41</td><td class="table-title">CVE-2026-21101<span>FortiManager 任意文件写入</span></td><td>Fortinet / FortiManager</td><td><span class="industry-tag">能源</span></td><td class="num">8.7</td><td><span class="badge badge-critical vuln-signal vuln-signal--exploited">已利用</span></td><td><span class="badge badge-high vuln-signal vuln-signal--mitigation">缓解措施</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-21101">详情</a></td></tr>
+          </tbody></table></div><div class="empty-state" data-table-empty="vulnerability-table">暂无匹配漏洞</div></article>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status"></div><script src="app.js"></script>
+</body>
+</html>
