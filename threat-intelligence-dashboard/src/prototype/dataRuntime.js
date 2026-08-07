@@ -2003,6 +2003,8 @@ function openCollectorRemoteLogin(site, options = {}) {
         </div>
         <div class="collector-browser-head-actions">
           <span class="badge" data-browser-status hidden>启动中</span>
+          <button class="btn btn-secondary" type="button" data-browser-captcha hidden>识别验证码</button>
+          <button class="btn btn-secondary" type="button" data-browser-captcha-report hidden>报错返分</button>
           <button class="btn btn-primary" type="button" data-browser-save>保存会话</button>
           <button class="btn btn-secondary" type="button" data-browser-close>关闭</button>
         </div>
@@ -2031,6 +2033,8 @@ function openCollectorRemoteLogin(site, options = {}) {
   const empty = query(overlay, '[data-browser-empty]')
   const errorNode = query(overlay, '[data-browser-error]')
   const canvas = query(overlay, '[data-browser-canvas]')
+  const captchaButton = query(overlay, '[data-browser-captcha]')
+  const captchaReportButton = query(overlay, '[data-browser-captcha-report]')
 
   const setStatus = (label, tone = '') => {
     statusNode.textContent = label
@@ -2066,6 +2070,8 @@ function openCollectorRemoteLogin(site, options = {}) {
   const renderState = (payload) => {
     browserState = payload || browserState
     if (!browserState) return
+    captchaButton.hidden = !browserState.captcha_recognition_available
+    captchaReportButton.hidden = !browserState.captcha_error_report_available
     setText(overlay, '[data-browser-dialog-title]', `${displayLabel}登录`)
     if (browserState.stream_ws_path) connectStream(browserState.stream_ws_path)
     if (browserState.screenshot) {
@@ -2136,6 +2142,22 @@ function openCollectorRemoteLogin(site, options = {}) {
   }
 
   query(overlay, '[data-browser-close]').addEventListener('click', () => closeDialog())
+  query(overlay, '[data-browser-captcha]').addEventListener('click', async () => {
+    setStatus('正在识别验证码')
+    const state = await control('solve_captcha')
+    if (state?.action_result?.captcha_filled) {
+      setStatus('验证码已填入', 'badge-success')
+      showToast('验证码识别结果已填入登录页面')
+    }
+  })
+  query(overlay, '[data-browser-captcha-report]').addEventListener('click', async () => {
+    setStatus('正在报错返分')
+    const state = await control('report_captcha_error')
+    if (state?.action_result?.reported) {
+      setStatus('已报错返分', 'badge-success')
+      showToast('该次验证码识别已向超级鹰报错')
+    }
+  })
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay) closeDialog()
   })

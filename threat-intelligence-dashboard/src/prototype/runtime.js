@@ -1217,6 +1217,7 @@ export function initializePrototype() {
       if (collectorAction.startsWith('bot-')) return 'bot'
       if (['watchlist-save', 'watchlist-delete'].includes(codeAction)) return 'watchlists'
       if (['github-save', 'github-delete'].includes(codeAction)) return 'github'
+      if (['changan-save', 'changan-test', 'changan-delete'].includes(codeAction)) return 'changan'
       if (['sessions-detect', 'session-login', 'session-save', 'session-delete'].includes(codeAction)) return 'code-sessions'
       if (['session-detect', 'session-login', 'session-save'].includes(exposureAction)) return 'document-sessions'
       return ''
@@ -1293,6 +1294,81 @@ export function initializePrototype() {
       if (error) {
         error.textContent = payload.lastError || payload.last_error || ''
         error.hidden = !error.textContent
+      }
+    }
+
+    function renderChaojiying(payload = {}) {
+      const configured = Boolean(payload.configured)
+      const managedConfigured = Boolean(payload.managedConfigured)
+      const hasError = Boolean(payload.lastError || payload.last_error)
+      const status = $('[data-bind="chaojiying-status"]', root)
+      if (status) {
+        status.textContent = !configured ? '未配置' : hasError ? '配置异常' : payload.managedByEnvironment ? '环境变量配置' : '已配置'
+        status.dataset.configured = configured ? '1' : '0'
+        status.dataset.managedConfigured = managedConfigured ? '1' : '0'
+        status.classList.remove('badge-success', 'badge-critical')
+        if (configured && !hasError) status.classList.add('badge-success')
+        if (hasError) status.classList.add('badge-critical')
+      }
+      bindText('chaojiying-config-state', configured ? '凭据完整' : '未配置')
+      bindText('chaojiying-credential-state', payload.hasUser && payload.hasCredential ? '已保存' : '缺失')
+      bindText('chaojiying-soft-id-state', payload.hasSoftId ? '已设置' : '未设置')
+      bindText('chaojiying-code-type', payload.defaultCodeType || '5000')
+      setControlValue('#chaojiying-user', '')
+      setControlValue('#chaojiying-password', '')
+      setControlValue('#chaojiying-soft-id', '')
+      const error = $('[data-bind="chaojiying-last-error"]', root)
+      if (error) {
+        error.textContent = payload.lastError || payload.last_error || ''
+        error.hidden = !error.textContent
+      }
+      const deleteButton = $('[data-code-action="chaojiying-delete"]', root)
+      if (deleteButton) {
+        deleteButton.disabled = !managedConfigured
+        if (managedConfigured) delete deleteButton.dataset.runtimeUnsupported
+        else deleteButton.dataset.runtimeUnsupported = '1'
+      }
+    }
+
+    function renderChanganAutoLogin(payload = {}) {
+      const configured = Boolean(payload.configured)
+      const ready = Boolean(payload.ready)
+      const providerConfigured = Boolean(payload.providerConfigured)
+      const managedConfigured = Boolean(payload.managedConfigured)
+      const enabled = payload.enabled !== false
+      const hasError = Boolean(payload.lastError || payload.last_error || payload.lastValidationSuccess === false)
+      const status = $('[data-bind="changan-auto-login-status"]', root)
+      if (status) {
+        status.textContent = !configured ? '未配置' : !providerConfigured ? '待配置验证码服务' : !enabled ? '已停用' : hasError ? '验证异常' : payload.managedByEnvironment ? '环境变量配置' : '已启用'
+        status.dataset.managedConfigured = managedConfigured ? '1' : '0'
+        status.classList.remove('badge-success', 'badge-critical')
+        if (ready && enabled && !hasError) status.classList.add('badge-success')
+        if (hasError) status.classList.add('badge-critical')
+      }
+      bindText('changan-config-state', configured ? '凭据完整' : '未配置')
+      bindText('changan-provider-state', providerConfigured ? '可用' : '未配置')
+      bindText('changan-enabled-state', enabled ? '已启用' : '已停用')
+      bindText('changan-last-validated', formatDate(payload.lastValidatedAt || payload.last_validated_at))
+      setControlValue('#changan-account', '')
+      setControlValue('#changan-password', '')
+      const enabledControl = $('#changan-auto-enabled', root)
+      if (enabledControl) enabledControl.checked = enabled
+      const error = $('[data-bind="changan-last-error"]', root)
+      if (error) {
+        error.textContent = payload.lastError || payload.last_error || ''
+        error.hidden = !error.textContent
+      }
+      const deleteButton = $('[data-code-action="changan-delete"]', root)
+      if (deleteButton) {
+        deleteButton.disabled = !managedConfigured
+        if (managedConfigured) delete deleteButton.dataset.runtimeUnsupported
+        else deleteButton.dataset.runtimeUnsupported = '1'
+      }
+      const testButton = $('[data-code-action="changan-test"]', root)
+      if (testButton) {
+        testButton.disabled = !ready
+        if (ready) delete testButton.dataset.runtimeUnsupported
+        else testButton.dataset.runtimeUnsupported = '1'
       }
     }
 
@@ -2393,6 +2469,8 @@ export function initializePrototype() {
       }
       if (root.hasAttribute('data-needs-code-config')) {
         tasks.push(['/api/code-monitoring/github-app', renderGithubApp, 'github'])
+        tasks.push(['/api/captcha-providers/chaojiying', renderChaojiying, 'chaojiying'])
+        tasks.push(['/api/platform-sessions/changan/auto-login', renderChanganAutoLogin, 'changan'])
         tasks.push(['/api/platform-sessions?module=code_monitoring', renderCodeSessions, 'code-sessions'])
         tasks.push(['/api/code-monitoring/watchlists', renderCodeWatchlists, 'watchlists'])
         tasks.push(['/api/exposure-watchlists', renderExposureWatchlists, 'watchlists'])
@@ -2592,6 +2670,61 @@ export function initializePrototype() {
       if (codeAction === 'github-delete') {
         if (!window.confirm('确认删除 GitHub App 配置？现有代码平台会话不会被删除。')) return
         return void runAction(button, () => request('/api/code-monitoring/github-app', { method: 'DELETE' }), 'GitHub App 配置已删除')
+      }
+      if (codeAction === 'chaojiying-refresh') return void runAction(button, async () => renderChaojiying(await request('/api/captcha-providers/chaojiying')), '超级鹰状态已刷新')
+      if (codeAction === 'chaojiying-save') return void runAction(button, async () => {
+        const user = $('#chaojiying-user', root)?.value.trim() || ''
+        const password = $('#chaojiying-password', root)?.value || ''
+        const configured = $('[data-bind="chaojiying-status"]', root)?.dataset.configured === '1'
+        if (!configured && (!user || !password)) throw new Error('首次配置必须填写超级鹰账号和密码')
+        renderChaojiying(await request('/api/captcha-providers/chaojiying', {
+          method: 'PUT',
+          body: JSON.stringify({
+            user,
+            password,
+            soft_id: $('#chaojiying-soft-id', root)?.value.trim() || ''
+          })
+        }))
+        renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login'))
+      }, '超级鹰公共配置已保存')
+      if (codeAction === 'chaojiying-delete') {
+        if (!window.confirm('删除后，所有依赖超级鹰的站点都将无法自动识别验证码。确认删除？')) return
+        return void runAction(button, async () => {
+          renderChaojiying(await request('/api/captcha-providers/chaojiying', { method: 'DELETE' }))
+          renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login'))
+        }, '超级鹰公共配置已删除')
+      }
+      if (codeAction === 'changan-refresh') return void runAction(button, async () => renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login')), '长安自动登录状态已刷新')
+      if (codeAction === 'changan-save') return void runAction(button, async () => {
+        const changanUsername = $('#changan-account', root)?.value.trim() || ''
+        const changanPassword = $('#changan-password', root)?.value || ''
+        const managedConfigured = $('[data-bind="changan-auto-login-status"]', root)?.dataset.managedConfigured === '1'
+        if (!managedConfigured && [changanUsername, changanPassword].some((value) => !value)) {
+          throw new Error('首次配置必须填写长安账号和长安密码')
+        }
+        renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login', {
+          method: 'PUT',
+          body: JSON.stringify({
+            enabled: Boolean($('#changan-auto-enabled', root)?.checked),
+            changan_username: changanUsername,
+            changan_password: changanPassword
+          })
+        }))
+      }, '长安自动登录配置已保存')
+      if (codeAction === 'changan-test') {
+        if (!window.confirm('本次测试会请求真实验证码并消耗超级鹰题分；识别错误时会自动调用报错接口返分。确认继续？')) return
+        return void runAction(button, async () => {
+          try {
+            renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login/test', { method: 'POST' }))
+          } catch (error) {
+            try { renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login')) } catch {}
+            throw error
+          }
+        }, '长安自动登录测试成功')
+      }
+      if (codeAction === 'changan-delete') {
+        if (!window.confirm('删除后会话过期时将无法使用前端保存的凭据自动恢复。确认删除？')) return
+        return void runAction(button, async () => renderChanganAutoLogin(await request('/api/platform-sessions/changan/auto-login', { method: 'DELETE' })), '长安自动登录配置已删除')
       }
       if (codeAction === 'sessions-detect') return void runAction(button, async () => renderCodeSessions(await request('/api/platform-sessions/auto-detect?module=code_monitoring', { method: 'POST' })), '平台会话检测完成')
       if (codeAction === 'session-login') return void runAction(button, () => startPlatformLogin(button.dataset.platform), button.dataset.platform + ' 登录流程已启动')

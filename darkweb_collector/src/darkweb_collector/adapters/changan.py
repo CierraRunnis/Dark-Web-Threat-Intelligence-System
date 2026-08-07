@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from darkweb_collector.adapters.base import SiteAdapter
 from darkweb_collector.browser_client import fetch_page_artifacts_with_browser
+from darkweb_collector.changan_auto_login import recover_changan_session
 from darkweb_collector.db import (
     get_db_connection,
     get_forum_detail_snapshot,
@@ -88,7 +89,7 @@ def _fallback_html(detail: dict) -> str:
 class ChanganAdapter(SiteAdapter):
     site_name = "changan"
 
-    def _api_get(
+    def _api_get_once(
         self,
         config: SiteConfig,
         path: str,
@@ -138,6 +139,19 @@ class ChanganAdapter(SiteAdapter):
         if code != 2000:
             raise RuntimeError(f"changan API error {code}: {payload.get('msg') or 'unknown error'}")
         return payload
+
+    def _api_get(
+        self,
+        config: SiteConfig,
+        path: str,
+        params: dict[str, object] | None = None,
+    ) -> dict:
+        try:
+            return self._api_get_once(config, path, params)
+        except SiteAuthenticationRequired as exc:
+            if recover_changan_session(config, str(exc)):
+                return self._api_get_once(config, path, params)
+            raise
 
     def collect_seed(self, config: SiteConfig, run_ctx: RunContext) -> SeedResult:
         collected_at_utc = utc_now_iso()

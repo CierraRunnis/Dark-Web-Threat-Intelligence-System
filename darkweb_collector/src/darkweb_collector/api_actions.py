@@ -22,6 +22,7 @@ from darkweb_collector.db import (
     upsert_crawl_job,
 )
 from darkweb_collector.document_exposure import list_watchlists_payload, scan_watchlist_once
+from darkweb_collector.changan_auto_login import changan_auto_login_available
 from darkweb_collector.job_diagnostics import consecutive_failures, failure_cooldown_until
 from darkweb_collector.orchestrator import new_job_id, run_site_once
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
@@ -434,7 +435,7 @@ def _dispatch_browser_process(site_name: str, queue_name: str, message: str) -> 
 def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
     config = get_site_config(site_name)
     auth = site_auth_readiness(config)
-    if not auth["ready"]:
+    if not auth["ready"] and not changan_auto_login_available(config):
         return {
             "site_name": site_name,
             "dispatch_mode": "skipped",

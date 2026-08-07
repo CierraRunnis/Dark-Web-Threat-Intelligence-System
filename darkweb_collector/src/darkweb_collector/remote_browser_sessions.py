@@ -15,6 +15,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from darkweb_collector.chaojiying import chaojiying_configured, recognize_captcha, report_recognition_error
 from darkweb_collector.db import get_db_connection, upsert_platform_session
 from darkweb_collector.document_exposure_platforms import get_exposure_platform
 from darkweb_collector.document_exposure_sessions import (
@@ -52,6 +53,28 @@ PASSWORD_SELECTORS = [
     "input[name='password']",
     "input[type='password']",
     "input[autocomplete='current-password']",
+]
+CAPTCHA_INPUT_SELECTORS = [
+    "input[placeholder*='验证码']",
+    "input[aria-label*='验证码']",
+    "input[name*='captcha']",
+    "input[id*='captcha']",
+    "input[name*='verify']",
+    "input[id*='verify']",
+    "input[name*='code']",
+    "input[id*='code']",
+]
+CAPTCHA_IMAGE_SELECTORS = [
+    "img[alt*='验证码']",
+    "img[title*='验证码']",
+    "img[name*='captcha']",
+    "img[id*='captcha']",
+    "img[class*='captcha']",
+    "img[src*='captcha']",
+    "img[src*='verify']",
+    "img[src*='checkcode']",
+    "img[src*='validcode']",
+    "img[src*='authcode']",
 ]
 OTP_SELECTORS = [
     "input[name*='otp']",
@@ -230,6 +253,8 @@ class RemoteBrowserSession:
     vnc_process: subprocess.Popen | None = None
     cdp_stream: bool = False
     last_error: str = ""
+    last_captcha_pic_id: str = ""
+    last_captcha_reported: bool = False
 
 
 def _state_payload(
@@ -274,6 +299,11 @@ def _state_payload(
         "user_data_dir": session.user_data_dir,
         "created_at": session.created_at,
         "last_error": session.last_error,
+        "captcha_recognition_available": chaojiying_configured(),
+        "captcha_error_report_available": bool(
+            getattr(session, "last_captcha_pic_id", "")
+            and not getattr(session, "last_captcha_reported", False)
+        ),
     }
 
 
@@ -610,6 +640,22 @@ def _apply_remote_action(session: RemoteBrowserSession, page: Any, payload: dict
         state = _state_payload(session, page)
         state["action_result"] = result
         return state
+    elif action == "solve_captcha":
+        result = _solve_captcha(page)
+        session.last_captcha_pic_id = str(result.get("pic_id") or "")
+        session.last_captcha_reported = False
+        page.wait_for_timeout(300)
+        state = _state_payload(session, page)
+        state["action_result"] = result
+        return state
+    elif action == "report_captcha_error":
+        if not session.last_captcha_pic_id or session.last_captcha_reported:
+            raise ValueError("no unreported captcha recognition is available")
+        result = report_recognition_error(session.last_captcha_pic_id)
+        session.last_captcha_reported = True
+        state = _state_payload(session, page)
+        state["action_result"] = result
+        return state
     else:
         raise ValueError(f"unsupported remote browser action: {action}")
     page.wait_for_timeout(500)
@@ -631,6 +677,28 @@ def _first_editable_locator(page: Any, selectors: list[str]) -> Any | None:
             except Exception:
                 continue
     return None
+
+
+def _first_visible_locator(page: Any, selectors: list[str]) -> tuple[Any, Any] | tuple[None, None]:
+    scopes = [page]
+    for frame in list(getattr(page, "frames", []) or []):
+        if frame is not page:
+            scopes.append(frame)
+    for scope in scopes:
+        for selector in selectors:
+            try:
+                locator = scope.locator(selector)
+                count = min(locator.count(), 8)
+            except Exception:
+                continue
+            for index in range(count):
+                item = locator.nth(index)
+                try:
+                    if item.is_visible():
+                        return scope, item
+                except Exception:
+                    continue
+    return None, None
 
 
 def _fill_first_available(page: Any, selectors: list[str], value: str) -> bool:
@@ -655,6 +723,22 @@ def _fill_login_form(page: Any, payload: dict[str, Any]) -> dict[str, Any]:
         "username_filled": username_filled,
         "password_filled": password_filled,
         "otp_filled": otp_filled,
+    }
+
+
+def _solve_captcha(page: Any) -> dict[str, Any]:
+    scope, image = _first_visible_locator(page, CAPTCHA_IMAGE_SELECTORS)
+    if image is None or scope is None:
+        raise ValueError("no supported image captcha was found on the current page")
+    captcha_input = _first_editable_locator(scope, CAPTCHA_INPUT_SELECTORS)
+    if captcha_input is None:
+        raise ValueError("captcha input was not found on the current page")
+    image_bytes = image.screenshot(type="png")
+    result = recognize_captcha(image_bytes)
+    captcha_input.fill(str(result["pic_str"]))
+    return {
+        "captcha_filled": True,
+        "pic_id": str(result.get("pic_id") or ""),
     }
 
 

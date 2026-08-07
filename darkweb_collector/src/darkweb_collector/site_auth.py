@@ -25,6 +25,19 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _expired(expires_hint: object) -> bool:
+    value = str(expires_hint or "").strip()
+    if not value:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)
+
+
 def site_display_name(config: SiteConfig) -> str:
     return str(config.extras.get("display_name") or config.site_name).strip()
 
@@ -75,6 +88,7 @@ def site_auth_readiness(config: SiteConfig) -> dict[str, Any]:
         row = get_platform_session(connection, platform)
     storage_path = resolve_platform_storage_state_path(platform, row)
     status = str((row or {}).get("status") or "missing").strip() or "missing"
+    expires_hint = str((row or {}).get("expires_hint") or "").strip()
     storage_key = str(config.extras.get("auth_storage_key") or "token").strip()
     origin = str(config.extras.get("auth_origin") or _origin_for_url(config.seed_urls[0])).strip()
     token = load_local_storage_value(storage_path, origin, storage_key) if storage_path.exists() else ""
@@ -88,6 +102,9 @@ def site_auth_readiness(config: SiteConfig) -> dict[str, Any]:
     elif status not in READY_SESSION_STATUSES:
         auth_status = status
         message = str(row.get("last_error") or "登录会话不可用")
+    elif _expired(expires_hint):
+        auth_status = "expired"
+        message = "登录会话已到期"
     elif not token or token.startswith("noLogin_"):
         auth_status = "login_required"
         message = "尚未完成账号登录"
@@ -102,6 +119,7 @@ def site_auth_readiness(config: SiteConfig) -> dict[str, Any]:
         "auth_status": auth_status,
         "auth_platform": platform,
         "auth_message": message,
+        "expires_hint": expires_hint,
         "storage_state_path": str(storage_path),
         "token": token if ready else "",
     }

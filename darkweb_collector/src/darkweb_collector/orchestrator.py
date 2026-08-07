@@ -8,6 +8,7 @@ import uuid
 from typing import Callable
 
 from darkweb_collector.adapters.registry import get_adapter
+from darkweb_collector.changan_auto_login import changan_auto_login_available, recover_changan_session
 from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.db import (
     get_active_crawl_job,
@@ -332,9 +333,18 @@ def enqueue_due_sites(
     config_path: Path | None = None,
 ) -> list[dict[str, str]]:
     dispatched: list[dict[str, str]] = []
+    configs = load_site_configs(config_path)
+    for config in configs:
+        if not config.enabled:
+            continue
+        auth = site_auth_readiness(config)
+        if auth["ready"] or not changan_auto_login_available(config):
+            continue
+        recover_changan_session(config, str(auth.get("auth_message") or "session expired"))
+
     with get_db_connection() as connection:
         reconcile_stale_crawl_jobs(connection)
-        for config in load_site_configs(config_path):
+        for config in configs:
             if not config.enabled:
                 continue
             if not site_auth_readiness(config)["ready"]:
