@@ -107,6 +107,62 @@
               <footer class="settings-surface-foot"><p>保存后会立即验证安装状态并签发令牌，私钥不会写入前端文件或 Git 仓库。</p><div class="settings-actions"><button class="btn btn-danger" data-code-action="github-delete">删除配置</button><button class="btn btn-primary" data-code-action="github-save">保存并验证</button></div></footer>
             </article>
 
+            <article class="settings-surface" data-od-id="chaojiying-access">
+              <header class="settings-surface-head">
+                <div class="settings-heading">
+                  <span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16v10H4zM8 11h2M14 11h2M9 15h6M7 7V5M17 7V5"/></svg></span>
+                  <div><h2>超级鹰验证码服务</h2><p>独立公共配置，可供长安不夜城及后续其他验证码登录站点复用</p></div>
+                </div>
+                <div class="settings-actions"><span class="badge" data-bind="chaojiying-status">未配置</span><button class="btn btn-secondary" data-code-action="chaojiying-refresh">刷新状态</button></div>
+              </header>
+              <div class="access-overview">
+                <div><span>配置状态</span><strong data-bind="chaojiying-config-state">未配置</strong></div>
+                <div><span>账号凭据</span><strong data-bind="chaojiying-credential-state">缺失</strong></div>
+                <div><span>软件 ID</span><strong data-bind="chaojiying-soft-id-state">未设置</strong></div>
+                <div><span>默认验证码类型</span><strong class="num" data-bind="chaojiying-code-type">5000</strong></div>
+              </div>
+              <div class="settings-error-line" data-bind="chaojiying-last-error" hidden></div>
+              <div class="github-app-form">
+                <div class="settings-form-grid settings-form-grid-2">
+                  <label class="field"><span>超级鹰账号</span><input class="input" id="chaojiying-user" autocomplete="off" placeholder="已配置时留空保留现有账号"></label>
+                  <label class="field"><span>超级鹰密码</span><input class="input" id="chaojiying-password" type="password" autocomplete="new-password" placeholder="已配置时留空保留现有密码"></label>
+                  <label class="field"><span>软件 ID（可选）</span><input class="input" id="chaojiying-soft-id" autocomplete="off" placeholder="未设置可留空"></label>
+                </div>
+              </div>
+              <footer class="settings-surface-foot">
+                <p>配置由本机后端统一管理，密码仅保存 MD5 摘要且不会回显；识别错误时由登录流程调用报错接口返分。</p>
+                <div class="settings-actions"><button class="btn btn-danger" data-code-action="chaojiying-delete">删除配置</button><button class="btn btn-primary" data-code-action="chaojiying-save">保存配置</button></div>
+              </footer>
+            </article>
+
+            <article class="settings-surface" data-od-id="changan-auto-login-access">
+              <header class="settings-surface-head">
+                <div class="settings-heading">
+                  <span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3a5 5 0 0 0-5 5v3H5v10h14V11h-2V8a5 5 0 0 0-5-5Z"/><path d="M9 11V8a3 3 0 0 1 6 0v3M12 15v2"/></svg></span>
+                  <div><h2>长安不夜城自动登录</h2><p>会话失效后自动识别验证码并恢复采集；密码只允许录入，不在页面回显</p></div>
+                </div>
+                <div class="settings-actions"><span class="badge" data-bind="changan-auto-login-status">未配置</span><button class="btn btn-secondary" data-code-action="changan-refresh">刷新状态</button></div>
+              </header>
+              <div class="access-overview">
+                <div><span>长安凭据</span><strong data-bind="changan-config-state">未配置</strong></div>
+                <div><span>验证码服务</span><strong data-bind="changan-provider-state">未配置</strong></div>
+                <div><span>自动恢复</span><strong data-bind="changan-enabled-state">已启用</strong></div>
+                <div><span>最近测试</span><strong class="num" data-bind="changan-last-validated">—</strong></div>
+              </div>
+              <div class="settings-error-line" data-bind="changan-last-error" hidden></div>
+              <div class="github-app-form">
+                <div class="settings-form-grid settings-form-grid-2">
+                  <label class="field"><span>长安不夜城账号</span><input class="input" id="changan-account" autocomplete="off" placeholder="已配置时留空保留现有账号"></label>
+                  <label class="field"><span>长安不夜城密码</span><input class="input" id="changan-password" type="password" autocomplete="new-password" placeholder="已配置时留空保留现有密码"></label>
+                  <label class="field"><span>自动恢复开关</span><span class="switch-control"><input id="changan-auto-enabled" type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span>启用</span></span></label>
+                </div>
+              </div>
+              <footer class="settings-surface-foot">
+                <p>此处只保存长安不夜城账号。验证码统一使用上方公共超级鹰配置；测试会消耗题分，识别错误会自动调用报错接口返分。</p>
+                <div class="settings-actions"><button class="btn btn-danger" data-code-action="changan-delete">删除配置</button><button class="btn btn-secondary" data-code-action="changan-test">测试登录（消耗题分）</button><button class="btn btn-primary" data-code-action="changan-save">保存配置</button></div>
+              </footer>
+            </article>
+
             <article class="settings-surface" data-od-id="code-platform-sessions">
               <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7M17 9v6"/></svg></span><div><h2>代码平台会话</h2><p>GitHub、GitLab 与 Gitee 会话独立校验，不共用状态</p></div></div><button class="btn btn-primary" data-code-action="sessions-detect">自动检测会话</button></header>
               <div class="session-grid" role="table" aria-label="代码平台会话状态">

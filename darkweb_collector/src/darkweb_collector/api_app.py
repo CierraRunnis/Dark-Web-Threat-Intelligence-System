@@ -17,6 +17,21 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
+from darkweb_collector.chaojiying import (
+    ChaojiyingConfigError,
+    chaojiying_config_status,
+    chaojiying_configured,
+    delete_chaojiying_config,
+    save_chaojiying_config,
+)
+from darkweb_collector.changan_auto_login import (
+    ChanganAutoLoginConfigError,
+    ChanganAutoLoginTestError,
+    changan_auto_login_config_status,
+    delete_changan_auto_login_config,
+    save_changan_auto_login_config,
+    test_changan_auto_login_config,
+)
 from darkweb_collector.bot_assistant import (
     BotAssistantError,
     bot_config_status,
@@ -108,6 +123,7 @@ from darkweb_collector.remote_browser_sessions import (
     proxy_remote_browser_stream,
     start_remote_browser_login,
 )
+from darkweb_collector.config import get_site_config
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
 from darkweb_collector.db import (
@@ -588,6 +604,19 @@ class PlatformSessionSaveRequest(BaseModel):
     account_label: str = ""
 
 
+class ChanganAutoLoginConfigRequest(BaseModel):
+    enabled: bool = True
+    changan_username: str = Field(default="", max_length=256)
+    changan_password: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=512)
+
+
+class ChaojiyingConfigRequest(BaseModel):
+    user: str = Field(default="", max_length=128)
+    password: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=256)
+    pass2: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=64)
+    soft_id: str = Field(default="", max_length=64)
+
+
 class RemoteBrowserActionRequest(BaseModel):
     action: str
     x: float | None = None
@@ -855,6 +884,69 @@ def platform_sessions(module: str | None = None) -> list[dict]:
     return build_platform_session_payloads(module=module, manageable_only=True)
 
 
+@app.get("/api/platform-sessions/changan/auto-login")
+def get_changan_auto_login_config() -> dict:
+    return changan_auto_login_config_status()
+
+
+@app.get("/api/captcha-providers/chaojiying")
+def get_chaojiying_config() -> dict:
+    return chaojiying_config_status()
+
+
+@app.put("/api/captcha-providers/chaojiying")
+def configure_chaojiying(payload: ChaojiyingConfigRequest) -> dict:
+    try:
+        return save_chaojiying_config(
+            user=payload.user,
+            password=payload.password.get_secret_value(),
+            pass2=payload.pass2.get_secret_value(),
+            soft_id=payload.soft_id,
+        )
+    except ChaojiyingConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/captcha-providers/chaojiying")
+def remove_chaojiying_config() -> dict:
+    try:
+        return delete_chaojiying_config()
+    except ChaojiyingConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.put("/api/platform-sessions/changan/auto-login")
+def configure_changan_auto_login(payload: ChanganAutoLoginConfigRequest) -> dict:
+    try:
+        return save_changan_auto_login_config(
+            enabled=payload.enabled,
+            changan_username=payload.changan_username,
+            changan_password=payload.changan_password.get_secret_value(),
+        )
+    except ChanganAutoLoginConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/platform-sessions/changan/auto-login/test")
+def test_changan_auto_login() -> dict:
+    try:
+        return test_changan_auto_login_config(get_site_config("changan"))
+    except ChanganAutoLoginConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ChanganAutoLoginTestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/platform-sessions/changan/auto-login")
+def remove_changan_auto_login_config() -> dict:
+    try:
+        return delete_changan_auto_login_config()
+    except ChanganAutoLoginConfigError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.get("/api/exposure-platforms")
 def exposure_platforms(module: str | None = None) -> list[dict]:
     rows = []
@@ -1002,7 +1094,9 @@ def delete_exposure_watchlist_route(watchlist_id: int) -> dict:
 @app.post("/api/platform-sessions/{platform}/adaptive-login/start")
 def platform_session_adaptive_login_start(platform: str) -> dict:
     fallback_reason = "interactive desktop browser is unavailable"
-    if visible_platform_login_available():
+    if chaojiying_configured():
+        fallback_reason = "Chaojiying captcha recognition is configured"
+    elif visible_platform_login_available():
         try:
             return launch_platform_login(platform)
         except Exception as exc:
