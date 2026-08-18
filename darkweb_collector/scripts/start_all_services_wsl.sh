@@ -16,24 +16,23 @@ SCHEDULER_INTERVAL_SECONDS="${SCHEDULER_INTERVAL_SECONDS:-60}"
 VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
 VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-300}"
 BROWSER_CONCURRENCY="${DARKWEB_BROWSER_CONCURRENCY:-1}"
-DARKWEB_PANSOU_ENABLED="${DARKWEB_PANSOU_ENABLED:-1}"
 DARKWEB_TOR_BRIDGE_AUTO_INSTALL="${DARKWEB_TOR_BRIDGE_AUTO_INSTALL:-1}"
-PANSOU_PORT="${PANSOU_PORT:-8888}"
-PANSOU_API_BASE="${PANSOU_API_BASE:-http://127.0.0.1:${PANSOU_PORT}}"
-PANSOU_CONTAINER_NAME="${PANSOU_CONTAINER_NAME:-darkweb-pansou}"
-PANSOU_IMAGE="${PANSOU_IMAGE:-ghcr.io/fish2018/pansou:latest}"
-PANSOU_CHANNELS="${PANSOU_CHANNELS:-tgsearchers3}"
-PANSOU_ENABLED_PLUGINS="${PANSOU_ENABLED_PLUGINS:-panyq,pansearch,qupansou,hunhepan,jikepan,pan666}"
+DARKWEB_POSTGRESQL_AUTO_INSTALL="${DARKWEB_POSTGRESQL_AUTO_INSTALL:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COLLECTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$COLLECTOR_ROOT/.." && pwd)"
 DASHBOARD_ROOT="$(cd "$PROJECT_ROOT/threat-intelligence-dashboard" && pwd)"
 TOR_BRIDGE_INSTALLER="$SCRIPT_DIR/install_tor_bridge_runtime.sh"
+POSTGRESQL_SETUP_SCRIPT="$SCRIPT_DIR/setup_postgresql_linux.sh"
 COLLECTOR_VENV="$COLLECTOR_ROOT/venv"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 DEFAULT_PROJECT_SOURCE_DB="$COLLECTOR_ROOT/data/collector.db"
 DEFAULT_USER_DATA_DIR="$HOME/.local/share/bishe"
+ACTIVE_RELEASE_FILE="${DARKWEB_ACTIVE_RELEASE_FILE:-$HOME/.local/share/darkweb-threat-intel/active-release.json}"
+ACTIVE_RELEASE_ENABLED=0
+POSTGRESQL_USER_DATA_ROOT="${DARKWEB_USER_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/darkweb-threat-intel}"
+POSTGRESQL_TARGET_CONFIG="${DARKWEB_POSTGRESQL_TARGET_CONFIG:-$POSTGRESQL_USER_DATA_ROOT/postgresql-target.json}"
 DEFAULT_TOR_EXPERT_ROOT="$HOME/.local/share/darkweb-threat-intel/tor-expert"
 DEFAULT_TOR_BRIDGE_RUNTIME_DIR="$DEFAULT_USER_DATA_DIR/tor_bridge_runtime"
 COLLECTOR_SOURCE_DB="${DARKWEB_COLLECTOR_SOURCE_DB_PATH:-}"
@@ -41,6 +40,27 @@ COLLECTOR_RUNTIME_DB="${DARKWEB_COLLECTOR_DB_PATH:-$DEFAULT_USER_DATA_DIR/collec
 COLLECTOR_RUNTIME_DB_META="${DARKWEB_RUNTIME_DB_META_PATH:-${COLLECTOR_RUNTIME_DB}.meta.json}"
 COLLECTOR_SITES_FILE="${DARKWEB_COLLECTOR_SITES_FILE:-$COLLECTOR_ROOT/sites.yaml}"
 COLLECTOR_OUTPUT_ROOT="${DARKWEB_COLLECTOR_OUTPUT_ROOT:-$COLLECTOR_ROOT/output}"
+if [[ -f "$ACTIVE_RELEASE_FILE" ]]; then
+  ACTIVE_OUTPUT_ROOT="$(python3 - "$ACTIVE_RELEASE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(2)
+if payload.get("format") != 1 or payload.get("database_engine") != "postgresql":
+    raise SystemExit(2)
+print(payload.get("output_root") or "")
+PY
+)" || { echo "[ERROR] active data release configuration is invalid: $ACTIVE_RELEASE_FILE" >&2; exit 1; }
+  [[ -n "$ACTIVE_OUTPUT_ROOT" ]] || { echo "[ERROR] active data release output_root is empty" >&2; exit 1; }
+  ACTIVE_RELEASE_ENABLED=1
+  if [[ -z "${DARKWEB_COLLECTOR_OUTPUT_ROOT:-}" ]]; then
+    COLLECTOR_OUTPUT_ROOT="$ACTIVE_OUTPUT_ROOT"
+  fi
+fi
 REQUIREMENTS_STAMP="$COLLECTOR_VENV/.requirements.sha256"
 PLAYWRIGHT_STAMP="$COLLECTOR_VENV/.playwright.browsers.ready"
 PACKAGE_LOCK_STAMP="$DASHBOARD_ROOT/node_modules/.package-lock.sha256"
@@ -592,6 +612,7 @@ build_env_exports() {
   exports+=("export DARKWEB_COLLECTOR_DB_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB")")
   exports+=("export DARKWEB_COLLECTOR_SOURCE_DB_PATH=$(printf '%q' "$COLLECTOR_SOURCE_DB")")
   exports+=("export DARKWEB_RUNTIME_DB_META_PATH=$(printf '%q' "$COLLECTOR_RUNTIME_DB_META")")
+  exports+=("export DARKWEB_ACTIVE_RELEASE_FILE=$(printf '%q' "$ACTIVE_RELEASE_FILE")")
   exports+=("export DARKWEB_COLLECTOR_SITES_FILE=$(printf '%q' "$COLLECTOR_SITES_FILE")")
   exports+=("export DARKWEB_COLLECTOR_OUTPUT_ROOT=$(printf '%q' "$COLLECTOR_OUTPUT_ROOT")")
   exports+=("export DARKWEB_API_PORT=$(printf '%q' "$API_PORT")")
@@ -601,8 +622,8 @@ build_env_exports() {
   exports+=("export VITE_API_TARGET=$(printf '%q' "$API_BASE_URL")")
   exports+=("export VITE_FRONTEND_PORT=$(printf '%q' "$FRONTEND_PORT")")
   exports+=("export DARKWEB_BROWSER_CONCURRENCY=$(printf '%q' "$BROWSER_CONCURRENCY")")
-  if [[ "$DARKWEB_PANSOU_ENABLED" != "0" ]]; then
-    exports+=("export PANSOU_API_BASE=$(printf '%q' "$PANSOU_API_BASE")")
+  if [[ -n "${DARKWEB_MIGRATION_TARGET_DATABASE_URL:-}" ]]; then
+    exports+=("export DARKWEB_MIGRATION_TARGET_DATABASE_URL=$(printf '%q' "$DARKWEB_MIGRATION_TARGET_DATABASE_URL")")
   fi
   for var_name in TOR_SOCKS_HOST TOR_SOCKS_PORT PROXY_HOST PROXY_PORT; do
     if [[ -n "${!var_name:-}" ]]; then
@@ -804,44 +825,93 @@ register_darkweb_command() {
   info "open a new shell, or run: . \"$USER_ENV_FILE\" && export PATH=\"$USER_BIN_DIR:\$PATH\""
 }
 
-ensure_pansou() {
-  if [[ "$DARKWEB_PANSOU_ENABLED" == "0" ]]; then
-    info "PanSou disabled"
-    return 0
+is_postgresql_url() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    parsed = urlsplit(sys.argv[1])
+    parsed.port
+except (TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if parsed.scheme in {"postgres", "postgresql"} and parsed.hostname else 1)
+PY
+}
+
+active_release_database_url() {
+  [[ -f "$ACTIVE_RELEASE_FILE" ]] || return 1
+  python3 - "$ACTIVE_RELEASE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if payload.get("format") != 1 or payload.get("database_engine") != "postgresql":
+    raise SystemExit(1)
+value = str(payload.get("database_url") or "").strip()
+if not value:
+    raise SystemExit(1)
+print(value)
+PY
+}
+
+configured_postgresql_url() {
+  [[ -f "$POSTGRESQL_TARGET_CONFIG" ]] || return 1
+  chmod 600 "$POSTGRESQL_TARGET_CONFIG"
+  python3 - "$POSTGRESQL_TARGET_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import quote
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if payload.get("format") != 1:
+    raise SystemExit(1)
+host = str(payload.get("host") or "").strip()
+port = int(payload.get("port") or 0)
+database = str(payload.get("database") or "").strip()
+user = str(payload.get("application_user") or "").strip()
+password = str(payload.get("application_password") or "")
+if not host or not port or not database or not user or not password:
+    raise SystemExit(1)
+print(f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}/{quote(database, safe='')}")
+PY
+}
+
+ensure_postgresql_migration_target() {
+  if [[ -n "${DARKWEB_MIGRATION_TARGET_DATABASE_URL:-}" ]]; then
+    is_postgresql_url "$DARKWEB_MIGRATION_TARGET_DATABASE_URL" || die "DARKWEB_MIGRATION_TARGET_DATABASE_URL must be a PostgreSQL URL"
+    info "PostgreSQL migration target is already configured"
+    return
   fi
-  if curl -fsS "$PANSOU_API_BASE/api/health" >/dev/null 2>&1; then
-    info "PanSou already running: $PANSOU_API_BASE"
-    return 0
+
+  local target_url=""
+  if [[ "$ACTIVE_RELEASE_ENABLED" == "1" ]]; then
+    target_url="$(active_release_database_url)" || die "active PostgreSQL release is missing its database URL"
+    is_postgresql_url "$target_url" || die "active release database URL is invalid"
+    export DARKWEB_MIGRATION_TARGET_DATABASE_URL="$target_url"
+    info "using the active PostgreSQL database as the migration target"
+    return
   fi
-  if ! command -v docker >/dev/null 2>&1; then
-    warn "PanSou is enabled but docker is unavailable; netdisk scan will continue with HTML aggregation sources only"
-    return 0
-  fi
-  if ! docker info >/dev/null 2>&1; then
-    warn "PanSou is enabled but docker engine is not running; netdisk scan will continue with HTML aggregation sources only"
-    return 0
-  fi
-  if docker ps --filter "name=^/${PANSOU_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "$PANSOU_CONTAINER_NAME"; then
-    info "PanSou container already running: $PANSOU_CONTAINER_NAME"
-    return 0
-  fi
-  if docker ps -a --filter "name=^/${PANSOU_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "$PANSOU_CONTAINER_NAME"; then
-    info "starting PanSou container: $PANSOU_CONTAINER_NAME"
-    docker start "$PANSOU_CONTAINER_NAME" >/dev/null || warn "failed to start PanSou container"
+
+  [[ "$DARKWEB_POSTGRESQL_AUTO_INSTALL" != "0" ]] || {
+    warn "automatic PostgreSQL installation is disabled; migration target is not configured"
+    return
+  }
+  [[ -f "$POSTGRESQL_SETUP_SCRIPT" ]] || die "PostgreSQL setup script is missing: $POSTGRESQL_SETUP_SCRIPT"
+
+  if [[ -f "$POSTGRESQL_TARGET_CONFIG" ]]; then
+    if ! bash "$POSTGRESQL_SETUP_SCRIPT" status >/dev/null 2>&1; then
+      bash "$POSTGRESQL_SETUP_SCRIPT" install
+    fi
   else
-    info "creating PanSou container: $PANSOU_CONTAINER_NAME"
-    docker run -d \
-      --name "$PANSOU_CONTAINER_NAME" \
-      -p "${PANSOU_PORT}:8888" \
-      -e CHANNELS="$PANSOU_CHANNELS" \
-      -e ENABLED_PLUGINS="$PANSOU_ENABLED_PLUGINS" \
-      "$PANSOU_IMAGE" >/dev/null || warn "failed to create PanSou container"
+    bash "$POSTGRESQL_SETUP_SCRIPT" install
   fi
-  if ! wait_for_http "$PANSOU_API_BASE/api/health" 30; then
-    warn "PanSou did not become ready within 30s: $PANSOU_API_BASE"
-  else
-    info "PanSou: $PANSOU_API_BASE"
-  fi
+  target_url="$(configured_postgresql_url)" || die "PostgreSQL setup did not create a valid private target configuration"
+  is_postgresql_url "$target_url" || die "PostgreSQL setup returned an invalid target URL"
+  export DARKWEB_MIGRATION_TARGET_DATABASE_URL="$target_url"
+  info "PostgreSQL migration target is ready"
 }
 
 ensure_environment() {
@@ -869,25 +939,31 @@ ensure_environment() {
 
   ensure_collector_python_dependencies
   ensure_playwright_runtime
-  resolve_source_db
   ensure_dashboard_dependencies
+  ensure_postgresql_migration_target
 
-  if [[ ! -f "$COLLECTOR_RUNTIME_DB" ]] || ! db_has_data "$COLLECTOR_RUNTIME_DB"; then
-    if [[ -f "$COLLECTOR_SOURCE_DB" ]] && db_has_data "$COLLECTOR_SOURCE_DB"; then
-      info "runtime db missing, preparing stable WSL-local SQLite database"
-      (
-        cd "$COLLECTOR_ROOT"
-        source "$COLLECTOR_VENV/bin/activate"
-        python scripts/prepare_runtime_db.py --force --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
-      )
-    else
-      initialize_empty_runtime_db
+  if [[ "$ACTIVE_RELEASE_ENABLED" == "1" ]]; then
+    ensure_directory "$COLLECTOR_OUTPUT_ROOT"
+  else
+    resolve_source_db
+    if [[ ! -f "$COLLECTOR_RUNTIME_DB" ]] || ! db_has_data "$COLLECTOR_RUNTIME_DB"; then
+      if [[ -f "$COLLECTOR_SOURCE_DB" ]] && db_has_data "$COLLECTOR_SOURCE_DB"; then
+        info "runtime db missing, preparing stable WSL-local SQLite database"
+        (
+          cd "$COLLECTOR_ROOT"
+          source "$COLLECTOR_VENV/bin/activate"
+          python scripts/prepare_runtime_db.py --force --source "$COLLECTOR_SOURCE_DB" --target "$COLLECTOR_RUNTIME_DB"
+        )
+      else
+        initialize_empty_runtime_db
+      fi
     fi
   fi
 
   site_configs_ready || die "failed to load crawler site configuration from $COLLECTOR_SITES_FILE"
-  sync_runtime_db_to_source
-  ensure_pansou
+  if [[ "$ACTIVE_RELEASE_ENABLED" != "1" ]]; then
+    sync_runtime_db_to_source
+  fi
 }
 
 stop_session_if_exists() {
@@ -1298,8 +1374,10 @@ stop_services() {
     tmux kill-session -t "$SESSION_NAME"
   fi
   cleanup_stray_processes
-  resolve_source_db
-  sync_runtime_db_to_source
+  if [[ "$ACTIVE_RELEASE_ENABLED" != "1" ]]; then
+    resolve_source_db
+    sync_runtime_db_to_source
+  fi
   rm -f -- "$SERVICE_STATE_FILE"
   info "tmux session stopped: $SESSION_NAME"
 }
@@ -1328,18 +1406,6 @@ stop_tor_bridge_for_uninstall() {
       fi
     fi
   fi
-}
-
-remove_pansou_container_for_uninstall() {
-  command -v docker >/dev/null 2>&1 || return 0
-  local image
-  image="$(docker inspect --format '{{.Config.Image}}' "$PANSOU_CONTAINER_NAME" 2>/dev/null || true)"
-  [[ "$image" == "$PANSOU_IMAGE" ]] || return 0
-  if [[ "$UNINSTALL_DRY_RUN" == "1" ]]; then
-    info "would remove project PanSou container: $PANSOU_CONTAINER_NAME"
-    return 0
-  fi
-  docker rm -f "$PANSOU_CONTAINER_NAME" >/dev/null 2>&1 || warn "could not remove PanSou container $PANSOU_CONTAINER_NAME"
 }
 
 remove_darkweb_registration() {
@@ -1381,7 +1447,6 @@ uninstall_project() {
     fi
   fi
 
-  remove_pansou_container_for_uninstall
   remove_darkweb_registration
   remove_managed_path "$COLLECTOR_VENV" "$COLLECTOR_ROOT/venv" "Python virtual environment"
   remove_managed_path "$DASHBOARD_ROOT/node_modules" "$DASHBOARD_ROOT/node_modules" "dashboard dependencies"

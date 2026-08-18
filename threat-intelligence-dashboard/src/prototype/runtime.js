@@ -459,6 +459,7 @@ export function initializePrototype() {
         <div class="nav-group-title">${icon('settings')}<span>配置中心</span></div>
         <div class="nav-group-items">
           <a class="nav-link sub${active('settings.html')}" href="/settings">监测配置</a>
+          <a class="nav-link sub${active('data-migration.html')}" href="/settings/data-migration">数据迁移</a>
         </div>
       </div>`
 
@@ -2412,7 +2413,8 @@ export function initializePrototype() {
       bindText('browser-workers', `${Number(browser.browser_worker_count || 0)}/${Number(browser.browser_concurrency || browser.configured_concurrency || 2)}`)
       bindText('browser-pool', `${Number(pool.running_or_pending || 0)}/${Number(pool.max_workers || browser.browser_concurrency || 2)}`)
       const runtime = payload.runtime_db || {}
-      setBadge('runtime-db-mode', runtime.using_runtime_db ? 'WSL 运行库' : 'Windows 源库', runtime.using_runtime_db ? 'badge-success' : 'badge-high')
+      const postgresActive = runtime.database_engine === 'postgresql'
+      setBadge('runtime-db-mode', postgresActive ? 'PostgreSQL' : (runtime.using_runtime_db ? 'WSL 运行库' : 'Windows 源库'), postgresActive || runtime.using_runtime_db ? 'badge-success' : 'badge-high')
       bindText('runtime-db-path', runtime.runtime_db_path || '—')
       bindText('source-db-path', runtime.source_db_path || '—')
       bindText('runtime-prepared-at', formatDate(runtime.prepared_at))

@@ -1,5 +1,6 @@
 import countryCentroidsJson from 'world-countries-centroids/dist/countries.geojson?raw'
 import { createRemoteBrowserStream } from '@/utils/remoteBrowserStream'
+import { shouldRenderResourceAsImage } from '@/prototype/resourceRendering'
 
 const COUNTRY_COORDINATES = JSON.parse(countryCentroidsJson).features.reduce((coordinates, feature) => {
   const code = feature.properties.ISO
@@ -1932,7 +1933,7 @@ function configureSourceAccess(root, config) {
     const slot = query(figure, '.mirror-image-slot')
     if (slot && mirror) {
       slot.replaceChildren()
-      if (mirror.kind === 'screenshot' || /截图|image/i.test(mirror.label)) {
+      if (shouldRenderResourceAsImage(mirror)) {
         const image = document.createElement('img')
         image.className = 'runtime-mirror-image'
         image.src = mirror.url

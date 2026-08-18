@@ -113,6 +113,7 @@ bash scripts/start_all_services_wsl.sh start
 - 自动创建后端虚拟环境并安装 `requirements.txt`
 - 自动安装 Playwright Firefox/Chromium 运行时，并在 Debian/Ubuntu/WSL 环境下补齐浏览器系统依赖
 - 检查前端 `node_modules`，缺失时自动执行 `npm install`
+- 自动安装或复用 PostgreSQL 16，幂等准备项目迁移数据库和账号；显式配置外部 PostgreSQL 时跳过本机安装
 - 准备 WSL 本地运行时数据库；如果没有历史数据库，会自动初始化空库
 - 用 `tmux` 拉起整套服务并保留各窗口日志
 
@@ -404,3 +405,7 @@ python scripts/import_html_sample.py \
 - `.onion` 站点依赖 Tor Browser SOCKS 可用性
 - `browser` 模式资源开销高于非浏览器模式，应只在确实需要 JS 渲染时使用
 - 当前持续运行模式是“轮询式持续运行”，不是无间隔高频抓取
+
+## 数据库与镜像文件迁移
+
+项目支持用确定性的外部工具生成 `.dwti` 迁移包，再由管理员页面一次性导入 PostgreSQL 和镜像文件。Windows、Debian / Ubuntu、WSL 和 Codespaces 首次启动会自动准备 PostgreSQL 16；显式配置外部目标时不会安装本机服务。外部打包工具和迁移包应独立存放在项目目录之外；项目内只保留 PostgreSQL 运行时准备、导入、校验、激活和回退功能。部署前提和导入流程见 [DATA_MIGRATION.md](./DATA_MIGRATION.md)。

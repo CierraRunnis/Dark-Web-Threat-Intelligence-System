@@ -67,7 +67,6 @@ SOURCE_LABELS = {
     "doc88": "道客巴巴",
     "book118": "原创力文档",
     "iask_share": "爱问共享资料",
-    "pansou": "PanSou",
     "panhub": "PanHub",
     "pikasoo": "皮卡搜索",
     "lzpanx": "懒盘搜索",

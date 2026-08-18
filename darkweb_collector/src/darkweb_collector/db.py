@@ -8,7 +8,13 @@ import sqlite3
 from threading import Lock
 import time
 
-from darkweb_collector.runtime import default_db_path
+from darkweb_collector.postgres_backend import connect_postgres
+from darkweb_collector.runtime import (
+    active_release_config,
+    configured_database_schema,
+    configured_database_url,
+    default_db_path,
+)
 
 
 class ManagedConnection(sqlite3.Connection):
@@ -693,6 +699,17 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
+    database_url = configured_database_url()
+    if database_url:
+        if not database_url.lower().startswith(("postgres://", "postgresql://")):
+            raise ValueError("configured database URL must use PostgreSQL")
+        active = active_release_config()
+        return connect_postgres(
+            database_url,
+            schema=configured_database_schema(),
+            expected_fingerprint=str(active.get("schema_fingerprint") or "").strip(),
+            expected_version=str(active.get("schema_version") or "0002_sqlite_compat").strip(),
+        )
     db_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = db_path.resolve()
     last_error: Exception | None = None

@@ -146,9 +146,11 @@ from darkweb_collector.self_update import (
     read_public_update_status,
     start_self_update,
 )
+from darkweb_collector.migration_api import router as migration_router
 
 
 app = FastAPI(title="Darkweb Collector API", version="v.11.0")
+app.include_router(migration_router)
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
 _warmup_started = False

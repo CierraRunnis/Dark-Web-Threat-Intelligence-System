@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { hasAuthSession, isAuthSessionValidated, loadCurrentUser } from '@/composables/useAuth'
 import PrototypeScreen from '@/views/PrototypeScreen.vue'
+import DataMigration from '@/views/DataMigration.vue'
 
 const screen = (path, name, file, meta = {}) => ({
   path,
@@ -31,6 +32,7 @@ const routes = [
   screen('/collector-control/failures', 'CollectorFailures', 'collector-failures.html'),
   screen('/collector-control/run/:runId', 'CollectorRunDetail', 'collector-run-detail.html'),
   screen('/settings', 'Settings', 'settings.html'),
+  { path: '/settings/data-migration', name: 'DataMigration', component: DataMigration },
   screen('/event/:eventId', 'EventDetail', 'event-detail.html'),
   { path: '/threat-situation', redirect: '/' },
   { path: '/collector-control', redirect: '/collector-control/sites' },

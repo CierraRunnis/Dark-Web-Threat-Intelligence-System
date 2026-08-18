@@ -15,6 +15,15 @@ dist/
 threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
 
+# Local validation only; test scripts are not published in production branches
+tests/
+test/
+test_*
+*_test.*
+*.test.*
+*_spec.*
+*.spec.*
+
 # Runtime data and crawler artifacts
 .npm-cache/
 .playwright-cli/

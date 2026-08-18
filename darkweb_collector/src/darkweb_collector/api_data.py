@@ -39,7 +39,7 @@ from darkweb_collector.normalized_intelligence import (
     normalized_event_to_detail,
     normalized_event_to_list_item,
 )
-from darkweb_collector.runtime import default_db_path, output_root, project_root
+from darkweb_collector.runtime import active_release_config, default_db_path, output_root, project_root
 from darkweb_collector.sites.darkforums import normalize_darkforums_timestamp
 from darkweb_collector.site_auth import site_auth_readiness, site_display_name
 from darkweb_collector.utils import safe_stem
@@ -467,18 +467,33 @@ def _coerce_resource_list(value: Any) -> list[dict[str, str]]:
             if isinstance(item, dict):
                 url = str(item.get("url") or "").strip()
                 if url:
-                    normalized.append(
-                        {
-                            "label": str(item.get("name") or url),
-                            "url": url,
-                        }
-                    )
+                    kind = str(item.get("kind") or "").strip()
+                    if not kind and Path(url.split("?", 1)[0]).suffix.lower() in {".gif", ".jpg", ".jpeg", ".png", ".webp"}:
+                        kind = "image"
+                    normalized.append({
+                        "label": str(item.get("label") or item.get("name") or ("商品镜像图片" if kind == "image" else url)),
+                        "url": url,
+                        **({"kind": kind} if kind else {}),
+                    })
             elif isinstance(item, str) and item.strip():
-                normalized.append({"label": item.strip(), "url": item.strip()})
+                url = item.strip()
+                kind = "image" if Path(url.split("?", 1)[0]).suffix.lower() in {".gif", ".jpg", ".jpeg", ".png", ".webp"} else ""
+                normalized.append({
+                    "label": "商品镜像图片" if kind else url,
+                    "url": url,
+                    **({"kind": kind} if kind else {}),
+                })
         return normalized
     if isinstance(value, str):
+        if value.lstrip().startswith("["):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list):
+                return _coerce_resource_list(decoded)
         items = [item.strip() for item in value.split(",") if item.strip()]
-        return [{"label": item, "url": item} for item in items]
+        return _coerce_resource_list(items)
     return []
 
 
@@ -654,7 +669,7 @@ def _build_victim_event_records(connection) -> list[dict[str, Any]]:
         FROM victims v
         LEFT JOIN victim_details vd
           ON vd.victim_id = v.id
-        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, v.id) DESC
+        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, '') DESC, v.id DESC
         """
     ).fetchall()
     events = []
@@ -741,7 +756,7 @@ def _build_victim_event_detail_by_id(
         LEFT JOIN victim_details vd
           ON vd.victim_id = v.id
         WHERE v.site_name = ?
-        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, v.id) DESC
+        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, '') DESC, v.id DESC
         """,
         (site_name,),
     ).fetchall()
@@ -1854,10 +1869,29 @@ def _runtime_db_status() -> dict[str, Any]:
     runtime_db_path = default_db_path()
     source_db_path = Path(os.environ.get("DARKWEB_COLLECTOR_SOURCE_DB_PATH", project_root() / "data" / "collector.db")).expanduser()
     meta_path = Path(os.environ.get("DARKWEB_RUNTIME_DB_META_PATH", f"{runtime_db_path}.meta.json")).expanduser()
+    active = active_release_config()
+    if active.get("database_engine") == "postgresql":
+        schema = str(active.get("database_schema") or "").strip()
+        return {
+            "database_engine": "postgresql",
+            "runtime_db_path": f"PostgreSQL / {schema}" if schema else "PostgreSQL",
+            "source_db_path": str(source_db_path),
+            "using_runtime_db": True,
+            "runtime_db_exists": True,
+            "source_db_exists": source_db_path.exists(),
+            "runtime_db_updated_at": active.get("activated_at") or "",
+            "runtime_db_size_mb": 0,
+            "meta_exists": True,
+            "prepared_at": active.get("activated_at") or "",
+            "copied_counts": {},
+            "skipped_tables": {},
+            "migration_job_id": active.get("job_id") or "",
+        }
 
     runtime_exists = runtime_db_path.exists()
     source_exists = source_db_path.exists()
     status = {
+        "database_engine": "sqlite",
         "runtime_db_path": str(runtime_db_path),
         "source_db_path": str(source_db_path),
         "using_runtime_db": runtime_db_path.resolve() != source_db_path.resolve() if runtime_exists and source_exists else str(runtime_db_path) != str(source_db_path),

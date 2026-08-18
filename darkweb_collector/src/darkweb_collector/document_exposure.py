@@ -193,9 +193,7 @@ NETDISK_NUMBERED_ENTRY_RE = re.compile(
 NETDISK_DIRECTORY_COUNT_RE = re.compile(r"(?:数量|文件数量)[:：\s]*(\d{1,5})")
 NETDISK_PREVIEW_STOP_MARKERS = ("问题反馈", "相似推荐", "最新资源", "扫码获取资源", "选择举报类型", "复制链接", "进入网盘")
 PREVIEW_TEXT_LIMIT = 4000
-PANSOU_BASE_ENV_NAMES = ("PANSOU_API_BASE", "PANSOU_BASE_URL")
 PANHUB_BASE_ENV_NAMES = ("PANHUB_API_BASE", "PANHUB_BASE_URL")
-PANSOU_TOKEN_ENV_NAMES = ("PANSOU_AUTH_TOKEN", "PANSOU_TOKEN")
 PANHUB_TOKEN_ENV_NAMES = ("PANHUB_AUTH_TOKEN", "PANHUB_TOKEN")
 _NETDISK_DETAIL_CACHE: dict[str, tuple[str, list[dict[str, Any]]]] = {}
 HTTP_HEADERS = {
@@ -223,7 +221,6 @@ class DiscoverySource:
 
 
 DISCOVERY_SOURCES: tuple[DiscoverySource, ...] = (
-    DiscoverySource("pansou", "PanSou", "pansou://search?kw={query}", "netdisk_search", "pansou_api"),
     DiscoverySource("panhub", "PanHub", "panhub://search?kw={query}", "netdisk_search", "panhub_api"),
     DiscoverySource("xiaobaipan", "小白盘", "https://www.xiaobaipan.com/s/{query}.html", "netdisk_search"),
     DiscoverySource("xiaobudian", "小不点搜索", "https://www.xiaoso.net/search?wd={query}", "netdisk_search"),
@@ -250,7 +247,7 @@ DISCOVERY_SOURCES: tuple[DiscoverySource, ...] = (
     DiscoverySource("souhong_wenku", "搜弘文库", "https://mwenku.chochina.com/search?q={query}", "document_library"),
 )
 
-NETDISK_DEFAULT_SOURCE_KEYS = ("pikasoo", "lzpanx", "esoua", "pandashi", "pansou")
+NETDISK_DEFAULT_SOURCE_KEYS = ("pikasoo", "lzpanx", "esoua", "pandashi")
 NETDISK_OPTIONAL_SOURCE_KEYS = ("panhub",)
 NETDISK_FALLBACK_SOURCE_KEYS = ("xiaobaipan", "xiaobudian", "lingfengyun", "dalipan", "panyq")
 DOCUMENT_LIBRARY_DEFAULT_SOURCE_KEYS = (
@@ -268,7 +265,6 @@ DOCUMENT_LIBRARY_RESTRICTED_SOURCE_KEYS = ("baidu_wenku", "docin", "doc88", "boo
 NETDISK_PAGINATED_SOURCE_KEYS = {"pikasoo", "lzpanx", "esoua", "pandashi"}
 NETDISK_SEARCH_PAGE_SAFETY_CAP = 20
 NETDISK_SOURCE_NOTES = {
-    "pansou": "内置聚合 API，作为补充源扫描",
     "pikasoo": "公开文档搜索页，当前可免登录解析，默认优先扫描",
     "lzpanx": "公开搜索页，详情页可免登录解析",
     "esoua": "公开搜索页，详情页可免登录解析",
@@ -643,7 +639,7 @@ def _source_search_page_urls(
             seen_pages.add(page)
             rows.append((page, _source_search_page_url(source, first_url, page)))
         return rows
-    if source.fetch_mode in {"pansou_api", "panhub_api"}:
+    if source.fetch_mode == "panhub_api":
         return [(1, first_url)]
     if source.category == "netdisk_search" and source.key in NETDISK_PAGINATED_SOURCE_KEYS:
         return [
@@ -654,7 +650,7 @@ def _source_search_page_urls(
 
 
 def _netdisk_incremental_page_numbers(source: DiscoverySource, state: dict[str, Any] | None) -> list[int]:
-    if source.fetch_mode in {"pansou_api", "panhub_api"} or source.key not in NETDISK_PAGINATED_SOURCE_KEYS:
+    if source.fetch_mode == "panhub_api" or source.key not in NETDISK_PAGINATED_SOURCE_KEYS:
         return [1]
     page_window_size = max(1, int((state or {}).get("page_window_size") or 4))
     next_page = max(1, int((state or {}).get("next_page") or 1))
@@ -1771,14 +1767,10 @@ def _parse_netdisk_api_candidates(source: DiscoverySource, payload: dict[str, An
 
 
 def _fetch_netdisk_api_candidates(source: DiscoverySource, term: str) -> list[dict[str, Any]]:
-    if source.fetch_mode == "pansou_api":
-        base_url = _first_env_value(PANSOU_BASE_ENV_NAMES)
-        token = _api_auth_token(PANSOU_TOKEN_ENV_NAMES)
-    elif source.fetch_mode == "panhub_api":
-        base_url = _first_env_value(PANHUB_BASE_ENV_NAMES)
-        token = _api_auth_token(PANHUB_TOKEN_ENV_NAMES)
-    else:
+    if source.fetch_mode != "panhub_api":
         return []
+    base_url = _first_env_value(PANHUB_BASE_ENV_NAMES)
+    token = _api_auth_token(PANHUB_TOKEN_ENV_NAMES)
     if not base_url:
         return []
     payload = _post_json_api(
@@ -2464,7 +2456,7 @@ def _build_search_urls(term: str, source_families: list[str] | None = None) -> l
 
 
 def _search_candidates_for_source(source: DiscoverySource, url: str, term: str) -> list[dict[str, Any]]:
-    if source.fetch_mode in {"pansou_api", "panhub_api"}:
+    if source.fetch_mode == "panhub_api":
         return _fetch_netdisk_api_candidates(source, term)
     search_html = _fetch_html(url, timeout=30)
     block_reason = _detect_search_block_reason(source, search_html, url)
@@ -2551,7 +2543,7 @@ def _search_candidate_pages_for_source(
     if source_family == "netdisk_aggregator" and state_updates is not None and watchlist_id is not None:
         previous_next_page = max(1, int((netdisk_state or {}).get("next_page") or 1))
         page_window_size = max(1, int((netdisk_state or {}).get("page_window_size") or selected_page_limit or 4))
-        if source.fetch_mode in {"pansou_api", "panhub_api"} or source.key not in NETDISK_PAGINATED_SOURCE_KEYS:
+        if source.fetch_mode == "panhub_api" or source.key not in NETDISK_PAGINATED_SOURCE_KEYS:
             next_page = 1
         elif scanned_pages:
             if scan_mode == NETDISK_SCAN_MODE_INCREMENTAL and (error_text or last_page_empty):
