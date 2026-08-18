@@ -1,0 +1,60 @@
+.prototype-screen {
+  min-height: 100vh;
+  background: #f5f8fb;
+  color: #17212b;
+  font-family: 'IBM Plex Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+.prototype-screen .menu-button {
+  display: inline-flex;
+}
+
+.prototype-screen .prototype-account-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 28px;
+  z-index: 120;
+  width: 180px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-overlay);
+}
+
+.prototype-screen .prototype-account-dropdown strong,
+.prototype-screen .prototype-account-dropdown small {
+  display: block;
+}
+
+.prototype-screen .prototype-account-dropdown small {
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.prototype-screen .prototype-account-dropdown button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--danger);
+  text-align: left;
+}
+
+.prototype-screen .server-table-pagination {
+  margin-top: 12px;
+}
+
+@media (min-width: 901px) {
+  .prototype-screen .app-shell.sidebar-collapsed.sidebar-hover-expanded {
+    grid-template-columns: var(--sidebar) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .prototype-screen .prototype-account-dropdown {
+    right: 16px;
+  }
+}

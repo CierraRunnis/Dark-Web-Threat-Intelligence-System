@@ -1,0 +1,13 @@
+celery>=5.3,<6
+redis>=5.0,<6
+playwright>=1.42,<2
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+httpx>=0.27,<1
+pycountry>=24.6,<25
+Babel>=2.11,<3
+PySocks>=1.7,<2
+urllib3>=2.0,<3
+wecom-aibot-sdk>=1.0.8,<2
+PyJWT[crypto]>=2.9,<3
+psutil>=5.9,<8

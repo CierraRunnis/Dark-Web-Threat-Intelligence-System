@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Virtual environments
+venv/
+.venv/
+darkweb_collector/venv/
+
+# Node / frontend build outputs
+node_modules/
+dist/
+threat-intelligence-dashboard/node_modules/
+threat-intelligence-dashboard/dist/
+
+# Runtime data and crawler artifacts
+darkweb_collector/data/
+darkweb_collector/output/
+darkweb_collector/samples/*
+!darkweb_collector/samples/Lynx/
+!darkweb_collector/samples/Lynx/**
+!darkweb_collector/samples/public_vulnerability_feed.json
+darkweb_collector/secrets/
+darkweb_collector/ransomware_api_response.json
+darkweb_collector/C*/
+tor-migration-package/home/
+*.orig
+*.bak*
+tor-migration-package/usr/local/bin/lyrebird
+
+# Local secrets and environment
+.env
+*.env
+darkweb_collector/.env
+**/auth-password.txt
+
+.env.*
+# OS / editor
+.DS_Store
+Thumbs.db
+.codex-backups/
+_tmp_kaiti_report.txt
+
+# Archives and downloads
+*.tar.gz
+tor-downloads/

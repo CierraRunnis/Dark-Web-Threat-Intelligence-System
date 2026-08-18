@@ -1,0 +1,87 @@
+.prototype-screen.page-ai-aggregation .ai-template-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-template-toolbar .field {
+  margin: 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-template-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-template-state input {
+  width: auto;
+}
+
+.prototype-screen.page-ai-aggregation .ai-keywords-textarea,
+.prototype-screen.page-ai-aggregation .ai-prompt-textarea {
+  min-height: 112px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.prototype-screen.page-ai-aggregation .ai-prompt-textarea {
+  min-height: 88px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-run-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  align-items: end;
+  gap: 12px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-run-form-grid .field {
+  margin: 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-template-preview {
+  display: grid;
+  gap: 5px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .ai-template-preview code {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  white-space: pre-wrap;
+}
+
+.prototype-screen.page-ai-aggregation .ai-profile-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  align-items: end;
+  gap: 12px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-profile-save-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.prototype-screen.page-ai-aggregation .ai-profile-save-actions .muted {
+  margin: 0;
+}
+
+@media (max-width: 800px) {
+  .prototype-screen.page-ai-aggregation .ai-template-toolbar,
+  .prototype-screen.page-ai-aggregation .ai-run-form-grid,
+  .prototype-screen.page-ai-aggregation .ai-profile-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .prototype-screen.page-ai-aggregation .ai-template-toolbar .btn {
+    width: 100%;
+  }
+}

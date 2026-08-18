@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>AI聚合 - 玄鉴威胁情报</title><link rel="stylesheet" href="../styles.css" /></head>
+<body class="page-ai-aggregation">
+  <a class="skip-link" href="#content">跳转到主内容</a>
+  <div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" aria-label="主导航"><a class="brand" href="dashboard.html"><span class="brand-mark">玄</span><span class="brand-copy"><strong>玄鉴</strong><small>THREAT INTELLIGENCE</small></span></a><nav class="sidebar-nav" aria-label="模块导航"></nav><div class="sidebar-footer"><span class="status-dot success"></span><span>AI 聚合</span></div></aside>
+    <button class="sidebar-backdrop" type="button" aria-label="关闭导航" data-sidebar-toggle></button>
+    <div class="app-stage">
+      <header class="app-header" data-od-id="ai-aggregation-header"><button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="header-actions"><span class="app-version">版本 <strong>v0.20.0</strong></span><span class="avatar">个人</span></div></header>
+      <main class="app-main" id="content">
+        <section class="page-heading">
+          <div><p class="eyebrow">AI AGGREGATION</p><h1>AI聚合</h1><p class="muted">选择已保存的任务模板，生成一份聚合威胁情报报告。</p></div>
+          <div class="actions"><a class="btn btn-secondary" href="ai-aggregation-templates.html" data-ai-template-settings-link>模板配置</a><span class="badge" data-ai-service-status><span class="status-dot warning"></span>正在检查服务</span><button class="btn btn-secondary" type="button" data-ai-refresh>刷新</button></div>
+        </section>
+        <div class="runtime-data-state" data-ai-runtime-state role="status" aria-live="polite">正在加载真实数据…</div>
+        <div class="runtime-data-state error" data-ai-error role="alert" hidden><strong>请求未完成：</strong><span data-ai-error-message></span><button class="btn btn-secondary" type="button" data-ai-dismiss-error>关闭</button></div>
+
+        <section class="grid-2-1 ai-aggregation-top-grid">
+          <article class="card panel">
+            <header class="panel-header"><div><p class="eyebrow">RUN TEMPLATE</p><h2>运行模板任务</h2></div><span class="badge" data-ai-run-profile-status>未选择</span></header>
+            <form data-ai-run-form novalidate>
+              <label class="field"><span>任务模板</span><select class="select" data-ai-run-profile required><option value="">暂无可用模板</option></select><small>运行使用模板已保存的关键词、时间和提示词，不在此临时改写。</small></label>
+              <div class="grid-2 ai-run-summary" data-ai-run-summary>
+                <div><span class="muted">关键词</span><strong data-ai-run-keywords-summary>—</strong></div>
+                <div><span class="muted">时间范围</span><strong data-ai-run-days-summary>—</strong></div>
+                <div><span class="muted">情报源</span><strong>暗网 · Telegram · Web</strong></div>
+                <div><span class="muted">输出语言</span><strong>简体中文</strong></div>
+                <div><span class="muted">定时任务</span><strong data-ai-run-schedule-summary>—</strong></div>
+              </div>
+              <div class="ai-template-preview"><span class="muted">提示词预览</span><code data-ai-run-preview>请先选择模板</code></div>
+              <div class="actions ai-run-actions"><button class="btn btn-primary" type="submit" data-ai-run-button disabled><span data-ai-run-button-label>立即生成</span></button></div>
+            </form>
+          </article>
+          <aside class="card panel">
+            <header class="panel-header"><div><p class="eyebrow">RUNTIME</p><h2>并发状态</h2></div><span class="badge" data-ai-adapter-mode>—</span></header>
+            <div class="ai-concurrency-summary"><strong><span data-ai-running-count>0</span> / <span data-ai-concurrency-limit>2</span></strong><span class="muted">正在执行</span></div><div class="ai-meter" aria-hidden="true"><span data-ai-concurrency-meter></span></div>
+            <div class="grid-2 ai-status-grid"><div><span class="status-dot warning"></span><span>排队中</span><strong data-ai-queued-count>0</strong></div><div><span class="status-dot info"></span><span>分析中</span><strong data-ai-running-count-secondary>0</strong></div><div><span class="status-dot success"></span><span>已完成</span><strong data-ai-succeeded-count>0</strong></div><div><span class="status-dot danger"></span><span>已失败</span><strong data-ai-failed-count>0</strong></div></div>
+            <p class="muted ai-runtime-note">整组关键词合并为一次聚合运行并生成一份报告。</p>
+          </aside>
+        </section>
+
+        <section class="card panel ai-report-panel" data-ai-report-section>
+          <header class="panel-header"><div><p class="eyebrow">LATEST REPORT</p><h2>最新报告 <span class="badge" data-ai-current-status>暂无任务</span></h2></div><div class="actions" data-ai-report-actions hidden><button class="btn btn-secondary" type="button" data-ai-copy-report>复制报告</button><button class="btn btn-secondary" type="button" data-ai-download-report>下载 .md</button></div></header>
+          <div class="empty-state" data-ai-report-empty><h3>尚未生成报告</h3><p>选择一个已启用的模板后立即生成。</p></div>
+          <div class="ai-report-progress" data-ai-report-progress hidden><span class="status-dot info"></span><div><h3 data-ai-progress-title>排队中</h3><p class="muted" data-ai-progress-description></p><code data-ai-progress-run-id></code></div></div>
+          <div class="ai-report-failure" data-ai-report-failure hidden><span class="status-dot danger"></span><div><h3>报告生成失败</h3><p data-ai-report-error></p><code data-ai-failed-run-id></code></div></div>
+          <div class="ai-report-document" data-ai-report-document hidden><div class="grid-2 ai-report-meta"><div><span class="muted">关键词</span><strong data-ai-report-keyword>—</strong></div><div><span class="muted">完成时间</span><strong data-ai-report-completed-at>—</strong></div><div><span class="muted">报告编号</span><code data-ai-report-run-id>—</code></div><div><span class="muted">投递状态</span><span class="badge" data-ai-delivery-status>未配置</span></div></div><section class="ai-delivery-section" data-ai-delivery-section hidden><header class="panel-header"><div><h3>报告投递</h3><p class="muted">投递失败不会重新调用 AI。</p></div><button class="btn btn-secondary" type="button" data-ai-retry-deliveries hidden>重试失败投递</button></header><div data-ai-delivery-list></div></section><article class="ai-markdown" data-ai-report-markdown></article></div>
+        </section>
+
+        <section class="card panel">
+          <header class="panel-header"><div><p class="eyebrow">RUN HISTORY</p><h2>历史运行</h2></div><select class="select" data-ai-history-filter aria-label="按状态筛选"><option value="">全部状态</option><option value="queued">排队中</option><option value="running">分析中</option><option value="succeeded">已完成</option><option value="failed">已失败</option></select></header>
+          <div class="table-wrap" data-ai-history-table-wrap><table class="ds-table"><thead><tr><th>关键词</th><th>状态</th><th>触发时间</th><th>操作</th></tr></thead><tbody data-ai-history-body></tbody></table></div><div class="empty-state" data-ai-history-empty hidden><h3>还没有运行记录</h3></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status" aria-live="polite" data-ai-toast hidden></div><script src="../runtime.js"></script>
+</body></html>

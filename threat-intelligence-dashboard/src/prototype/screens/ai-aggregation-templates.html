@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>AI聚合模板配置 - 玄鉴</title><link rel="stylesheet" href="../styles.css" /></head>
+<body class="page-ai-aggregation page-ai-aggregation-templates">
+  <a class="skip-link" href="#content">跳转到主内容</a>
+  <div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" aria-label="主导航"><a class="brand" href="dashboard.html"><span class="brand-mark">玄</span><span class="brand-copy"><strong>玄鉴</strong><small>THREAT INTELLIGENCE</small></span></a><nav class="sidebar-nav" aria-label="模块导航"></nav><div class="sidebar-footer"><span class="status-dot success"></span><span>AI 聚合</span></div></aside>
+    <button class="sidebar-backdrop" type="button" aria-label="关闭导航" data-sidebar-toggle></button>
+    <div class="app-stage">
+      <header class="app-header"><button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="header-actions"><span class="app-version">版本 <strong>v0.20.0</strong></span><span class="avatar">个人</span></div></header>
+      <main class="app-main" id="content">
+        <section class="page-heading">
+          <div><p class="eyebrow">AI TASK TEMPLATES</p><h1>模板任务配置</h1><p class="muted">统一管理关键词、时间、提示词、定时与投递目标。</p></div>
+          <div class="actions"><a class="btn btn-secondary" href="ai-aggregation.html" data-ai-templates-return>返回 AI聚合</a><span class="badge" data-ai-template-state>未选择</span></div>
+        </section>
+        <div class="runtime-data-state" data-ai-runtime-state role="status" aria-live="polite">正在加载模板…</div>
+        <div class="runtime-data-state error" data-ai-error role="alert" hidden><strong>请求未完成：</strong><span data-ai-error-message></span><button class="btn btn-secondary" type="button" data-ai-dismiss-error>关闭</button></div>
+
+        <section class="card panel ai-template-settings-panel">
+          <header class="panel-header"><div><p class="eyebrow">PROFILE</p><h2>任务模板</h2></div><span class="muted" data-ai-save-state></span></header>
+          <div class="ai-template-toolbar">
+            <label class="field"><span>当前模板</span><select class="select" data-ai-profile-select><option value="">暂无模板</option></select></label>
+            <button class="btn btn-secondary" type="button" data-ai-new-profile>新建</button>
+            <button class="btn btn-secondary" type="button" data-ai-delete-profile disabled>删除</button>
+          </div>
+          <form data-ai-profile-form novalidate>
+            <div class="ai-profile-form-grid"><label class="field"><span>模板名称</span><input class="input" type="text" maxlength="80" placeholder="例如：每日重点行业威胁情报" data-ai-profile-name required /></label><label class="field ai-check-field ai-template-state"><input type="checkbox" data-ai-profile-enabled /><span>启用模板</span></label></div>
+            <label class="field"><span>提示词模板</span><textarea class="textarea ai-prompt-textarea" rows="4" data-ai-profile-prompt required></textarea><small><code>{{keywords}}</code> 与 <code>{{time_range}}</code> 两个占位符都必填。</small></label>
+            <div class="ai-profile-form-grid">
+              <label class="field"><span>关键词（一行一个）</span><textarea class="textarea ai-keywords-textarea" rows="7" placeholder="能源&#10;制造业" data-ai-profile-keywords required></textarea><small>最多30个，单个最多128字符。</small></label>
+              <label class="field"><span>默认时间（天）</span><input class="input" type="number" min="1" max="3650" step="1" value="30" data-ai-profile-days required /><small>1–3650 天</small></label>
+            </div>
+            <div class="ai-template-preview"><span class="muted">最终提示词预览</span><code data-ai-profile-preview>搜索 {{keywords}} 最近30天 的威胁情报</code></div>
+
+            <fieldset class="ai-fieldset">
+              <legend>定时生成</legend>
+              <label class="field ai-check-field"><input type="checkbox" data-ai-schedule-enabled /><span>启用 cron 定时任务</span></label>
+              <div class="grid-2"><label class="field"><span>Cron（五段）</span><input class="input" type="text" value="0 9 * * *" data-ai-cron disabled /><small>分 时 日 月 周</small></label><label class="field"><span>时区</span><select class="select" data-ai-timezone disabled><option value="Asia/Shanghai">Asia/Shanghai (UTC+8)</option></select></label></div>
+            </fieldset>
+            <fieldset class="ai-fieldset">
+              <legend>Callback</legend>
+              <label class="field ai-check-field"><input type="checkbox" data-ai-callback-enabled /><span>启用 Callback</span></label>
+              <label class="field"><span>Callback URL</span><input class="input" type="url" placeholder="http://127.0.0.1:8767/api/intelligence/callback" data-ai-callback-url disabled /><small>仅允许后端配置的白名单主机。</small></label>
+            </fieldset>
+            <fieldset class="ai-fieldset">
+              <legend>企业微信推送</legend><p class="muted">填写 Flocks 已绑定的 WeCom session_id，不在此保存 Bot 凭据。</p><div data-ai-wecom-list></div><button class="btn btn-secondary" type="button" data-ai-add-wecom>+添加目标</button>
+            </fieldset>
+            <div class="actions ai-profile-save-actions"><p class="muted">修改仅影响后续运行，不改写历史报告。</p><button class="btn btn-primary" type="submit" data-ai-save-profile>保存模板</button></div>
+          </form>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status" aria-live="polite" data-ai-toast hidden></div><script src="../runtime.js"></script>
+</body></html>

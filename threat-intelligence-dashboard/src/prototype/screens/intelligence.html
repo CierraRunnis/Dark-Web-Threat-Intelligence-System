@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>威胁情报 · 玄鉴</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-intelligence-search">
+  <a class="skip-link" href="#content">跳到主要内容</a>
+<div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" data-od-id="intelligence-sidebar">
+      <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><path d="M24 3 40 9v12c0 11-6.7 18.5-16 23-9.3-4.5-16-12-16-23V9L24 3Z"/><circle cx="24" cy="22" r="8"/><path d="M14 22h20M24 12v20m-6-4 12-12"/></svg></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span></a>
+      <nav class="sidebar-nav" aria-label="主导航" data-od-id="intelligence-nav">
+        <div class="nav-label">工作区</div>
+        <a class="nav-link" href="dashboard.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>安全工作台</a>
+        <a class="nav-link active" href="intelligence.html" aria-current="page"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4M11 8v6M8 11h6"/></svg>威胁情报</a>
+        <a class="nav-link sub active" href="intelligence.html">事件检索</a>
+        <a class="nav-link sub" href="#situation">态势与报告</a>
+        <a class="nav-link" href="monitoring.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v12H4zM8 21h8M12 17v4"/></svg>暴露监测</a>
+        <a class="nav-link" href="collector-sites.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M7 4v6M17 4v6M5 12h14v8H5z"/></svg>采集运营</a>
+        <div class="nav-label">管理</div>
+        <a class="nav-link" href="settings.html"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1A8 8 0 0 0 15 6l-.3-2.6h-4L10.4 6A8 8 0 0 0 8 7.1l-2.4-1-2 3.4L5.7 11a7 7 0 0 0 0 2L3.6 14.5l2 3.4 2.4-1A8 8 0 0 0 10.4 18l.3 2.6h4L15 18a8 8 0 0 0 1.6-1.1l2.4 1 2-3.4-2.1-1.5a7 7 0 0 0 .1-1Z"/></svg>配置中心</a>
+      </nav>
+      <div class="sidebar-footer"><div class="coverage"><strong>自动刷新</strong><span>列表状态保留 · 15 秒刷新</span></div></div>
+    </aside>
+    <button class="sidebar-backdrop" data-sidebar-toggle aria-label="关闭导航"></button>
+
+    <div class="app-stage">
+      <header class="app-header" data-od-id="intelligence-header">
+        <button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+        <div class="header-actions"><span class="app-version" data-od-id="intelligence-version">版本 <strong>v0.20.0</strong></span><span class="avatar" data-od-id="intelligence-account">个人</span></div>
+      </header>
+
+      <main class="app-main intelligence-search-main" id="content" data-od-id="intelligence-main">
+        <section class="intelligence-search-stage" data-od-id="intelligence-search-stage">
+          <div class="intelligence-search-mark" data-od-id="intelligence-brand-mark"><img src="assets/xuanjian-mark.svg?v=8" alt="玄鉴检测平台"></div>
+          <h1 data-od-id="intelligence-search-title">全域情报检索</h1>
+          <div class="intelligence-search-row">
+            <form class="intelligence-search-form" data-intel-search-form role="search">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <input id="intel-search-query" type="search" data-table-search="intel-results" aria-label="检索威胁情报" placeholder="搜索组织、团伙、CVE、域名、IP 或产品">
+              <button type="submit" data-od-id="intelligence-search-submit" aria-label="开始检索"><svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg></button>
+            </form>
+          </div>
+        </section>
+
+        <section class="intelligence-results" data-od-id="intelligence-results-section">
+          <article class="intel-results-shell" data-od-id="intelligence-results-surface">
+            <header class="intel-results-head">
+              <div class="intel-results-title"><strong>最新情报</strong><span>按公开披露持续更新</span></div>
+              <div class="intel-result-tabs tabs" data-target="intel-results" role="tablist" aria-label="情报类型">
+                <button class="tab active" data-tab="all" role="tab" aria-selected="true">全部 <b class="num" data-table-count="intel-results">7</b></button>
+                <button class="tab" data-tab="ransomware" role="tab" aria-selected="false">勒索 <b class="num">3</b></button>
+                <button class="tab" data-tab="data-leak" role="tab" aria-selected="false">数据泄露 <b class="num">2</b></button>
+                <button class="tab" data-tab="vulnerability" role="tab" aria-selected="false">漏洞 <b class="num">2</b></button>
+              </div>
+              <label class="intel-sort-label">排序<select class="select" data-intel-sort aria-label="结果排序"><option value="latest">报告时间降序</option><option value="oldest">报告时间升序</option><option value="severity">风险等级优先</option></select></label>
+            </header>
+
+            <div class="intel-result-list" id="intel-results" data-table data-active-tab="all">
+              <article class="intel-result-item" data-table-row data-category="vulnerability" data-severity="critical" data-industry="边界设备" data-status="exploited" data-date="202603100931" data-severity-rank="3" data-od-id="intel-result-pan-os">
+                <div class="intel-result-thumb thumb-vulnerability" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="7" y="6" width="10" height="13" rx="4"/><path d="M9 6V4m6 2V4M4 10h3m10 0h3M4 15h3m10 0h3M9 12h6m-6 3h6"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T09:31">2026/03/10 09:31</time><span>刚刚更新</span><span class="badge badge-critical">已利用</span><span class="badge">漏洞预警</span></div><h2><a href="vulnerability-detail.html?id=CVE-2026-24001">Palo Alto PAN-OS GlobalProtect 网关未授权命令执行</a></h2><p>公开利用信号指向 GlobalProtect 网关，需优先核对互联网暴露面、设备版本与异常命令执行痕迹。</p><div class="intel-result-context"><strong>Palo Alto Networks</strong><span>CVE-2026-24001</span><span>边界设备</span><span>远程代码执行</span></div></div>
+              </article>
+              <article class="intel-result-item" data-table-row data-category="data-leak" data-severity="critical" data-industry="电商" data-status="verify" data-date="202603100926" data-severity-rank="3" data-od-id="intel-result-commerce-leak">
+                <div class="intel-result-thumb thumb-leak" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T09:26">2026/03/10 09:26</time><span>5 分钟前</span><span class="badge badge-critical">严重</span><span class="badge badge-high">验证中</span></div><h2><a href="data-leak-detail.html?id=LEAK-2026-0310-008">某跨境电商客户订单与联系方式样本在论坛售卖</a></h2><p>售卖帖声称包含订单、联系人及配送信息；当前需要对样本字段、时间范围和客户归属进行交叉核验。</p><div class="intel-result-context"><strong>Forum Seller 17</strong><span>客户数据</span><span>电商</span><span>美国 / 英国</span></div></div>
+              </article>
+              <article class="intel-result-item" data-table-row data-category="ransomware" data-severity="critical" data-industry="制造业" data-status="tracking" data-date="202603100912" data-severity-rank="3" data-od-id="intel-result-lockbit-manufacturer">
+                <div class="intel-result-thumb thumb-ransomware" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6.5 3.5h7l4 4V20h-11Z"/><path d="M13.5 3.5V8h4"/><rect x="9" y="12" width="6.5" height="5.5" rx="1.2"/><path d="M10.6 12v-1a1.65 1.65 0 0 1 3.3 0v1M12.25 14.2v1.2"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T09:12">2026/03/10 09:12</time><span>19 分钟前</span><span class="badge badge-critical">严重</span><span class="badge badge-high">待研判</span></div><h2><a href="ransomware-detail.html?id=RAN-2026-0310-014">LockBit 宣布披露北美制造商财务与工程文档</a></h2><p>团伙泄露站新增受害组织条目并声称掌握财务、合同和工程资料，需确认组织身份及披露倒计时。</p><div class="intel-result-context"><strong>LockBit</strong><span>双重勒索</span><span>制造业</span><span>美国 / 加拿大</span></div></div>
+              </article>
+              <article class="intel-result-item" data-table-row data-category="data-leak" data-severity="high" data-industry="金融 SaaS" data-status="verify" data-date="202603100858" data-severity-rank="2" data-od-id="intel-result-finance-credentials">
+                <div class="intel-result-thumb thumb-leak" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T08:58">2026/03/10 08:58</time><span>33 分钟前</span><span class="badge badge-high">高危</span><span class="badge">数据泄露</span></div><h2><a href="data-leak-detail.html?id=LEAK-2026-0310-011">金融 SaaS 后台凭证包进入二次分销频道</a></h2><p>凭证经纪频道出现后台账号组合，需结合登录入口、密码重用情况和最近异常会话判断实际影响。</p><div class="intel-result-context"><strong>Broker-X</strong><span>凭证泄露</span><span>金融 SaaS</span><span>美国</span></div></div>
+              </article>
+              <article class="intel-result-item" data-table-row data-category="vulnerability" data-severity="high" data-industry="中间件" data-status="new" data-date="202603100854" data-severity-rank="2" data-od-id="intel-result-tomcat-smuggling">
+                <div class="intel-result-thumb thumb-vulnerability" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="7" y="6" width="10" height="13" rx="4"/><path d="M9 6V4m6 2V4M4 10h3m10 0h3M4 15h3m10 0h3M9 12h6m-6 3h6"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T08:54">2026/03/10 08:54</time><span>37 分钟前</span><span class="badge badge-high">高危</span><span class="badge">PoC 公开</span></div><h2><a href="vulnerability-detail.html?id=CVE-2026-18113">Apache Tomcat 反向代理链路请求走私漏洞</a></h2><p>受影响部署可能在代理链路中产生请求边界解析差异，应结合前置代理、连接复用和补丁状态核查。</p><div class="intel-result-context"><strong>Apache Tomcat</strong><span>CVE-2026-18113</span><span>中间件</span><span>请求走私</span></div></div>
+              </article>
+              <article class="intel-result-item" data-table-row data-category="ransomware" data-severity="high" data-industry="医疗" data-status="tracking" data-date="202603100844" data-severity-rank="2" data-od-id="intel-result-black-basta-healthcare">
+                <div class="intel-result-thumb thumb-ransomware" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6.5 3.5h7l4 4V20h-11Z"/><path d="M13.5 3.5V8h4"/><rect x="9" y="12" width="6.5" height="5.5" rx="1.2"/><path d="M10.6 12v-1a1.65 1.65 0 0 1 3.3 0v1M12.25 14.2v1.2"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T08:44">2026/03/10 08:44</time><span>47 分钟前</span><span class="badge badge-high">高危</span><span class="badge badge-critical">跟踪中</span></div><h2><a href="ransomware-detail.html?id=RAN-2026-0310-012">Black Basta 声称入侵欧洲医疗集团并启动谈判倒计时</a></h2><p>团伙已公布受害组织名称并启动倒计时，当前关注泄露样本、医疗业务连续性及关联基础设施变化。</p><div class="intel-result-context"><strong>Black Basta</strong><span>勒索谈判</span><span>医疗</span><span>德国 / 波兰</span></div></div>
+              </article>
+              <article class="intel-result-item" data-table-row data-category="ransomware" data-severity="medium" data-industry="制造业" data-status="new" data-date="202603100735" data-severity-rank="1" data-od-id="intel-result-play-asia">
+                <div class="intel-result-thumb thumb-ransomware" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6.5 3.5h7l4 4V20h-11Z"/><path d="M13.5 3.5V8h4"/><rect x="9" y="12" width="6.5" height="5.5" rx="1.2"/><path d="M10.6 12v-1a1.65 1.65 0 0 1 3.3 0v1M12.25 14.2v1.2"/></svg></div>
+                <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T07:35">2026/03/10 07:35</time><span>1 小时前</span><span class="badge badge-medium">中危</span><span class="badge">新发现</span></div><h2><a href="ransomware-detail.html?id=RAN-2026-0310-009">Play 团伙新增东南亚制造业受害者披露</a></h2><p>泄露站新增越南与泰国制造业组织名称，尚需确认企业实体、站点发布时间及是否存在可验证样本。</p><div class="intel-result-context"><strong>Play</strong><span>站点披露</span><span>制造业</span><span>越南 / 泰国</span></div></div>
+              </article>
+            </div>
+            <div class="intel-empty-state" data-table-empty="intel-results">没有符合当前条件的情报，尝试清空筛选或更换关键词。</div>
+            <footer class="intel-results-foot"><span>当前显示 <b class="num" data-table-count="intel-results">7</b> 条情报</span><span>结果按公开披露时间持续更新</span></footer>
+          </article>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>

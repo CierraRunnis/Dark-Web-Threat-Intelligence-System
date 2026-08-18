@@ -1,0 +1,368 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+html {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--ti-bg-page);
+}
+
+body {
+  font-family: var(--ti-font-family);
+  background: #ffffff;
+  color: var(--ti-text-primary);
+  line-height: 1.6;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(226, 232, 240, 0.6);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(104, 114, 137, 0.35);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(104, 114, 137, 0.6);
+}
+
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes skeletonShimmer {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.ti-slide-in-up,
+.ti-reveal-up {
+  animation: slideInUp 0.36s ease both;
+}
+
+.ti-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.ti-card {
+  background: var(--ti-surface-default);
+  border-radius: var(--ti-radius-lg);
+  border: 1px solid var(--ti-border-default);
+  box-shadow: var(--ti-shadow-card);
+  transition:
+    transform 0.24s ease,
+    box-shadow 0.24s ease,
+    border-color 0.24s ease,
+    background 0.24s ease;
+  backdrop-filter: blur(10px);
+}
+
+.ti-card:hover {
+  box-shadow: var(--ti-shadow-card-hover);
+  border-color: var(--ti-border-strong);
+}
+
+.ti-card-header {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--ti-border-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.ti-card-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ti-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  line-height: 1.3;
+}
+
+.ti-card-title .icon,
+.ti-card-title .el-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--ti-accent-strong);
+}
+
+.ti-card-body {
+  padding: 20px 22px 22px;
+}
+
+.ti-page {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+.ti-page-grid {
+  display: grid;
+  gap: 22px;
+}
+
+.ti-panel {
+  padding: 22px;
+  border: 1px solid var(--ti-border-default);
+  border-radius: var(--ti-radius-lg);
+  background: var(--ti-panel-emphasis);
+  box-shadow: var(--ti-shadow-panel);
+}
+
+.ti-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ti-accent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.ti-number {
+  font-family: var(--ti-font-mono);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.ti-number--large {
+  font-size: clamp(30px, 4vw, 54px);
+}
+
+.ti-number--medium {
+  font-size: 26px;
+}
+
+.ti-label {
+  color: var(--ti-text-secondary);
+  font-size: 13px;
+}
+
+.ti-muted {
+  color: var(--ti-text-muted);
+}
+
+.ti-table-shell {
+  overflow-x: auto;
+}
+
+.ti-card-list {
+  display: grid;
+  gap: 14px;
+}
+
+.ti-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(
+    90deg,
+    rgba(226, 232, 240, 0.45),
+    rgba(255, 255, 255, 0.9),
+    rgba(226, 232, 240, 0.45)
+  );
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.4s linear infinite;
+}
+
+.el-button {
+  font-weight: 600;
+}
+
+.el-button--default,
+.el-button.is-text {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  box-shadow: none !important;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.98);
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  border-color: rgba(45, 93, 255, 0.24);
+  box-shadow: 0 0 0 4px rgba(45, 93, 255, 0.08) !important;
+  background: #ffffff;
+}
+
+.el-table {
+  --el-table-header-bg-color: rgba(247, 249, 252, 0.96);
+  --el-table-row-hover-bg-color: rgba(245, 249, 255, 0.92);
+  --el-table-border-color: rgba(87, 97, 123, 0.08);
+  --el-table-header-text-color: var(--ti-text-secondary);
+  --el-table-text-color: var(--ti-text-primary);
+  --el-table-bg-color: transparent;
+  --el-fill-color-blank: transparent;
+  font-size: 13px;
+}
+
+.el-table th.el-table__cell {
+  padding-top: 14px;
+  padding-bottom: 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.el-table td.el-table__cell {
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+
+.el-table .cell {
+  line-height: 1.6;
+}
+
+.el-pagination {
+  gap: 6px;
+}
+
+.el-radio-button__inner {
+  border-radius: 999px !important;
+  border: 1px solid var(--ti-border-default) !important;
+  box-shadow: none !important;
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.el-radio-button.is-active .el-radio-button__inner {
+  background: var(--ti-primary);
+  border-color: var(--ti-primary) !important;
+}
+
+.ti-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.ti-status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.ti-status--critical {
+  color: var(--ti-danger-strong);
+  background: rgba(207, 68, 50, 0.12);
+  border-color: rgba(207, 68, 50, 0.16);
+}
+
+.ti-status--high {
+  color: var(--ti-warning-strong);
+  background: rgba(232, 128, 48, 0.12);
+  border-color: rgba(232, 128, 48, 0.16);
+}
+
+.ti-status--medium {
+  color: var(--ti-primary);
+  background: rgba(45, 93, 255, 0.1);
+  border-color: rgba(45, 93, 255, 0.14);
+}
+
+.ti-status--low {
+  color: var(--ti-success-strong);
+  background: rgba(40, 122, 79, 0.1);
+  border-color: rgba(40, 122, 79, 0.14);
+}
+
+@media (max-width: 1024px) {
+  .ti-card-header,
+  .ti-card-body,
+  .ti-panel {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+
+@media (max-width: 767px) {
+  .ti-card {
+    border-radius: 18px;
+  }
+
+  .ti-card-header {
+    padding-top: 16px;
+    padding-bottom: 16px;
+    align-items: flex-start;
+  }
+
+  .ti-card-body {
+    padding-top: 16px;
+  }
+
+  .ti-page {
+    gap: 20px;
+  }
+}

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>威胁情报总览 · 玄鉴</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-situation page-dashboard">
+  <a class="skip-link" href="#content">跳到主要内容</a>
+  <div class="app-shell sidebar-collapsed">
+    <aside class="app-sidebar" data-od-id="dashboard-sidebar">
+      <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true"><img src="assets/xuanjian-mark.svg?v=8" alt=""></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span></a>
+      <nav class="sidebar-nav" aria-label="主导航"></nav>
+      <div class="sidebar-footer"></div>
+    </aside>
+    <button class="sidebar-backdrop" data-sidebar-toggle aria-label="关闭导航"></button>
+
+    <div class="app-stage">
+      <header class="app-header" data-od-id="dashboard-header">
+        <button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div class="header-actions"><span class="app-version" data-od-id="dashboard-version">版本 <strong>v0.20.0</strong></span><span class="avatar" data-od-id="dashboard-account">个人</span></div>
+      </header>
+
+      <main class="app-main" id="content" data-od-id="dashboard-main">
+        <section class="situation-heading module-actions-bar" data-od-id="dashboard-range-controls">
+          <div class="tabs situation-range" aria-label="统计周期"><button class="tab" data-tab="today" aria-selected="false">今日</button><button class="tab active" data-tab="7d" aria-selected="true">近7天</button><button class="tab" data-tab="30d" aria-selected="false">近30天</button></div>
+        </section>
+
+        <div class="dashboard-board situation-board">
+          <section class="card situation-status-strip" data-od-id="dashboard-status-strip">
+            <div><span class="live-pulse"></span><strong>情报流正常</strong><small>多源信号持续汇聚</small></div>
+            <div><span>监测区域</span><strong class="num">6</strong></div>
+            <div><span>重点行业</span><strong class="num">8</strong></div>
+            <div><span>待研判线索</span><strong class="num">19</strong></div>
+            <button class="btn btn-ghost" data-toast="总览数据已刷新">刷新总览</button>
+          </section>
+
+          <section class="situation-kpi-grid" data-od-id="dashboard-threat-metrics">
+            <article class="card situation-kpi dense-panel" data-od-id="dashboard-kpi-leak"><div class="situation-kpi-head"><span>泄露事件</span><b class="risk-rise">持续上升</b></div><strong class="num" data-count="31">0</strong><svg class="situation-spark" viewBox="0 0 120 28" aria-hidden="true"><path d="M2 24 18 22 34 23 50 17 66 18 82 12 98 13 118 5"/></svg></article>
+            <article class="card situation-kpi dense-panel" data-od-id="dashboard-kpi-ransomware"><div class="situation-kpi-head"><span>勒索受害者</span><b class="risk-critical">高位运行</b></div><strong class="num" data-count="42">0</strong><svg class="situation-spark critical" viewBox="0 0 120 28" aria-hidden="true"><path d="M2 21 18 18 34 20 50 13 66 9 82 12 98 6 118 8"/></svg></article>
+            <article class="card situation-kpi dense-panel" data-od-id="dashboard-kpi-vulnerability"><div class="situation-kpi-head"><span>漏洞预警</span><b class="risk-critical">5 项已利用</b></div><strong class="num" data-count="12">0</strong><svg class="situation-spark warning" viewBox="0 0 120 28" aria-hidden="true"><path d="M2 20 18 21 34 15 50 18 66 10 82 14 98 9 118 4"/></svg></article>
+            <article class="card situation-kpi dense-panel" data-od-id="dashboard-kpi-alert"><div class="situation-kpi-head"><span>高危告警</span><b class="risk-rise">待优先研判</b></div><strong class="num" data-count="19">0</strong><svg class="situation-spark accent" viewBox="0 0 120 28" aria-hidden="true"><path d="M2 23 18 17 34 18 50 12 66 15 82 8 98 10 118 6"/></svg></article>
+          </section>
+
+          <section class="situation-live-grid" data-od-id="dashboard-live-overview">
+            <article class="card situation-map-card dense-panel" data-od-id="dashboard-threat-map">
+              <div class="panel-header"><div><span class="panel-kicker">实时信号地图</span><h2>全球威胁活动</h2></div><span class="situation-live-label"><i></i><span>实时汇总</span></span></div>
+              <div class="situation-map-layout">
+                <div class="world-grid situation-world" role="img" aria-label="全球重点威胁活动分布">
+                  <img class="situation-world-map" src="assets/world-map.svg" alt="" aria-hidden="true">
+                  <i class="situation-route route-one"></i><i class="situation-route route-two"></i><i class="situation-route route-three"></i>
+                  <span class="map-point us"></span><span class="map-point de"></span><span class="map-point in"></span><span class="map-point jp"></span><span class="map-point br"></span>
+                  <span class="situation-map-label label-us">北美 · 84</span><span class="situation-map-label label-de">西欧 · 72</span><span class="situation-map-label label-in">南亚 · 61</span><span class="situation-map-label label-jp">东亚 · 69</span><span class="situation-map-label label-br">拉美 · 47</span>
+                </div>
+                <div class="situation-region-rank">
+                  <div class="region-rank-head"><span>区域</span><span>风险指数</span></div>
+                  <div class="compact-bar"><span>北美</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:100%"></i></div><b>84</b></div><div class="compact-bar"><span>西欧</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:86%"></i></div><b>72</b></div><div class="compact-bar"><span>东亚</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:82%"></i></div><b>69</b></div><div class="compact-bar"><span>南亚</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:73%"></i></div><b>61</b></div><div class="compact-bar"><span>东南亚</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:69%"></i></div><b>58</b></div><div class="compact-bar"><span>拉美</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:56%"></i></div><b>47</b></div>
+                </div>
+              </div>
+              <div class="situation-map-foot"><span><i class="critical"></i> 严重活动</span><span><i class="high"></i> 高风险区域</span><span><i class="watch"></i> 持续观察</span><b>综合风险指数 <strong class="num">78</strong></b></div>
+            </article>
+
+            <article class="card situation-watch-card dense-panel" data-od-id="dashboard-watch-queue">
+              <div class="panel-header"><div><span class="panel-kicker">分析队列</span><h2>当前关注点</h2></div><span class="badge badge-critical">4</span></div>
+              <div class="situation-watch-list">
+                <a href="vulnerability-detail.html?id=CVE-2026-24001" data-od-id="dashboard-watch-vulnerability"><span class="watch-kind critical">漏洞</span><div><strong>边界设备漏洞出现真实利用活动</strong><small>全球 · 远程访问入口 · 优先核验</small></div><b>严重</b></a>
+                <a href="ransomware-detail.html?id=RAN-2026-0310-014" data-od-id="dashboard-watch-ransomware"><span class="watch-kind critical">勒索</span><div><strong>制造业受害面持续扩大</strong><small>北美 / 西欧 · LockBit · 行动跟踪</small></div><b>严重</b></a>
+                <a href="data-leak-detail.html?id=LEAK-2026-0310-008" data-od-id="dashboard-watch-data-leak"><span class="watch-kind high">泄露</span><div><strong>凭证与客户资料售卖线索增加</strong><small>电商行业 · 证据待核验</small></div><b>高危</b></a>
+                <a href="intelligence.html" data-od-id="dashboard-watch-region"><span class="watch-kind watch">区域</span><div><strong>西欧风险指数接近预警阈值</strong><small>漏洞利用与勒索活动叠加</small></div><b>关注</b></a>
+              </div>
+              <a class="situation-queue-link" href="intelligence.html">进入情报研判队列 <span>→</span></a>
+            </article>
+          </section>
+
+          <section class="situation-analysis-grid" data-od-id="dashboard-threat-analysis">
+            <article class="card situation-trend-card dense-panel" data-od-id="dashboard-threat-trend">
+              <div class="panel-header"><div><span class="panel-kicker">风险趋势</span><h2>威胁等级趋势</h2></div><div class="chart-legend"><span><i class="critical"></i>高危</span><span><i class="total"></i>全部</span></div></div>
+              <div class="trend-summary"><div><span>高危</span><strong class="num">32</strong></div><div><span>中危</span><strong class="num">46</strong></div><div><span>低危</span><strong class="num">21</strong></div></div>
+              <svg class="situation-trend-chart" viewBox="0 0 620 164" preserveAspectRatio="none" role="img" aria-label="近七个周期威胁等级趋势"><g class="trend-grid"><line x1="36" y1="28" x2="602" y2="28"/><line x1="36" y1="72" x2="602" y2="72"/><line x1="36" y1="116" x2="602" y2="116"/><line x1="36" y1="160" x2="602" y2="160"/></g><path class="trend-area" d="M36 138 C96 128 126 132 176 111 S260 104 316 90 410 73 454 63 544 46 602 34 L602 160 L36 160Z"/><path class="trend-line total" d="M36 116 C96 103 126 107 176 91 S260 84 316 71 410 61 454 48 544 38 602 30"/><path class="trend-line critical" d="M36 138 C96 128 126 132 176 111 S260 104 316 90 410 73 454 63 544 46 602 34"/></svg>
+              <div class="trend-axis-labels" aria-hidden="true"><span>03-04</span><span>03-05</span><span>03-06</span><span>03-07</span><span>03-08</span><span>03-09</span><span>03-10</span></div>
+            </article>
+            <article class="card situation-vector-card situation-donut-card dense-panel" data-od-id="dashboard-intel-distribution">
+              <div class="panel-header"><div><span class="panel-kicker">情报构成</span><h2>情报类型分布</h2></div><span class="meta">近 24 小时</span></div>
+              <div class="situation-donut-layout">
+                <div class="donut-chart situation-donut" role="img" aria-label="情报类型分布：勒索情报 42，数据泄露 31，漏洞预警 12，其他线索 41"><div class="donut-core"><strong class="num" data-count="126">0</strong><span>重点事件</span></div></div>
+                <div class="donut-legend situation-donut-legend">
+                  <div class="legend-item"><i></i><span>勒索情报</span><b>42</b></div>
+                  <div class="legend-item"><i></i><span>数据泄露</span><b>31</b></div>
+                  <div class="legend-item"><i></i><span>漏洞预警</span><b>12</b></div>
+                  <div class="legend-item"><i></i><span>其他线索</span><b>41</b></div>
+                </div>
+              </div>
+            </article>
+            <article class="card situation-industry-card dense-panel" data-od-id="dashboard-industry-heat"><div class="panel-header"><div><span class="panel-kicker">行业暴露</span><h2>行业风险热度</h2></div><span class="meta">综合评分</span></div><div class="industry-heat-list"><div><b>01</b><span><strong>制造业</strong><small>勒索与供应链风险叠加</small></span><em>78</em></div><div><b>02</b><span><strong>金融</strong><small>凭证泄露线索活跃</small></span><em>64</em></div><div><b>03</b><span><strong>医疗</strong><small>外部服务暴露较集中</small></span><em>57</em></div><div><b>04</b><span><strong>电商</strong><small>客户资料售卖线索增加</small></span><em>48</em></div></div></article>
+          </section>
+
+          <section data-od-id="dashboard-priority-events">
+            <article class="card data-table-panel situation-events-card dense-panel">
+              <div class="panel-header"><div><span class="panel-kicker">重点事件</span><h2>重点事件 <small>当前显示 <b data-table-count="dashboard-events-table">5</b> 条</small></h2></div><button class="btn btn-secondary" data-toast="重点事件已加入报告">加入报告</button></div>
+              <div class="toolbar situation-table-toolbar"><div class="tabs" data-target="dashboard-events-table" aria-label="事件类型筛选"><button class="tab active" data-tab="all" aria-selected="true">全部</button><button class="tab" data-tab="vulnerability" aria-selected="false">漏洞</button><button class="tab" data-tab="ransomware" aria-selected="false">勒索</button><button class="tab" data-tab="leak" aria-selected="false">泄露</button></div><select class="select" data-filter-target="dashboard-events-table" data-filter-key="severity" aria-label="风险等级筛选"><option value="">全部等级</option><option value="critical">严重</option><option value="high">高危</option></select><div class="search-field"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input class="input" data-table-search="dashboard-events-table" placeholder="搜索事件、区域或行业" aria-label="搜索重点事件"></div></div>
+              <div class="table-wrap"><table class="ds-table situation-events-table" id="dashboard-events-table" data-table data-active-tab="all"><thead><tr><th>时间</th><th>事件</th><th>类型</th><th>区域</th><th>行业 / 资产</th><th>等级</th><th>状态</th><th>操作</th></tr></thead><tbody>
+                <tr data-category="vulnerability" data-severity="critical"><td class="num">03-10 09:31</td><td class="table-title">边界设备高危漏洞出现利用活动<span>Palo Alto / Ivanti</span></td><td>漏洞预警</td><td>全球</td><td>边界设备</td><td><span class="badge badge-critical">严重</span></td><td><span class="status-dot warning">待研判</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-24001">详情</a></td></tr>
+                <tr data-category="ransomware" data-severity="critical"><td class="num">03-10 09:18</td><td class="table-title">LockBit 新增制造业受害者<span>美国、德国、波兰</span></td><td>勒索情报</td><td>北美 / 西欧</td><td>制造业</td><td><span class="badge badge-critical">严重</span></td><td><span class="status-dot info">跟踪中</span></td><td><a class="btn btn-ghost" href="ransomware-detail.html?id=RAN-2026-0310-014">详情</a></td></tr>
+                <tr data-category="leak" data-severity="high"><td class="num">03-10 08:46</td><td class="table-title">电商客户资料售卖线索<span>进入人工验证池</span></td><td>数据泄露</td><td>北美</td><td>电商</td><td><span class="badge badge-high">高危</span></td><td><span class="status-dot warning">核验中</span></td><td><a class="btn btn-ghost" href="data-leak-detail.html?id=LEAK-2026-0310-008">详情</a></td></tr>
+                <tr data-category="vulnerability" data-severity="high"><td class="num">03-10 08:21</td><td class="table-title">远程访问组件暴露面扩大<span>多地区资产命中</span></td><td>漏洞预警</td><td>东亚 / 东南亚</td><td>远程访问</td><td><span class="badge badge-high">高危</span></td><td><span class="status-dot success">已确认</span></td><td><a class="btn btn-ghost" href="vulnerability-detail.html?id=CVE-2026-17420">详情</a></td></tr>
+                <tr data-category="leak" data-severity="high"><td class="num">03-10 07:58</td><td class="table-title">企业邮箱凭证集合出现更新<span>与历史泄露样本部分重合</span></td><td>数据泄露</td><td>西欧</td><td>企业邮箱</td><td><span class="badge badge-high">高危</span></td><td><span class="status-dot info">关联中</span></td><td><a class="btn btn-ghost" href="data-leak-detail.html?id=LEAK-2026-0310-005">详情</a></td></tr>
+              </tbody></table></div><div class="empty-state" data-table-empty="dashboard-events-table" style="display:none">没有匹配的重点事件</div>
+            </article>
+          </section>
+
+          <section class="rank-grid dashboard-topic-rankings" data-od-id="dashboard-topic-rankings">
+            <article class="panel card rank-card dense-panel" data-od-id="dashboard-ransomware-ranking"><div class="panel-header"><h2>活跃勒索组织</h2><a class="btn btn-ghost" href="ransomware.html">全部</a></div><div class="rank-hero"><span class="rank-badge">12</span><div><strong>LockBit</strong><span>当前最活跃</span></div></div><div class="bar-list-v2"><div class="bar-row-v2"><span>LockBit</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:100%"></i></div><b>12</b></div><div class="bar-row-v2"><span>Black Basta</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:75%"></i></div><b>9</b></div><div class="bar-row-v2"><span>Akira</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:58%"></i></div><b>7</b></div><div class="bar-row-v2"><span>RansomHub</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:50%"></i></div><b>6</b></div></div></article>
+            <article class="panel card rank-card dense-panel" data-od-id="dashboard-sensitive-ranking"><div class="panel-header"><h2>敏感信息类型</h2><a class="btn btn-ghost" href="data-leak.html">全部</a></div><div class="rank-hero"><span class="rank-badge">32</span><div><strong>凭证</strong><span>占比最高</span></div></div><div class="bar-list-v2"><div class="bar-row-v2"><span>凭证</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:100%"></i></div><b>32</b></div><div class="bar-row-v2"><span>客户资料</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:75%"></i></div><b>24</b></div><div class="bar-row-v2"><span>源代码</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:56%"></i></div><b>18</b></div><div class="bar-row-v2"><span>数据库镜像</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:44%"></i></div><b>14</b></div></div></article>
+            <article class="panel card rank-card dense-panel" data-od-id="dashboard-vendor-ranking"><div class="panel-header"><h2>漏洞厂商排行</h2><a class="btn btn-ghost" href="vulnerabilities.html">全部</a></div><div class="rank-hero"><span class="rank-badge">3</span><div><strong>Palo Alto Networks</strong><span>重点厂商</span></div></div><div class="bar-list-v2"><div class="bar-row-v2"><span>Palo Alto</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:100%"></i></div><b>3</b></div><div class="bar-row-v2"><span>Ivanti</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:67%"></i></div><b>2</b></div><div class="bar-row-v2"><span>Fortinet</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:67%"></i></div><b>2</b></div><div class="bar-row-v2"><span>Apache</span><div class="bar-track-v2"><i class="bar-fill-v2" style="--bar:67%"></i></div><b>2</b></div></div></article>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+  <div class="toast" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
