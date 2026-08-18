@@ -618,12 +618,15 @@ const torBridgeProgressStatus = computed(() => {
   return undefined
 })
 const torBridgeExitIpLabel = computed(() => {
-  if (torBridgeConfig.value.exit_ip) return torBridgeConfig.value.exit_ip
+  if (torBridgeConfig.value.exit_ip_error) return '检测失败'
   if (torBridgeConfig.value.exit_ip_checking) return '检测中...'
-  if (torBridgeConfig.value.connected && torBridgeConfig.value.exit_ip_error) return '检测失败'
+  if (torBridgeConfig.value.exit_ip && torBridgeConfig.value.exit_ip_fresh !== false) return torBridgeConfig.value.exit_ip
   return '连接成功后显示'
 })
 const torBridgeProgressSummary = computed(() => {
+  if (torBridgeConfig.value.connection_state === 'error' && torBridgeConfig.value.exit_ip_error) {
+    return 'Tor 出网检测失败'
+  }
   const labels = {
     starting: '正在启动 Tor',
     conn_pt: '正在连接网桥',
@@ -862,15 +865,17 @@ function clearTorBridgePoll() {
 }
 
 function shouldPollTorBridge() {
-  return Boolean(
-    torBridgeConfig.value.process_running
-      && (!torBridgeConfig.value.connected || !torBridgeConfig.value.exit_ip || torBridgeConfig.value.exit_ip_checking)
-  )
+  return Boolean(torBridgeConfig.value.process_running)
 }
 
-function scheduleTorBridgePoll(delay = 1500) {
+function scheduleTorBridgePoll(delay = null) {
   clearTorBridgePoll()
   if (!shouldPollTorBridge()) return
+  const nextDelay = delay ?? (
+    torBridgeConfig.value.connected && torBridgeConfig.value.exit_ip && !torBridgeConfig.value.exit_ip_checking
+      ? 30000
+      : 1500
+  )
   torBridgePollTimer = window.setTimeout(async () => {
     if (torBridgePollInFlight) {
       scheduleTorBridgePoll()
@@ -883,7 +888,7 @@ function scheduleTorBridgePoll(delay = 1500) {
       torBridgePollInFlight = false
       scheduleTorBridgePoll()
     }
-  }, delay)
+  }, nextDelay)
 }
 
 async function loadTorBridgeStatus(options = {}) {

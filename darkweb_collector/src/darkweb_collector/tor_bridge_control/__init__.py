@@ -35,6 +35,8 @@ BOOTSTRAP_PATTERN = re.compile(r"Bootstrapped\s+(\d{1,3})%\s+\(([^)]+)\):\s*(.*)
 EXIT_IP_CHECK_HOST = "check.torproject.org"
 EXIT_IP_CHECK_PATH = "/api/ip"
 EXIT_IP_RETRY_SECONDS = 15
+EXIT_IP_RECHECK_SECONDS = 60
+EXIT_IP_STALE_SECONDS = 90
 PACKAGED_PT_CONFIG_PATH = Path(__file__).with_name("pt_config.json")
 DEFAULT_SNOWFLAKE_BRIDGES = [
     (
@@ -91,6 +93,7 @@ _exit_ip_checked_at = ""
 _exit_ip_error = ""
 _exit_ip_checking = False
 _exit_ip_last_attempt = 0.0
+_exit_ip_last_success = 0.0
 _runtime_generation = 0
 _builtin_bridge_lock = Lock()
 _builtin_bridge_cache_key: tuple[str, int, int] | None = None
@@ -841,7 +844,7 @@ def _fetch_exit_ip_via_socks(settings: dict[str, Any]) -> str:
 
 def _reset_exit_ip_state() -> None:
     global _exit_ip, _exit_ip_checked_at, _exit_ip_error, _exit_ip_checking
-    global _exit_ip_last_attempt, _runtime_generation
+    global _exit_ip_last_attempt, _exit_ip_last_success, _runtime_generation
     with _exit_ip_lock:
         _runtime_generation += 1
         _exit_ip = ""
@@ -849,10 +852,11 @@ def _reset_exit_ip_state() -> None:
         _exit_ip_error = ""
         _exit_ip_checking = False
         _exit_ip_last_attempt = 0.0
+        _exit_ip_last_success = 0.0
 
 
 def _exit_ip_probe_worker(settings: dict[str, Any], generation: int) -> None:
-    global _exit_ip, _exit_ip_checked_at, _exit_ip_error, _exit_ip_checking
+    global _exit_ip, _exit_ip_checked_at, _exit_ip_error, _exit_ip_checking, _exit_ip_last_success
     try:
         exit_ip = _fetch_exit_ip_via_socks(settings)
         error = ""
@@ -866,6 +870,7 @@ def _exit_ip_probe_worker(settings: dict[str, Any], generation: int) -> None:
         _exit_ip_checked_at = _now_iso()
         _exit_ip_error = error
         _exit_ip_checking = False
+        _exit_ip_last_success = time.monotonic() if exit_ip else 0.0
 
 
 def _ensure_exit_ip_probe(settings: dict[str, Any], connected: bool) -> None:
@@ -874,9 +879,11 @@ def _ensure_exit_ip_probe(settings: dict[str, Any], connected: bool) -> None:
         return
     now = time.monotonic()
     with _exit_ip_lock:
-        if _exit_ip or _exit_ip_checking:
+        if _exit_ip_checking:
             return
         if _exit_ip_last_attempt and now - _exit_ip_last_attempt < EXIT_IP_RETRY_SECONDS:
+            return
+        if _exit_ip_last_success and now - _exit_ip_last_success < EXIT_IP_RECHECK_SECONDS:
             return
         _exit_ip_checking = True
         _exit_ip_last_attempt = now
@@ -886,11 +893,18 @@ def _ensure_exit_ip_probe(settings: dict[str, Any], connected: bool) -> None:
 
 def _exit_ip_status() -> dict[str, Any]:
     with _exit_ip_lock:
+        exit_ip_fresh = bool(
+            _exit_ip
+            and not _exit_ip_error
+            and _exit_ip_last_success
+            and time.monotonic() - _exit_ip_last_success <= EXIT_IP_STALE_SECONDS
+        )
         return {
             "exit_ip": _exit_ip,
             "exit_ip_checked_at": _exit_ip_checked_at,
             "exit_ip_error": _exit_ip_error,
             "exit_ip_checking": _exit_ip_checking,
+            "exit_ip_fresh": exit_ip_fresh,
         }
 
 
@@ -1040,14 +1054,19 @@ def get_tor_bridge_status() -> dict[str, Any]:
     runtime_errors = _runtime_errors(settings)
     socks_port_open = _socks_listener_ready(settings) if process_running else False
     bootstrap = _bootstrap_details(settings, process_running)
-    connected = bool(process_running and socks_port_open and bootstrap["bootstrap_percent"] == 100)
-    _ensure_exit_ip_probe(settings, connected)
+    bootstrap_ready = bool(process_running and socks_port_open and bootstrap["bootstrap_percent"] == 100)
+    _ensure_exit_ip_probe(settings, bootstrap_ready)
+    exit_ip_status = _exit_ip_status()
+    connected = bool(bootstrap_ready and exit_ip_status["exit_ip_fresh"])
+    probe_failed = bool(bootstrap_ready and exit_ip_status["exit_ip_checked_at"] and exit_ip_status["exit_ip_error"])
     if not settings.get("enabled"):
         connection_state = "disabled"
     elif runtime_errors:
         connection_state = "error"
     elif connected:
         connection_state = "connected"
+    elif probe_failed:
+        connection_state = "error"
     elif process_running:
         connection_state = "connecting"
     elif _last_error:
@@ -1074,7 +1093,7 @@ def get_tor_bridge_status() -> dict[str, Any]:
         **bootstrap,
         "connection_state": connection_state,
         "connected": connected,
-        **_exit_ip_status(),
+        **exit_ip_status,
         "collector_proxy": f"socks5h://{settings['socks_host']}:{settings['socks_port']}",
         "last_error": _last_error,
     }
