@@ -876,10 +876,25 @@ export function initializePrototype() {
     const requestedSettingsTab = new URLSearchParams(window.location.search).get('tab')
     const settingsTabAliases = { 'code-terms': 'rules' }
     const resolvedSettingsTab = settingsTabAliases[requestedSettingsTab] || requestedSettingsTab
-    const settingsTabs = ['objects', 'access', 'rules', 'notifications']
+    const settingsTabs = ['objects', 'rules', 'notifications']
     if (settingsTabs.includes(resolvedSettingsTab)) {
       $(`.settings-tabs .tab[data-tab="${resolvedSettingsTab}"]`)?.click()
     }
+    const requestedCollectorSitesTab = new URLSearchParams(window.location.search).get('view')
+    if (['sites', 'access'].includes(requestedCollectorSitesTab)) {
+      $(`.collector-site-tabs .tab[data-tab="${requestedCollectorSitesTab}"]`)?.click()
+    }
+    $$('[data-collector-sites-tab]').forEach((button) => {
+      button.addEventListener('click', () => {
+        $(`.collector-site-tabs .tab[data-tab="${button.dataset.collectorSitesTab}"]`)?.click()
+        const moduleFilter = $('[data-filter-target="collector-health-table"][data-filter-key="module"]')
+        if (moduleFilter && button.dataset.settingsModule) {
+          moduleFilter.value = button.dataset.settingsModule
+          moduleFilter.dispatchEvent(new Event('change'))
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' })
+      })
+    })
     const requestedSettingsModule = new URLSearchParams(window.location.search).get('module')
     const settingsModule = ['netdisk', 'library'].includes(requestedSettingsModule) ? requestedSettingsModule : ''
     if (settingsModule) {
@@ -2475,11 +2490,13 @@ export function initializePrototype() {
         tasks.push(['/api/ransomware/sync/status', renderRansomwareSync, 'ransomware'])
         tasks.push(['/api/ransomware/config', renderRansomwareConfig, 'ransomware'])
       }
-      if (root.hasAttribute('data-needs-code-config')) {
+      if (root.hasAttribute('data-needs-platform-access')) {
         tasks.push(['/api/code-monitoring/github-app', renderGithubApp, 'github'])
         tasks.push(['/api/captcha-providers/chaojiying', renderChaojiying, 'chaojiying'])
         tasks.push(['/api/platform-sessions/changan/auto-login', renderChanganAutoLogin, 'changan'])
         tasks.push(['/api/platform-sessions?module=code_monitoring', renderCodeSessions, 'code-sessions'])
+      }
+      if (root.hasAttribute('data-needs-code-config')) {
         tasks.push(['/api/code-monitoring/watchlists', renderCodeWatchlists, 'watchlists'])
         tasks.push(['/api/exposure-watchlists', renderExposureWatchlists, 'watchlists'])
       }

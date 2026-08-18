@@ -2322,6 +2322,8 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 }
 
 /* Site management: open status rail and continuous operations matrix. */
+.collector-site-nav-section { padding: 0; }
+.collector-sites-panel { display: grid; gap: 18px; }
 .page-collector-sites .collector-page {
   gap: 18px;
   padding-top: 16px;
@@ -3070,8 +3072,12 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 
 .settings-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: visible;
+}
+
+.settings-tabs.collector-site-tabs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .settings-tabs .tab {
