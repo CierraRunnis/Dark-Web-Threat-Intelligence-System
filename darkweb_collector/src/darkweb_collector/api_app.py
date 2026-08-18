@@ -69,6 +69,18 @@ from darkweb_collector.api_actions import (
     stop_vulnerability_sync_dispatch,
     update_site_enabled,
 )
+from darkweb_collector.auth_accounts import (
+    ASSIGNABLE_MODULES,
+    create_account as create_stored_auth_account,
+    delete_account as delete_stored_auth_account,
+    get_account as get_stored_auth_account,
+    list_accounts as list_stored_auth_accounts,
+    normalize_modules,
+    update_account as update_stored_auth_account,
+    update_account_profile as update_stored_auth_account_profile,
+    update_account_password,
+    verify_password as verify_stored_password,
+)
 import darkweb_collector.api_data as api_data_module
 from darkweb_collector.document_exposure import (
     add_document_exposure_review,
@@ -166,9 +178,6 @@ AUTH_EXEMPT_PATHS = {
     "/api/system/version",
     "/api/system/update/status",
 }
-DEFAULT_AUTH_PASSWORD = "123456"
-
-
 def _auth_enabled() -> bool:
     return os.environ.get("DARKWEB_API_AUTH_DISABLED") != "1"
 
@@ -199,11 +208,17 @@ def _auth_password() -> str:
     if password:
         return password
 
-    try:
-        password = _auth_password_file_path().read_text(encoding="utf-8").strip()
-    except OSError:
-        password = ""
-    return password or DEFAULT_AUTH_PASSWORD
+    password_path = _auth_password_file_path()
+    with _auth_lock:
+        try:
+            password = password_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            password = ""
+        if not password:
+            password = secrets.token_urlsafe(24)
+            _write_auth_password(password)
+            logger.warning("Generated initial admin password file: %s", password_path)
+    return password
 
 
 def _write_auth_password(password: str) -> None:
@@ -213,6 +228,10 @@ def _write_auth_password(password: str) -> None:
     password_path = _auth_password_file_path()
     password_path.parent.mkdir(parents=True, exist_ok=True)
     password_path.write_text(password, encoding="utf-8")
+    try:
+        os.chmod(password_path, 0o600)
+    except OSError:
+        pass
 
 
 def _auth_session_ttl_seconds() -> int:
@@ -222,11 +241,30 @@ def _auth_session_ttl_seconds() -> int:
         return 43200
 
 
-def _auth_user_payload(username: str) -> dict[str, str]:
+def _is_bootstrap_admin(username: str) -> bool:
+    return secrets.compare_digest(username, _auth_username())
+
+
+def _admin_user_payload() -> dict[str, object]:
+    username = _auth_username()
     return {
         "username": username,
-        "display_name": "个人用户" if username == "admin" else username,
+        "display_name": "管理员",
+        "role": "admin",
+        "is_admin": True,
+        "modules": list(ASSIGNABLE_MODULES),
+        "enabled": True,
+        "fixed": True,
     }
+
+
+def _auth_user_payload(username: str) -> dict[str, object] | None:
+    if _is_bootstrap_admin(username):
+        return _admin_user_payload()
+    account = get_stored_auth_account(username)
+    if not account or not bool(account.get("enabled")):
+        return None
+    return account
 
 
 def _extract_bearer_token(authorization: str) -> str:
@@ -249,7 +287,7 @@ def _create_auth_session(username: str) -> tuple[str, float]:
     return token, expires_at
 
 
-def _get_auth_user(token: str) -> dict[str, str] | None:
+def _get_auth_user(token: str) -> dict[str, object] | None:
     if not token:
         return None
     now = time.time()
@@ -269,6 +307,24 @@ def _revoke_auth_session(token: str) -> None:
         return
     with _auth_lock:
         _auth_sessions.pop(token, None)
+
+
+def _revoke_user_sessions(username: str) -> None:
+    with _auth_lock:
+        stale_tokens = [
+            token
+            for token, session in _auth_sessions.items()
+            if str(session.get("username") or "").casefold() == username.casefold()
+        ]
+        for token in stale_tokens:
+            _auth_sessions.pop(token, None)
+
+
+def _require_admin(request: Request) -> dict[str, object]:
+    user = getattr(request.state, "current_user", None)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+    return user
 
 
 def _requires_auth(request: Request) -> bool:
@@ -400,28 +456,56 @@ class AuthPasswordChangeRequest(BaseModel):
     new_password: str = ""
 
 
+class AuthAccountCreateRequest(BaseModel):
+    username: str = ""
+    display_name: str = ""
+    password: str = ""
+    modules: list[str] = Field(default_factory=list)
+
+
+class AuthAccountUpdateRequest(BaseModel):
+    display_name: str = ""
+    modules: list[str] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class AuthAccountProfileUpdateRequest(BaseModel):
+    username: str = ""
+    display_name: str = ""
+    new_password: str = ""
+
+
 @app.post("/api/auth/login")
 def auth_login(payload: AuthLoginRequest) -> dict:
     username = (payload.username or payload.account).strip()
     password = payload.password
-    expected_password = _auth_password()
-    username_matches = secrets.compare_digest(username, _auth_username())
-    password_matches = secrets.compare_digest(password, expected_password)
-    if not username_matches or not password_matches:
+    if _is_bootstrap_admin(username):
+        authenticated = secrets.compare_digest(password, _auth_password())
+        canonical_username = _auth_username()
+    else:
+        account = get_stored_auth_account(username, include_password=True)
+        authenticated = bool(
+            account
+            and account.get("enabled")
+            and verify_stored_password(password, str(account.get("password_hash") or ""))
+        )
+        canonical_username = str(account.get("username") or username) if account else username
+
+    if not authenticated:
         raise HTTPException(status_code=401, detail="账号或密码错误")
 
-    token, expires_at = _create_auth_session(username)
+    token, expires_at = _create_auth_session(canonical_username)
     return {
         "access_token": token,
         "token_type": "bearer",
         "expires_at": int(expires_at),
-        "user": _auth_user_payload(username),
+        "user": _auth_user_payload(canonical_username),
     }
 
 
 @app.get("/api/auth/me")
-def auth_me(request: Request) -> dict[str, str]:
-    return getattr(request.state, "current_user", _auth_user_payload(_auth_username()))
+def auth_me(request: Request) -> dict[str, object]:
+    return getattr(request.state, "current_user", None) or _admin_user_payload()
 
 
 @app.post("/api/auth/logout")
@@ -432,17 +516,138 @@ def auth_logout(request: Request) -> dict[str, bool]:
 
 
 @app.post("/api/auth/change-password")
-def auth_change_password(payload: AuthPasswordChangeRequest) -> dict[str, bool]:
+def auth_change_password(request: Request, payload: AuthPasswordChangeRequest) -> dict[str, bool]:
     current_password = payload.current_password
     new_password = payload.new_password.strip()
     if len(new_password) < 6:
         raise HTTPException(status_code=400, detail="new password must be at least 6 characters")
-    if not secrets.compare_digest(current_password, _auth_password()):
-        raise HTTPException(status_code=400, detail="current password is incorrect")
 
-    _write_auth_password(new_password)
+    user = getattr(request.state, "current_user", None) or _admin_user_payload()
+    username = str(user.get("username") or "")
+    if user.get("role") == "admin":
+        if not secrets.compare_digest(current_password, _auth_password()):
+            raise HTTPException(status_code=400, detail="current password is incorrect")
+        _write_auth_password(new_password)
+        return {"ok": True}
+
+    account = get_stored_auth_account(username, include_password=True)
+    if not account or not verify_stored_password(
+        current_password,
+        str(account.get("password_hash") or ""),
+    ):
+        raise HTTPException(status_code=400, detail="current password is incorrect")
+    if not update_account_password(username, new_password):
+        raise HTTPException(status_code=404, detail="账号不存在")
     return {"ok": True}
 
+
+def _validated_account_modules(modules: list[str]) -> list[str]:
+    try:
+        return normalize_modules(modules)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _validate_new_username(username: str) -> str:
+    normalized = username.strip()
+    if len(normalized) < 3 or len(normalized) > 64 or any(char.isspace() for char in normalized):
+        raise HTTPException(status_code=400, detail="账号需为 3-64 个不含空格的字符")
+    if normalized.casefold() == _auth_username().casefold():
+        raise HTTPException(status_code=409, detail="该账号已存在")
+    return normalized
+
+
+@app.get("/api/auth/accounts")
+def auth_accounts(request: Request) -> dict[str, list[dict[str, object]]]:
+    _require_admin(request)
+    return {"items": [_admin_user_payload(), *list_stored_auth_accounts()]}
+
+
+@app.post("/api/auth/accounts", status_code=201)
+def auth_account_create(request: Request, payload: AuthAccountCreateRequest) -> dict[str, object]:
+    _require_admin(request)
+    username = _validate_new_username(payload.username)
+    password = payload.password.strip()
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少需要 6 位")
+    account = create_stored_auth_account(
+        username=username,
+        display_name=payload.display_name.strip() or username,
+        password=password,
+        modules=_validated_account_modules(payload.modules),
+    )
+    if account is None:
+        raise HTTPException(status_code=409, detail="该账号已存在")
+    return account
+
+
+@app.put("/api/auth/accounts/{username}")
+def auth_account_update(
+    username: str,
+    request: Request,
+    payload: AuthAccountUpdateRequest,
+) -> dict[str, object]:
+    _require_admin(request)
+    if username.casefold() == _auth_username().casefold():
+        raise HTTPException(status_code=409, detail="固定管理员账号不能修改")
+    account = update_stored_auth_account(
+        username,
+        display_name=payload.display_name.strip() or username,
+        modules=_validated_account_modules(payload.modules),
+        enabled=payload.enabled,
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if not payload.enabled:
+        _revoke_user_sessions(username)
+    return account
+
+
+@app.put("/api/auth/accounts/{username}/profile")
+def auth_account_profile_update(
+    username: str,
+    request: Request,
+    payload: AuthAccountProfileUpdateRequest,
+) -> dict[str, object]:
+    _require_admin(request)
+    if username.casefold() == _auth_username().casefold():
+        raise HTTPException(status_code=409, detail="固定管理员账号不能修改")
+
+    current = get_stored_auth_account(username)
+    if current is None:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    new_username = _validate_new_username(payload.username or username)
+    existing = get_stored_auth_account(new_username)
+    if existing and str(existing.get("username") or "").casefold() != username.casefold():
+        raise HTTPException(status_code=409, detail="该账号已存在")
+
+    new_password = payload.new_password.strip()
+    if new_password and len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码至少需要 6 位")
+
+    account = update_stored_auth_account_profile(
+        username,
+        new_username=new_username,
+        display_name=payload.display_name.strip() or str(current.get("display_name") or new_username),
+        new_password=new_password,
+    )
+    if account is None:
+        raise HTTPException(status_code=409, detail="账号信息更新失败，登录账号可能已存在")
+    if new_username.casefold() != username.casefold() or new_password:
+        _revoke_user_sessions(username)
+    return account
+
+
+@app.delete("/api/auth/accounts/{username}")
+def auth_account_delete(username: str, request: Request) -> dict[str, bool]:
+    _require_admin(request)
+    if username.casefold() == _auth_username().casefold():
+        raise HTTPException(status_code=409, detail="固定管理员账号不能删除")
+    if not delete_stored_auth_account(username):
+        raise HTTPException(status_code=404, detail="账号不存在")
+    _revoke_user_sessions(username)
+    return {"ok": True}
 
 @app.get("/api/intelligence")
 def intelligence() -> dict:

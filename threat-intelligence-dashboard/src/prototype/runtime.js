@@ -1,4 +1,5 @@
-import { clearAuthSession } from '@/composables/useAuth'
+import { clearAuthSession, hasModuleAccess, isCurrentUserAdmin } from '@/composables/useAuth'
+import { MODULE_KEYS } from '@/config/permissions'
 import { openPlatformRemoteLogin } from '@/prototype/dataRuntime'
 
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
@@ -422,46 +423,50 @@ export function initializePrototype() {
     const brand = $('.brand', sidebar)
     if (brand) brand.innerHTML = `<span class="brand-mark" aria-hidden="true"><img src="/assets/xuanjian-mark.svg?v=8" alt=""></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span>`
 
-    nav.innerHTML = `
+    const navLink = (path, label, activeClass = '') => (
+      `<a class="nav-link sub${activeClass}" href="${path}">${label}</a>`
+    )
+    const navGroup = (title, iconName, links, extraTitle = '') => links.length ? `
       <div class="nav-group">
-        <div class="nav-group-title">${icon('overview')}<span>威胁概况</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('dashboard.html')}" href="/">总览</a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('intelligence')}<span>威胁情报</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('intelligence.html')}" href="/intelligence">情报检索</a>
-          <a class="nav-link sub${active('ransomware.html')}" href="/ransomware">勒索情报</a>
-          <a class="nav-link sub${active('data-leak.html')}" href="/data-leak">数据泄露情报</a>
-          <a class="nav-link sub${active('vulnerabilities.html')}" href="/vulnerability-alerts">漏洞预警</a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('exposure')}<span>暴露监测</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('monitoring.html', 'netdisk')}" href="/document-exposure/netdisk">网盘监测</a>
-          <a class="nav-link sub${active('monitoring.html', 'library')}" href="/document-exposure/document-library">文库监测</a>
-          <a class="nav-link sub${active('monitoring.html', 'code')}" href="/document-exposure/code-monitoring">代码监测</a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('collect')}<span class="nav-module-alert" data-task-nav-alert aria-label="存在失败任务" hidden></span><span>采集运营</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('collector-sites.html')}" href="/collector-control/sites">站点管理</a>
-          <a class="nav-link sub${active('collector-sync.html')}" href="/collector-control/sync">同步中心</a>
-          <a class="nav-link sub${active('collector-runtime.html')}" href="/collector-control/runtime">运行环境</a>
-          <a class="nav-link sub${active('collector-failures.html')}" href="/collector-control/failures"><span>任务列表</span><span class="nav-alert-count num" data-task-nav-count hidden>0</span></a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('settings')}<span>配置中心</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('settings.html')}" href="/settings">监测配置</a>
-          <a class="nav-link sub${active('data-migration.html')}" href="/settings/data-migration">数据迁移</a>
-        </div>
-      </div>`
+        <div class="nav-group-title">${icon(iconName)}${extraTitle}<span>${title}</span></div>
+        <div class="nav-group-items">${links.join('')}</div>
+      </div>` : ''
+    const currentPath = window.location.pathname
+    const activePath = (path) => currentPath === path || currentPath.startsWith(`${path}/`) ? ' active' : ''
+    const threatLinks = [
+      hasModuleAccess(MODULE_KEYS.INTELLIGENCE_SEARCH) && navLink('/intelligence', '情报检索', active('intelligence.html')),
+      hasModuleAccess(MODULE_KEYS.RANSOMWARE) && navLink('/ransomware', '勒索情报', active('ransomware.html')),
+      hasModuleAccess(MODULE_KEYS.DATA_LEAK) && navLink('/data-leak', '数据泄露情报', active('data-leak.html')),
+      hasModuleAccess(MODULE_KEYS.VULNERABILITY_ALERTS) && navLink('/vulnerability-alerts', '漏洞预警', active('vulnerabilities.html')),
+    ].filter(Boolean)
+    const exposureLinks = hasModuleAccess(MODULE_KEYS.FILE_MONITORING) ? [
+      navLink('/document-exposure/netdisk', '网盘监测', active('monitoring.html', 'netdisk')),
+      navLink('/document-exposure/document-library', '文库监测', active('monitoring.html', 'library')),
+      navLink('/document-exposure/code-monitoring', '代码监测', active('monitoring.html', 'code')),
+    ] : []
+    const collectorLinks = hasModuleAccess(MODULE_KEYS.COLLECTOR_CONTROL) ? [
+      navLink('/collector-control/sites', '站点管理', active('collector-sites.html')),
+      navLink('/collector-control/sync', '同步中心', active('collector-sync.html')),
+      navLink('/collector-control/runtime', '运行环境', active('collector-runtime.html')),
+      `<a class="nav-link sub${active('collector-failures.html')}" href="/collector-control/failures"><span>任务列表</span><span class="nav-alert-count num" data-task-nav-count hidden>0</span></a>`,
+    ] : []
+    const systemLinks = [
+      hasModuleAccess(MODULE_KEYS.FILE_MONITORING) && navLink('/settings', '监测配置', active('settings.html')),
+      isCurrentUserAdmin() && navLink('/settings/data-migration', '数据迁移', active('data-migration.html')),
+      isCurrentUserAdmin() && navLink('/account-management', '账号管理', activePath('/account-management')),
+    ].filter(Boolean)
+    nav.innerHTML = [
+      navGroup('威胁概况', 'overview', [navLink('/', '总览', active('dashboard.html'))]),
+      navGroup('威胁情报', 'intelligence', threatLinks),
+      navGroup('暴露监测', 'exposure', exposureLinks),
+      navGroup(
+        '采集运营',
+        'collect',
+        collectorLinks,
+        '<span class="nav-module-alert" data-task-nav-alert aria-label="存在失败任务" hidden></span>',
+      ),
+      navGroup('配置中心', 'settings', systemLinks),
+    ].join('')
 
     const footer = $('.sidebar-footer', sidebar)
     if (footer) footer.innerHTML = '<div class="sidebar-status"><i></i><span>监测服务运行中</span></div>'
@@ -575,6 +580,7 @@ export function initializePrototype() {
         avatar.replaceWith(button)
       }
       button.type = 'button'
+      button.textContent = accountName()
       button.setAttribute('aria-label', '个人账户')
       button.setAttribute('aria-haspopup', 'menu')
       button.setAttribute('aria-expanded', 'false')
