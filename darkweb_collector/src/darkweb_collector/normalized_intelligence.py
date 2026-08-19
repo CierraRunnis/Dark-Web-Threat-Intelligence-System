@@ -513,7 +513,7 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-07-29-mirror-artifact-v5"
+NORMALIZATION_VERSION = "2026-08-19-legacy-output-dir-v6"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -1459,7 +1459,8 @@ def _site_output_dir(site_name: str) -> Path | None:
     try:
         return get_site_config(site_name).output_dir
     except Exception:
-        return None
+        legacy_name = safe_stem(site_name, fallback="")
+        return (output_root() / legacy_name).resolve() if legacy_name else None
 
 
 def _public_output_url(path: Path) -> str:
