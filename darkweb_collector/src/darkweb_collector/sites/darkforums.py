@@ -162,15 +162,19 @@ def normalize_darkforums_timestamp(value: str | None, *, collected_at_utc: str |
         hour = int(match.group("hour")) % 12
         if match.group("ampm").upper() == "PM":
             hour += 12
-        dt = datetime(
-            year,
-            int(match.group("month")),
-            int(match.group("day")),
-            hour,
-            int(match.group("minute")),
-            tzinfo=timezone.utc,
-        )
-        return dt.date().isoformat()
+        try:
+            dt = datetime(
+                year,
+                int(match.group("month")),
+                int(match.group("day")),
+                hour,
+                int(match.group("minute")),
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            pass
+        else:
+            return dt.date().isoformat()
 
     match = TEXTUAL_TIMESTAMP_RE.search(raw)
     if match:
