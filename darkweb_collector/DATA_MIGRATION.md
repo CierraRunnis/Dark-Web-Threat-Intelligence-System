@@ -62,6 +62,8 @@ Windows 图形工具可以直接选择 `\\wsl.localhost\<发行版>\...\collecto
 5. 将镜像目录写入同一个 ZIP64 容器，并逐条核对数据库路径引用确实存在于包内。代码/文库镜像遇到 Windows 保留设备名、非法字符、末尾点或空格、Unicode 等价名、超长组件及大小写冲突时，会迁入稳定哈希命名的兼容目录并同步数据库引用；没有显式路径字段的暗网核心镜像遇到这些情况时会拒绝打包。
 6. 记录每张表的行数、空值计数、XOR256 和 SUM256 摘要，并为每个载荷生成 SHA-256。
 
+SQLite 索引的列顺序、唯一性、部分索引条件以及每列 `ASC` / `DESC` 方向会写入结构清单，并在 PostgreSQL 中按相同方向创建。表达式索引和非 `BINARY` 自定义排序规则仍会安全阻断，避免静默改变查询语义。
+
 平台会话、Cookie、令牌、凭据目录不会打包；`platform_sessions` 中的会话路径、会话元数据和错误文本会被清空。迁移后需要重新登录这些外部平台。
 
 ## 3. 在项目中导入
@@ -106,6 +108,7 @@ Linux PostgreSQL 目标配置默认位于 `$HOME/.local/share/darkweb-threat-int
 - `DARKWEB_MIGRATION_MAX_UNCOMPRESSED_BYTES`：解压后总量上限，默认 100 GiB。
 - `DARKWEB_MIGRATION_MAX_ENTRIES`：迁移包条目上限，默认 250,000。
 - `DARKWEB_MIGRATION_MAX_ROW_BYTES`：单条数据库记录的 JSONL 上限，默认 64 MiB。
+- Windows 最终镜像路径按传统运行时兼容边界限制为 259 个 UTF-16 单元；目录过深会在释放文件前中止并清理批次，请缩短 `DARKWEB_MIGRATION_ROOT` 或用户数据目录。
 - 当前是完整替换迁移，不做两个数据库之间的数据合并或增量同步。
 - 旧版工具生成且不含 `portable_path_fields` 元数据的迁移包仍可校验和导入，但不会自动重写既有绝对路径；涉及代码监测或文库监测镜像时应使用新版工具重新生成迁移包。
 - SHA-256 用于发现损坏和篡改，不代表发布者身份认证；只导入来源可信的迁移包。
@@ -117,3 +120,5 @@ Linux PostgreSQL 目标配置默认位于 `$HOME/.local/share/darkweb-threat-int
 2026-08-18 追加验证 Windows 通过 `\\wsl.localhost\Ubuntu\...` 对 WSL SQLite 执行本地暂存和只读快照；使用包含 5 个 WSL 绝对镜像路径字段的小型迁移包完成导出、包内路径核对、真实 PostgreSQL 导入、目标根目录重写和逐表摘要复核，缺失镜像文件会在导出阶段被拒绝。验证创建的临时 PostgreSQL Schema 和镜像释放目录已清理。
 
 2026-08-19 使用 WSL ext4 中两个仅大小写不同且内容不同的 `code_monitoring` HTML 镜像完成回归：迁移包为两个文件生成不同的稳定归档名，数据库路径同步更新；在 Windows 释放并导入 PostgreSQL 后两份内容均保留、路径均位于新镜像根目录，摘要复核通过。随后追加 Windows 文件名兼容回归，覆盖保留设备名、冒号、末尾点或空格、Unicode NFC 等价冲突及超长组件；可显式重写的代码/文库路径全部转为安全归档名，暗网核心不兼容路径按安全边界拒绝打包。
+
+2026-08-19 使用用户提供的真实 SQLite 与 `output.zip` 完成最终回归：源库 `quick_check=ok`、外键错误为 0，共 38 张原始表和 222,642 行；快照升级后生成 39 张表，两个 `ai_aggregation_runs` 降序索引在 PostgreSQL 中保留为 `DESC`。ZIP 的 29,556 个文件和 2,830,679,096 字节通过 CRC，排除 9 个会话或敏感文件后，29,547 个镜像、2,830,630,704 字节进入迁移包；两组 Windows 路径冲突涉及的 4 个文件完成安全重命名。PostgreSQL 逐表摘要、29,547 个释放文件的全量 SHA-256、各 30 个 JSON/HTML/PNG 样本、DragonForce/Lynx 列表详情镜像及重命名代码详情全部通过。深目录测试会在释放文件前明确拒绝并清理，短的默认运行目录完成导入。

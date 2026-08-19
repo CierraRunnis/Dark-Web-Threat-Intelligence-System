@@ -64,6 +64,7 @@ WINDOWS_RESERVED_COMPONENT_NAMES = {
     "lpt³",
 }
 WINDOWS_MAX_COMPONENT_UTF16_UNITS = 255
+WINDOWS_MAX_RUNTIME_PATH_UTF16_UNITS = 259
 ProgressCallback = Callable[[str, int, str], None]
 
 
@@ -309,14 +310,16 @@ def sqlite_schema_spec(connection: sqlite3.Connection) -> dict[str, Any]:
             if origin == "pk":
                 continue
             index_columns = []
+            index_orders = []
             for index_row in _pragma(connection, "index_xinfo", index_name):
                 if len(index_row) > 5 and not bool(index_row[5]):
                     continue
                 if int(index_row[1]) < 0 or index_row[2] is None:
                     raise MigrationBundleError(f"不支持表达式索引：{table_name}.{index_name}")
-                if (len(index_row) > 3 and bool(index_row[3])) or str(index_row[4] or "BINARY").upper() != "BINARY":
-                    raise MigrationBundleError(f"不支持降序或自定义排序索引：{table_name}.{index_name}")
+                if str(index_row[4] or "BINARY").upper() != "BINARY":
+                    raise MigrationBundleError(f"不支持自定义排序索引：{table_name}.{index_name}")
                 index_columns.append(str(index_row[2]))
+                index_orders.append("DESC" if len(index_row) > 3 and bool(index_row[3]) else "ASC")
             sql_row = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (index_name,)
             ).fetchone()
@@ -331,6 +334,7 @@ def sqlite_schema_spec(connection: sqlite3.Connection) -> dict[str, Any]:
                 {
                     "name": index_name,
                     "columns": index_columns,
+                    "orders": index_orders,
                     "unique": unique,
                     "origin": origin,
                     "where": where,
@@ -577,10 +581,14 @@ def _windows_component_portable(component: str) -> bool:
         return False
     if any(ord(character) < 32 or character in WINDOWS_INVALID_COMPONENT_CHARACTERS for character in component):
         return False
-    if len(component.encode("utf-16-le")) // 2 > WINDOWS_MAX_COMPONENT_UTF16_UNITS:
+    if _windows_utf16_units(component) > WINDOWS_MAX_COMPONENT_UTF16_UNITS:
         return False
     basename = component.split(".", 1)[0].rstrip(" ").casefold()
     return basename not in WINDOWS_RESERVED_COMPONENT_NAMES
+
+
+def _windows_utf16_units(value: str) -> int:
+    return len(str(value).encode("utf-16-le")) // 2
 
 
 def _windows_path_portable(name: str) -> bool:
@@ -699,14 +707,34 @@ def _portable_artifact_row(
 
 def _native_path(path: Path) -> str:
     rendered = str(path)
-    if os.name == "nt" and rendered.startswith("\\\\?\\"):
-        return rendered
-    rendered = str(path.resolve())
     if os.name != "nt":
+        return str(path.resolve())
+    if rendered.startswith("\\\\?\\"):
         return rendered
+    rendered = os.path.abspath(rendered)
     if rendered.startswith("\\\\"):
         return "\\\\?\\UNC\\" + rendered[2:]
     return "\\\\?\\" + rendered
+
+
+def _remove_tree(path: Path) -> None:
+    shutil.rmtree(_native_path(path) if os.name == "nt" else path, ignore_errors=True)
+
+
+def _validate_windows_artifact_targets(artifact_root: Path, artifact_names: set[str]) -> None:
+    if os.name != "nt":
+        return
+    root = os.path.abspath(str(artifact_root))
+    longest = _windows_utf16_units(root)
+    for archive_name in artifact_names:
+        relative = PurePosixPath(archive_name).relative_to("artifacts")
+        target = os.path.join(root, *relative.parts)
+        longest = max(longest, _windows_utf16_units(target))
+    if longest > WINDOWS_MAX_RUNTIME_PATH_UTF16_UNITS:
+        raise MigrationBundleError(
+            "Windows 迁移目录过深，最长镜像路径为 "
+            f"{longest} 个 UTF-16 单元；请缩短 DARKWEB_MIGRATION_ROOT 或用户数据目录后重试"
+        )
 
 
 def export_bundle(
@@ -877,7 +905,7 @@ def export_bundle(
         finally:
             connection.close()
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        _remove_tree(temp_dir)
 
     _progress(progress, "complete", 100, "迁移包创建完成")
     return {
@@ -1337,11 +1365,25 @@ def _create_schema(connection, schema_name: str, spec: dict[str, Any], fingerpri
                     raise MigrationBundleError("索引名称冲突")
                 used_indexes.add(name)
                 where = _validate_partial_where(str(index.get("where") or ""), columns)
+                index_columns = list(index.get("columns") or [])
+                index_orders = list(index.get("orders") or [])
+                if index_orders and len(index_orders) != len(index_columns):
+                    raise MigrationBundleError(f"索引排序字段数量不一致：{table['name']}.{index['name']}")
+                column_definitions = []
+                for position, column in enumerate(index_columns):
+                    if column not in columns:
+                        raise MigrationBundleError(f"索引引用未知字段：{table['name']}.{column}")
+                    direction = str(index_orders[position] if index_orders else "ASC").upper()
+                    if direction not in {"ASC", "DESC"}:
+                        raise MigrationBundleError(f"索引排序方向无效：{table['name']}.{index['name']}")
+                    column_definitions.append(
+                        sql.SQL("{} {}").format(sql.Identifier(column), sql.SQL(direction))
+                    )
                 statement = sql.SQL("CREATE {}INDEX {} ON {} ({})").format(
                     sql.SQL("UNIQUE " if index.get("unique") else ""),
                     sql.Identifier(name),
                     sql.Identifier(table["name"]),
-                    sql.SQL(", ").join(sql.Identifier(column) for column in index["columns"]),
+                    sql.SQL(", ").join(column_definitions),
                 )
                 if where:
                     statement += sql.SQL(" WHERE ") + sql.SQL(where)
@@ -1463,15 +1505,15 @@ def _materialize_portable_artifact_row(
     ]
     if not indexes:
         return result
-    resolved_root = artifact_root.resolve(strict=True)
+    resolved_root = Path(os.path.abspath(str(artifact_root)))
     for column, index in indexes:
         archive_name = _portable_artifact_archive_name(result[index], table, column)
         if archive_name not in artifact_names:
             raise MigrationBundleError(f"数据库镜像路径未包含在迁移包中：{table}.{column}")
         relative = PurePosixPath(archive_name).relative_to("artifacts")
-        target = artifact_root.joinpath(*relative.parts).resolve(strict=True)
-        if resolved_root not in target.parents:
-            raise MigrationBundleError(f"数据库镜像路径越界：{table}.{column}")
+        target = resolved_root.joinpath(*relative.parts)
+        if resolved_root not in target.parents or not os.path.isfile(_native_path(target)):
+            raise MigrationBundleError(f"数据库镜像路径不存在或越界：{table}.{column}")
         result[index] = str(target)
     return result
 
@@ -1497,13 +1539,14 @@ def import_bundle(
     schema_created = False
     try:
         with zipfile.ZipFile(bundle_path, "r", allowZip64=True) as archive:
-            _extract_artifacts(archive, release_root, progress)
             artifact_root = release_root / "artifacts"
             artifact_names = {
                 info.filename
                 for info in archive.infolist()
                 if info.filename.startswith("artifacts/") and not info.is_dir()
             }
+            _validate_windows_artifact_targets(artifact_root, artifact_names)
+            _extract_artifacts(archive, release_root, progress)
             portable_paths_enabled = "portable_path_fields" in manifest.get("artifacts", {})
             try:
                 import psycopg2  # type: ignore
@@ -1635,7 +1678,7 @@ def import_bundle(
                         cursor.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema_name)))
             except Exception:
                 pass
-        shutil.rmtree(release_root, ignore_errors=True)
+        _remove_tree(release_root)
         raise
     finally:
         if connection is not None:
