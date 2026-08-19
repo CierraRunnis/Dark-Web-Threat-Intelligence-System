@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 from typing import Any, Callable, Iterator, Sequence
+import unicodedata
 from urllib.parse import quote
 import uuid
 import zipfile
@@ -42,7 +43,27 @@ PORTABLE_ARTIFACT_PATH_COLUMNS = {
     "document_hit_snapshots": {"html_path", "screenshot_path"},
     "code_hit_snapshots": {"html_path", "screenshot_path", "raw_artifact_path"},
 }
-PORTABLE_CASE_COLLISION_ROOTS = {"code_monitoring", "document_exposure"}
+PORTABLE_ARTIFACT_RENAME_ROOTS = {"code_monitoring", "document_exposure"}
+PORTABLE_ARTIFACT_RENAME_DIRECTORY = "_dwti_portable"
+WINDOWS_INVALID_COMPONENT_CHARACTERS = frozenset('<>:"/\\|?*')
+WINDOWS_RESERVED_COMPONENT_NAMES = {
+    "aux",
+    "clock$",
+    "con",
+    "conin$",
+    "conout$",
+    "nul",
+    "prn",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+    "com¹",
+    "com²",
+    "com³",
+    "lpt¹",
+    "lpt²",
+    "lpt³",
+}
+WINDOWS_MAX_COMPONENT_UTF16_UNITS = 255
 ProgressCallback = Callable[[str, int, str], None]
 
 
@@ -432,57 +453,191 @@ def _write_zip_bytes(archive: zipfile.ZipFile, name: str, payload: bytes) -> str
     return hashlib.sha256(payload).hexdigest()
 
 
-def _is_reparse_point(path: Path) -> bool:
+def _is_wsl_unc_path(path: Path) -> bool:
+    if os.name != "nt":
+        return False
+    rendered = str(path).lower()
+    return rendered.startswith("\\\\wsl.localhost\\") or rendered.startswith("\\\\wsl$\\")
+
+
+def _decode_wsl_unc_component(component: str) -> str:
+    decoded: list[str] = []
+    for character in component:
+        codepoint = ord(character)
+        candidate = chr(codepoint - 0xF000) if 0xF000 <= codepoint <= 0xF0FF else ""
+        if candidate and (ord(candidate) < 32 or candidate in WINDOWS_INVALID_COMPONENT_CHARACTERS):
+            decoded.append(candidate)
+        else:
+            decoded.append(character)
+    return "".join(decoded)
+
+
+def _artifact_entries(root: Path) -> Iterator[tuple[Path, PurePosixPath, bool]]:
+    decode_wsl_names = _is_wsl_unc_path(root)
+    pending: list[tuple[Path, PurePosixPath]] = [(root, PurePosixPath())]
+    while pending:
+        directory, relative_root = pending.pop()
+        try:
+            with os.scandir(_native_path(directory)) as scanner:
+                entries = sorted(scanner, key=lambda entry: entry.name)
+        except OSError as exc:
+            raise MigrationBundleError(f"无法读取镜像目录：{directory}: {exc}") from exc
+        for entry in entries:
+            component = _decode_wsl_unc_component(entry.name) if decode_wsl_names else entry.name
+            relative = relative_root / component
+            source = Path(entry.path)
+            try:
+                attributes = int(getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0))
+                unsafe_link = entry.is_symlink() or bool(attributes & 0x400)
+                is_directory = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError:
+                yield source, relative, True
+                continue
+            if unsafe_link:
+                yield source, relative, True
+            elif is_directory:
+                pending.append((source, relative))
+            elif is_file:
+                yield source, relative, False
+
+
+def _open_artifact_source(path: Path):
+    if os.name != "nt" or not _is_windows_unc_path(path):
+        return path.open("rb")
     try:
-        return bool(getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400)
+        return path.open("rb")
     except OSError:
-        return True
+        pass
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    handle = create_file(
+        _native_path(path),
+        0x80000000,
+        0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x00100000 | 0x08000000,
+        None,
+    )
+    if handle == wintypes.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        raise OSError(error, ctypes.FormatError(error), str(path))
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = msvcrt.open_osfhandle(int(handle), flags)
+    except Exception:
+        close_handle(handle)
+        raise
+    return os.fdopen(descriptor, "rb")
 
 
-def _artifact_allowed(relative: Path) -> bool:
-    lowered = {part.lower() for part in relative.parts}
+def _artifact_allowed(relative: PurePosixPath) -> bool:
+    lowered = {part.casefold() for part in relative.parts}
     return not lowered.intersection(SENSITIVE_ARTIFACT_PARTS)
 
 
-def _artifact_relative_name(relative: Path) -> str:
-    name = relative.as_posix()
+def _artifact_relative_name(relative: Path | PurePosixPath | str) -> str:
+    name = relative.as_posix() if isinstance(relative, (Path, PurePosixPath)) else str(relative)
     path = PurePosixPath(name)
     if not path.parts or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise MigrationBundleError(f"镜像目录包含非法相对路径：{name}")
-    if "\\" in name or "\x00" in name:
+    if "\x00" in name:
         raise MigrationBundleError(f"镜像目录包含非法文件名：{name}")
     return path.as_posix()
 
 
-def _collision_safe_artifact_names(relatives: Sequence[Path]) -> tuple[dict[str, str], dict[str, str]]:
+def _windows_component_key(component: str) -> str:
+    return unicodedata.normalize("NFC", str(component)).rstrip(" .").casefold()
+
+
+def _windows_path_key(name: str) -> str:
+    return "/".join(_windows_component_key(part) for part in PurePosixPath(name).parts)
+
+
+def _windows_component_portable(component: str) -> bool:
+    if not component or unicodedata.normalize("NFC", component) != component:
+        return False
+    if component.endswith((" ", ".")):
+        return False
+    if any(ord(character) < 32 or character in WINDOWS_INVALID_COMPONENT_CHARACTERS for character in component):
+        return False
+    if len(component.encode("utf-16-le")) // 2 > WINDOWS_MAX_COMPONENT_UTF16_UNITS:
+        return False
+    basename = component.split(".", 1)[0].rstrip(" ").casefold()
+    return basename not in WINDOWS_RESERVED_COMPONENT_NAMES
+
+
+def _windows_path_portable(name: str) -> bool:
+    return all(_windows_component_portable(part) for part in PurePosixPath(name).parts)
+
+
+def _portable_artifact_extension(name: str) -> str:
+    match = re.search(r"(\.[A-Za-z0-9]{1,16})$", str(name).rstrip(" ."))
+    return match.group(1).lower() if match else ".bin"
+
+
+def _portable_artifact_names(
+    relatives: Sequence[Path | PurePosixPath | str],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     originals = [_artifact_relative_name(relative) for relative in relatives]
     groups: dict[str, list[str]] = defaultdict(list)
     for name in originals:
-        groups[name.casefold()].append(name)
-    assigned = {names[0]: names[0] for names in groups.values() if len(names) == 1}
-    used = {name.casefold() for name in assigned.values()}
+        groups[_windows_path_key(name)].append(name)
+
+    collision_names = {
+        name
+        for names in groups.values()
+        if len(names) > 1
+        for name in names
+    }
+    incompatible_names = {
+        name for name in originals if not _windows_path_portable(name)
+    }
+    rename_names = collision_names | incompatible_names
+    assigned = {name: name for name in originals if name not in rename_names}
+    used = {_windows_path_key(name) for name in assigned.values()}
     renamed: dict[str, str] = {}
-    for names in groups.values():
-        if len(names) == 1:
-            continue
-        roots = {PurePosixPath(name).parts[0].casefold() for name in names}
-        if not roots or not roots.issubset(PORTABLE_CASE_COLLISION_ROOTS):
-            raise MigrationBundleError(f"镜像目录包含无法安全迁移的大小写冲突路径：{names[0]}")
-        for name in sorted(names):
-            path = PurePosixPath(name)
-            suffix = path.suffix
-            stem = path.name[: -len(suffix)] if suffix else path.name
-            digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
-            for length in (10, 16, 24, 64):
-                candidate = str(path.with_name(f"{stem}~{digest[:length]}{suffix}"))
-                if candidate.casefold() not in used:
-                    break
-            else:  # pragma: no cover - SHA-256 suffixes make this unreachable
-                raise MigrationBundleError(f"无法为大小写冲突镜像生成唯一文件名：{name}")
-            assigned[name] = candidate
-            renamed[name] = candidate
-            used.add(candidate.casefold())
-    return assigned, renamed
+    collision_renames: dict[str, str] = {}
+
+    for name in sorted(rename_names):
+        path = PurePosixPath(name)
+        root_key = _windows_component_key(path.parts[0]) if path.parts else ""
+        if root_key not in PORTABLE_ARTIFACT_RENAME_ROOTS:
+            issue = "路径冲突" if name in collision_names else "Windows 不兼容路径"
+            raise MigrationBundleError(f"镜像目录包含无法安全迁移的 {issue}：{name}")
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+        extension = _portable_artifact_extension(path.name)
+        for length in (10, 16, 24, 64):
+            candidate = (
+                f"{root_key}/{PORTABLE_ARTIFACT_RENAME_DIRECTORY}/"
+                f"{digest[:2]}/artifact~{digest[:length]}{extension}"
+            )
+            if _windows_path_portable(candidate) and _windows_path_key(candidate) not in used:
+                break
+        else:  # pragma: no cover - SHA-256 suffixes make this unreachable
+            raise MigrationBundleError(f"无法为 Windows 不兼容镜像生成唯一文件名：{name}")
+        assigned[name] = candidate
+        renamed[name] = candidate
+        if name in collision_names:
+            collision_renames[name] = candidate
+        used.add(_windows_path_key(candidate))
+    return assigned, renamed, collision_renames
 
 
 class _ArtifactPathIndex:
@@ -490,7 +645,7 @@ class _ArtifactPathIndex:
         self._exact = dict(archive_names)
         groups: dict[str, list[str]] = defaultdict(list)
         for original in self._exact:
-            groups[original.casefold()].append(original)
+            groups[_windows_path_key(original)].append(original)
         self._folded = {
             lowered: self._exact[names[0]]
             for lowered, names in groups.items()
@@ -498,12 +653,15 @@ class _ArtifactPathIndex:
         }
 
     def encode(self, table: str, column: str, value: Any) -> str:
-        raw = str(value or "").strip()
+        raw = str(value or "")
         if not raw:
             return ""
-        normalized = raw.replace("\\", "/")
-        if normalized.startswith(PORTABLE_ARTIFACT_PATH_PREFIX):
-            normalized = normalized[len(PORTABLE_ARTIFACT_PATH_PREFIX) :]
+        if raw.startswith(PORTABLE_ARTIFACT_PATH_PREFIX):
+            normalized = raw[len(PORTABLE_ARTIFACT_PATH_PREFIX) :]
+        elif raw.startswith("/"):
+            normalized = raw
+        else:
+            normalized = raw.replace("\\", "/")
         parts = [part for part in normalized.split("/") if part not in {"", "."}]
         if not parts or ".." in parts:
             raise MigrationBundleError(f"镜像路径非法：{table}.{column}: {raw}")
@@ -514,7 +672,7 @@ class _ArtifactPathIndex:
                 return PORTABLE_ARTIFACT_PATH_PREFIX + archive_name
         for offset in range(len(parts)):
             candidate = "/".join(parts[offset:])
-            archive_name = self._folded.get(candidate.casefold())
+            archive_name = self._folded.get(_windows_path_key(candidate))
             if archive_name:
                 return PORTABLE_ARTIFACT_PATH_PREFIX + archive_name
         raise MigrationBundleError(f"数据库镜像路径在所选镜像目录中没有对应文件：{table}.{column}: {raw}")
@@ -540,8 +698,11 @@ def _portable_artifact_row(
 
 
 def _native_path(path: Path) -> str:
+    rendered = str(path)
+    if os.name == "nt" and rendered.startswith("\\\\?\\"):
+        return rendered
     rendered = str(path.resolve())
-    if os.name != "nt" or rendered.startswith("\\\\?\\"):
+    if os.name != "nt":
         return rendered
     if rendered.startswith("\\\\"):
         return "\\\\?\\UNC\\" + rendered[2:]
@@ -574,21 +735,14 @@ def export_bundle(
     portable_path_fields: dict[str, int] = defaultdict(int)
     artifact_count = 0
     artifact_bytes = 0
-    artifact_files = sorted(path for path in artifacts_root.rglob("*") if path.is_file())
-    included_artifacts: list[tuple[Path, Path]] = []
-    for source in artifact_files:
-        relative = source.relative_to(artifacts_root)
-        resolved_source = source.resolve()
-        if (
-            source.is_symlink()
-            or _is_reparse_point(source)
-            or resolved_artifacts_root not in resolved_source.parents
-            or not _artifact_allowed(relative)
-        ):
-            skipped_artifacts.append(relative.as_posix())
+    included_artifacts: list[tuple[Path, PurePosixPath]] = []
+    for source, relative, unsafe_link in _artifact_entries(artifacts_root):
+        if unsafe_link or not _artifact_allowed(relative):
+            skipped_artifacts.append(_artifact_relative_name(relative))
             continue
         included_artifacts.append((source, relative))
-    artifact_archive_names, case_collision_renames = _collision_safe_artifact_names(
+    included_artifacts.sort(key=lambda item: _artifact_relative_name(item[1]))
+    artifact_archive_names, portable_path_renames, case_collision_renames = _portable_artifact_names(
         [relative for _source, relative in included_artifacts]
     )
     artifact_paths = _ArtifactPathIndex(artifact_archive_names)
@@ -664,7 +818,7 @@ def export_bundle(
                     archive_name = "artifacts/" + artifact_archive_names[original_name]
                     digest = hashlib.sha256()
                     size = 0
-                    with source.open("rb") as handle, archive.open(
+                    with _open_artifact_source(source) as handle, archive.open(
                         _zip_info(archive_name), "w", force_zip64=True
                     ) as target:
                         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -707,6 +861,7 @@ def export_bundle(
                         "root": "artifacts/",
                         "skipped_sensitive_count": len(skipped_artifacts),
                         "portable_path_fields": dict(sorted(portable_path_fields.items())),
+                        "portable_path_renames": dict(sorted(portable_path_renames.items())),
                         "case_collision_renames": dict(sorted(case_collision_renames.items())),
                     },
                     "sanitized_fields": sorted(sanitized_fields),
@@ -737,6 +892,7 @@ def export_bundle(
         "sanitized_fields": sorted(sanitized_fields),
         "skipped_sensitive_artifacts": len(skipped_artifacts),
         "portable_artifact_paths": dict(sorted(portable_path_fields.items())),
+        "portable_path_renames": len(portable_path_renames),
         "case_collision_renames": len(case_collision_renames),
     }
 
@@ -824,30 +980,58 @@ def _validate_portable_artifact_references(
     return normalized_observed
 
 
+def _validate_artifact_renames(
+    manifest: dict[str, Any],
+    artifact_names: set[str],
+    field_name: str,
+    label: str,
+) -> dict[str, str]:
+    artifact_manifest = manifest.get("artifacts")
+    raw_renames = artifact_manifest.get(field_name, {}) if isinstance(artifact_manifest, dict) else {}
+    if not isinstance(raw_renames, dict):
+        raise MigrationBundleError(f"迁移包{label}重命名清单格式错误")
+    renames: dict[str, str] = {}
+    used: set[str] = set()
+    for original, assigned in raw_renames.items():
+        original_name = _artifact_relative_name(str(original))
+        assigned_archive_name = _validate_member_name("artifacts/" + str(assigned))
+        root = _windows_component_key(PurePosixPath(original_name).parts[0])
+        if root not in PORTABLE_ARTIFACT_RENAME_ROOTS:
+            raise MigrationBundleError(f"迁移包包含不允许重命名的镜像路径：{original_name}")
+        if not _windows_path_portable(assigned_archive_name):
+            raise MigrationBundleError(f"{label}重命名目标仍与 Windows 不兼容：{assigned_archive_name}")
+        if assigned_archive_name not in artifact_names:
+            raise MigrationBundleError(f"{label}重命名文件不在迁移包中：{assigned_archive_name}")
+        lowered = _windows_path_key(assigned_archive_name)
+        if lowered in used:
+            raise MigrationBundleError(f"{label}重命名目标重复：{assigned_archive_name}")
+        used.add(lowered)
+        renames[original_name] = assigned_archive_name.removeprefix("artifacts/")
+    return dict(sorted(renames.items()))
+
+
+def _validate_portable_path_renames(
+    manifest: dict[str, Any],
+    artifact_names: set[str],
+) -> dict[str, str]:
+    return _validate_artifact_renames(
+        manifest,
+        artifact_names,
+        "portable_path_renames",
+        "Windows 路径兼容",
+    )
+
+
 def _validate_case_collision_renames(
     manifest: dict[str, Any],
     artifact_names: set[str],
 ) -> dict[str, str]:
-    artifact_manifest = manifest.get("artifacts")
-    raw_renames = artifact_manifest.get("case_collision_renames", {}) if isinstance(artifact_manifest, dict) else {}
-    if not isinstance(raw_renames, dict):
-        raise MigrationBundleError("迁移包大小写冲突重命名清单格式错误")
-    renames: dict[str, str] = {}
-    used: set[str] = set()
-    for original, assigned in raw_renames.items():
-        original_name = _validate_member_name("artifacts/" + str(original)).removeprefix("artifacts/")
-        assigned_archive_name = _validate_member_name("artifacts/" + str(assigned))
-        root = PurePosixPath(original_name).parts[0].casefold()
-        if root not in PORTABLE_CASE_COLLISION_ROOTS:
-            raise MigrationBundleError(f"迁移包包含不允许重命名的镜像路径：{original_name}")
-        if assigned_archive_name not in artifact_names:
-            raise MigrationBundleError(f"大小写冲突重命名文件不在迁移包中：{assigned_archive_name}")
-        lowered = assigned_archive_name.casefold()
-        if lowered in used:
-            raise MigrationBundleError(f"大小写冲突重命名目标重复：{assigned_archive_name}")
-        used.add(lowered)
-        renames[original_name] = assigned_archive_name.removeprefix("artifacts/")
-    return dict(sorted(renames.items()))
+    return _validate_artifact_renames(
+        manifest,
+        artifact_names,
+        "case_collision_renames",
+        "大小写冲突",
+    )
 
 
 def _read_limited(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
@@ -914,14 +1098,16 @@ def preflight_bundle(
         if len(infos) > max_entries:
             raise MigrationBundleError("迁移包文件数量超过限制")
         names: dict[str, zipfile.ZipInfo] = {}
-        casefolded: set[str] = set()
+        portable_names: set[str] = set()
         total_size = 0
         for info in infos:
             name = _validate_member_name(info.filename)
-            lowered = name.casefold()
-            if lowered in casefolded:
+            if not _windows_path_portable(name):
+                raise MigrationBundleError(f"迁移包包含 Windows 不兼容路径：{name}")
+            lowered = _windows_path_key(name)
+            if lowered in portable_names:
                 raise MigrationBundleError(f"迁移包包含重复路径：{name}")
-            casefolded.add(lowered)
+            portable_names.add(lowered)
             if info.is_dir():
                 continue
             mode = (info.external_attr >> 16) & 0o170000
@@ -964,7 +1150,11 @@ def preflight_bundle(
             manifest.get("artifacts", {}).get("bytes", -1)
         ):
             raise MigrationBundleError("镜像文件大小与清单不一致")
+        portable_path_renames = _validate_portable_path_renames(manifest, artifact_names)
         case_collision_renames = _validate_case_collision_renames(manifest, artifact_names)
+        for original, assigned in case_collision_renames.items():
+            if portable_path_renames and portable_path_renames.get(original) != assigned:
+                raise MigrationBundleError("迁移包大小写冲突重命名清单与 Windows 兼容清单不一致")
 
         ordered_payloads = sorted(payload_names)
         for index, name in enumerate(ordered_payloads):
@@ -999,6 +1189,7 @@ def preflight_bundle(
         "artifact_bytes": int(manifest["artifacts"]["bytes"]),
         "uncompressed_bytes": total_size,
         "portable_artifact_paths": portable_artifact_paths or {},
+        "portable_path_renames": len(portable_path_renames or case_collision_renames),
         "case_collision_renames": len(case_collision_renames),
         "manifest": manifest,
     }
