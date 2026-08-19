@@ -24,6 +24,7 @@
 - 修复 `winget` 已完成安装但返回非零状态时的误判，以及 Windows PowerShell 将 PostgreSQL `NOTICE` 当成终止错误的问题；安装结果只记录脱敏状态。
 - WSL / Linux 启动脚本支持读取活动 PostgreSQL 版本，停止对已激活版本执行 SQLite 运行库同步。
 - 迁移激活控制器会在重启前清除旧数据库和镜像目录环境覆盖，确保 PostgreSQL 活动版本及新镜像根目录真正生效。
+- 修复规范化情报刷新时论坛标题未纳入聚合分组导致的 PostgreSQL 后台预热失败。
 
 ### 大数据页面加载
 

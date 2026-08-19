@@ -1895,7 +1895,7 @@ def _forum_rows(connection) -> list[dict[str, Any]]:
          AND t.url = d.topic_url
         LEFT JOIN forum_victims fv
           ON fv.forum_detail_id = d.id
-        GROUP BY d.id
+        GROUP BY d.id, t.title
         ORDER BY d.id DESC
         """
     ).fetchall()
