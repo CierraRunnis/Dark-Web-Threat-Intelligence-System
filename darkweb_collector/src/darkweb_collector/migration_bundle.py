@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 from typing import Any, Callable, Iterator, Sequence
+from urllib.parse import quote
 import uuid
 import zipfile
 
@@ -36,6 +37,12 @@ SENSITIVE_ARTIFACT_PARTS = {
     "cookies",
     "secrets",
 }
+PORTABLE_ARTIFACT_PATH_PREFIX = "dwti-artifact://"
+PORTABLE_ARTIFACT_PATH_COLUMNS = {
+    "document_hit_snapshots": {"html_path", "screenshot_path"},
+    "code_hit_snapshots": {"html_path", "screenshot_path", "raw_artifact_path"},
+}
+PORTABLE_CASE_COLLISION_ROOTS = {"code_monitoring", "document_exposure"}
 ProgressCallback = Callable[[str, int, str], None]
 
 
@@ -77,9 +84,18 @@ def _safe_identifier(name: str) -> str:
     return str(name)
 
 
+def _sqlite_readonly_uri(resolved: Path) -> str:
+    rendered = str(resolved)
+    if os.name == "nt" and rendered.startswith("\\\\"):
+        uri_path = rendered.replace("\\", "/").lstrip("/")
+        return f"file:////{quote(uri_path, safe='/:')}?mode=ro"
+    return f"file:{quote(resolved.as_posix(), safe='/:')}?mode=ro"
+
+
 def _open_sqlite_readonly(path: Path) -> sqlite3.Connection:
     resolved = path.expanduser().resolve(strict=True)
-    connection = sqlite3.connect(f"file:{resolved.as_posix()}?mode=ro", uri=True)
+    database_uri = _sqlite_readonly_uri(resolved)
+    connection = sqlite3.connect(database_uri, uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
@@ -88,9 +104,50 @@ def _open_sqlite_readonly(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _snapshot_sqlite(source_path: Path, snapshot_path: Path) -> None:
-    source = _open_sqlite_readonly(source_path)
+def _is_windows_unc_path(path: Path) -> bool:
+    return os.name == "nt" and str(path).startswith("\\\\")
+
+
+def _sqlite_file_signatures(path: Path) -> dict[str, tuple[int, int]]:
+    signatures: dict[str, tuple[int, int]] = {}
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = Path(str(path) + suffix)
+        try:
+            stat = candidate.stat()
+        except FileNotFoundError:
+            continue
+        signatures[suffix] = (int(stat.st_size), int(stat.st_mtime_ns))
+    return signatures
+
+
+def _stage_unc_sqlite(source_path: Path, snapshot_path: Path) -> Path:
+    staged_path = snapshot_path.with_name("source-staged.db")
     try:
+        before = _sqlite_file_signatures(source_path)
+        if "" not in before:
+            raise MigrationBundleError("WSL SQLite 数据库不存在")
+        for suffix in before:
+            shutil.copy2(Path(str(source_path) + suffix), Path(str(staged_path) + suffix))
+        after = _sqlite_file_signatures(source_path)
+        if before != after:
+            raise MigrationBundleError("复制期间 WSL SQLite 数据库仍在变化，请停止服务后重试")
+        return staged_path
+    except Exception:
+        _remove_staged_sqlite(staged_path)
+        raise
+
+
+def _remove_staged_sqlite(path: Path) -> None:
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(str(path) + suffix).unlink(missing_ok=True)
+
+
+def _snapshot_sqlite(source_path: Path, snapshot_path: Path) -> None:
+    resolved_source = source_path.expanduser().resolve(strict=True)
+    staged_source = _stage_unc_sqlite(resolved_source, snapshot_path) if _is_windows_unc_path(resolved_source) else None
+    source = None
+    try:
+        source = _open_sqlite_readonly(staged_source or resolved_source)
         destination = sqlite3.connect(snapshot_path)
         try:
             source.backup(destination, pages=4096, sleep=0.05)
@@ -100,7 +157,10 @@ def _snapshot_sqlite(source_path: Path, snapshot_path: Path) -> None:
         finally:
             destination.close()
     finally:
-        source.close()
+        if source is not None:
+            source.close()
+        if staged_source is not None:
+            _remove_staged_sqlite(staged_source)
 
 
 def _upgrade_snapshot_schema(snapshot_path: Path) -> None:
@@ -384,6 +444,101 @@ def _artifact_allowed(relative: Path) -> bool:
     return not lowered.intersection(SENSITIVE_ARTIFACT_PARTS)
 
 
+def _artifact_relative_name(relative: Path) -> str:
+    name = relative.as_posix()
+    path = PurePosixPath(name)
+    if not path.parts or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise MigrationBundleError(f"镜像目录包含非法相对路径：{name}")
+    if "\\" in name or "\x00" in name:
+        raise MigrationBundleError(f"镜像目录包含非法文件名：{name}")
+    return path.as_posix()
+
+
+def _collision_safe_artifact_names(relatives: Sequence[Path]) -> tuple[dict[str, str], dict[str, str]]:
+    originals = [_artifact_relative_name(relative) for relative in relatives]
+    groups: dict[str, list[str]] = defaultdict(list)
+    for name in originals:
+        groups[name.casefold()].append(name)
+    assigned = {names[0]: names[0] for names in groups.values() if len(names) == 1}
+    used = {name.casefold() for name in assigned.values()}
+    renamed: dict[str, str] = {}
+    for names in groups.values():
+        if len(names) == 1:
+            continue
+        roots = {PurePosixPath(name).parts[0].casefold() for name in names}
+        if not roots or not roots.issubset(PORTABLE_CASE_COLLISION_ROOTS):
+            raise MigrationBundleError(f"镜像目录包含无法安全迁移的大小写冲突路径：{names[0]}")
+        for name in sorted(names):
+            path = PurePosixPath(name)
+            suffix = path.suffix
+            stem = path.name[: -len(suffix)] if suffix else path.name
+            digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+            for length in (10, 16, 24, 64):
+                candidate = str(path.with_name(f"{stem}~{digest[:length]}{suffix}"))
+                if candidate.casefold() not in used:
+                    break
+            else:  # pragma: no cover - SHA-256 suffixes make this unreachable
+                raise MigrationBundleError(f"无法为大小写冲突镜像生成唯一文件名：{name}")
+            assigned[name] = candidate
+            renamed[name] = candidate
+            used.add(candidate.casefold())
+    return assigned, renamed
+
+
+class _ArtifactPathIndex:
+    def __init__(self, archive_names: dict[str, str]) -> None:
+        self._exact = dict(archive_names)
+        groups: dict[str, list[str]] = defaultdict(list)
+        for original in self._exact:
+            groups[original.casefold()].append(original)
+        self._folded = {
+            lowered: self._exact[names[0]]
+            for lowered, names in groups.items()
+            if len(names) == 1
+        }
+
+    def encode(self, table: str, column: str, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        normalized = raw.replace("\\", "/")
+        if normalized.startswith(PORTABLE_ARTIFACT_PATH_PREFIX):
+            normalized = normalized[len(PORTABLE_ARTIFACT_PATH_PREFIX) :]
+        parts = [part for part in normalized.split("/") if part not in {"", "."}]
+        if not parts or ".." in parts:
+            raise MigrationBundleError(f"镜像路径非法：{table}.{column}: {raw}")
+        for offset in range(len(parts)):
+            candidate = "/".join(parts[offset:])
+            archive_name = self._exact.get(candidate)
+            if archive_name:
+                return PORTABLE_ARTIFACT_PATH_PREFIX + archive_name
+        for offset in range(len(parts)):
+            candidate = "/".join(parts[offset:])
+            archive_name = self._folded.get(candidate.casefold())
+            if archive_name:
+                return PORTABLE_ARTIFACT_PATH_PREFIX + archive_name
+        raise MigrationBundleError(f"数据库镜像路径在所选镜像目录中没有对应文件：{table}.{column}: {raw}")
+
+
+def _portable_artifact_row(
+    table: str,
+    columns: Sequence[str],
+    values: Sequence[Any],
+    artifact_paths: _ArtifactPathIndex,
+) -> tuple[list[Any], list[str]]:
+    result = list(values)
+    rewritten: list[str] = []
+    for column in PORTABLE_ARTIFACT_PATH_COLUMNS.get(table, set()):
+        if column not in columns:
+            continue
+        index = columns.index(column)
+        if result[index] in (None, ""):
+            continue
+        result[index] = artifact_paths.encode(table, column, result[index])
+        rewritten.append(f"{table}.{column}")
+    return result, rewritten
+
+
 def _native_path(path: Path) -> str:
     rendered = str(path.resolve())
     if os.name != "nt" or rendered.startswith("\\\\?\\"):
@@ -416,8 +571,27 @@ def export_bundle(
     checksums: dict[str, tuple[str, int]] = {}
     skipped_artifacts: list[str] = []
     sanitized_fields: set[str] = set()
+    portable_path_fields: dict[str, int] = defaultdict(int)
     artifact_count = 0
     artifact_bytes = 0
+    artifact_files = sorted(path for path in artifacts_root.rglob("*") if path.is_file())
+    included_artifacts: list[tuple[Path, Path]] = []
+    for source in artifact_files:
+        relative = source.relative_to(artifacts_root)
+        resolved_source = source.resolve()
+        if (
+            source.is_symlink()
+            or _is_reparse_point(source)
+            or resolved_artifacts_root not in resolved_source.parents
+            or not _artifact_allowed(relative)
+        ):
+            skipped_artifacts.append(relative.as_posix())
+            continue
+        included_artifacts.append((source, relative))
+    artifact_archive_names, case_collision_renames = _collision_safe_artifact_names(
+        [relative for _source, relative in included_artifacts]
+    )
+    artifact_paths = _ArtifactPathIndex(artifact_archive_names)
 
     temp_dir = output_path.parent / f".dwti-export-{uuid.uuid4().hex}"
     temp_dir.mkdir()
@@ -452,6 +626,14 @@ def export_bundle(
                             for row in rows:
                                 values, sanitized = _sanitized_row(table_name, columns, tuple(row))
                                 sanitized_fields.update(sanitized)
+                                values, rewritten_paths = _portable_artifact_row(
+                                    table_name,
+                                    columns,
+                                    values,
+                                    artifact_paths,
+                                )
+                                for field in rewritten_paths:
+                                    portable_path_fields[field] += 1
                                 _update_stats(stats, columns, values)
                                 encoded = (
                                     json.dumps(
@@ -477,19 +659,9 @@ def export_bundle(
                         f"已导出数据库表 {table_index + 1}/{len(spec['tables'])}",
                     )
 
-                artifact_files = sorted(path for path in artifacts_root.rglob("*") if path.is_file())
-                for file_index, source in enumerate(artifact_files):
-                    relative = source.relative_to(artifacts_root)
-                    resolved_source = source.resolve()
-                    if (
-                        source.is_symlink()
-                        or _is_reparse_point(source)
-                        or resolved_artifacts_root not in resolved_source.parents
-                        or not _artifact_allowed(relative)
-                    ):
-                        skipped_artifacts.append(relative.as_posix())
-                        continue
-                    archive_name = "artifacts/" + relative.as_posix()
+                for file_index, (source, relative) in enumerate(included_artifacts):
+                    original_name = _artifact_relative_name(relative)
+                    archive_name = "artifacts/" + artifact_archive_names[original_name]
                     digest = hashlib.sha256()
                     size = 0
                     with source.open("rb") as handle, archive.open(
@@ -502,12 +674,12 @@ def export_bundle(
                     checksums[archive_name] = (digest.hexdigest(), size)
                     artifact_count += 1
                     artifact_bytes += size
-                    if file_index % 100 == 0 or file_index + 1 == len(artifact_files):
+                    if file_index % 100 == 0 or file_index + 1 == len(included_artifacts):
                         _progress(
                             progress,
                             "artifacts",
-                            45 + int(40 * (file_index + 1) / max(1, len(artifact_files))),
-                            f"已打包镜像文件 {file_index + 1}/{len(artifact_files)}",
+                            45 + int(40 * (file_index + 1) / max(1, len(included_artifacts))),
+                            f"已打包镜像文件 {file_index + 1}/{len(included_artifacts)}",
                         )
 
                 checksum_payload = "".join(
@@ -534,6 +706,8 @@ def export_bundle(
                         "bytes": artifact_bytes,
                         "root": "artifacts/",
                         "skipped_sensitive_count": len(skipped_artifacts),
+                        "portable_path_fields": dict(sorted(portable_path_fields.items())),
+                        "case_collision_renames": dict(sorted(case_collision_renames.items())),
                     },
                     "sanitized_fields": sorted(sanitized_fields),
                 }
@@ -562,6 +736,8 @@ def export_bundle(
         "schema_fingerprint": fingerprint,
         "sanitized_fields": sorted(sanitized_fields),
         "skipped_sensitive_artifacts": len(skipped_artifacts),
+        "portable_artifact_paths": dict(sorted(portable_path_fields.items())),
+        "case_collision_renames": len(case_collision_renames),
     }
 
 
@@ -574,6 +750,104 @@ def _validate_member_name(name: str) -> str:
     if re.match(r"^[A-Za-z]:", name):
         raise MigrationBundleError(f"迁移包包含 Windows 绝对路径：{name}")
     return path.as_posix()
+
+
+def _portable_artifact_archive_name(value: Any, table: str, column: str) -> str:
+    raw = str(value or "")
+    if not raw.startswith(PORTABLE_ARTIFACT_PATH_PREFIX):
+        raise MigrationBundleError(f"迁移包包含未归一化的镜像路径：{table}.{column}")
+    relative = raw[len(PORTABLE_ARTIFACT_PATH_PREFIX) :]
+    return _validate_member_name("artifacts/" + relative)
+
+
+def _validate_portable_artifact_references(
+    archive: zipfile.ZipFile,
+    manifest: dict[str, Any],
+    artifact_names: set[str],
+) -> dict[str, int] | None:
+    artifact_manifest = manifest.get("artifacts")
+    if not isinstance(artifact_manifest, dict) or "portable_path_fields" not in artifact_manifest:
+        return None
+    raw_declared = artifact_manifest.get("portable_path_fields")
+    if not isinstance(raw_declared, dict):
+        raise MigrationBundleError("迁移包可移植镜像路径清单格式错误")
+    allowed_fields = {
+        f"{table}.{column}"
+        for table, columns in PORTABLE_ARTIFACT_PATH_COLUMNS.items()
+        for column in columns
+    }
+    declared: dict[str, int] = {}
+    for key, value in raw_declared.items():
+        if key not in allowed_fields or not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise MigrationBundleError(f"迁移包可移植镜像路径清单无效：{key}")
+        if value:
+            declared[str(key)] = int(value)
+
+    observed: dict[str, int] = defaultdict(int)
+    max_row_bytes = int(os.environ.get("DARKWEB_MIGRATION_MAX_ROW_BYTES", DEFAULT_MAX_ROW_BYTES))
+    for table, path_columns in PORTABLE_ARTIFACT_PATH_COLUMNS.items():
+        table_manifest = manifest.get("tables", {}).get(table)
+        if not isinstance(table_manifest, dict):
+            continue
+        columns = list(table_manifest.get("columns") or [])
+        indexes = [(column, columns.index(column)) for column in path_columns if column in columns]
+        if not indexes:
+            continue
+        with archive.open(str(table_manifest.get("path") or "")) as raw:
+            line_number = 0
+            while True:
+                encoded_line = raw.readline(max_row_bytes + 1)
+                if not encoded_line:
+                    break
+                line_number += 1
+                if len(encoded_line) > max_row_bytes:
+                    raise MigrationBundleError(f"表 {table} 第 {line_number} 行超过大小限制")
+                try:
+                    values = json.loads(encoded_line.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise MigrationBundleError(f"表 {table} 第 {line_number} 行不是有效 JSON") from exc
+                if not isinstance(values, list) or len(values) != len(columns):
+                    raise MigrationBundleError(f"表 {table} 第 {line_number} 行数据列数错误")
+                for column, index in indexes:
+                    value = values[index]
+                    if value in (None, ""):
+                        continue
+                    archive_name = _portable_artifact_archive_name(value, table, column)
+                    if archive_name not in artifact_names:
+                        raise MigrationBundleError(
+                            f"数据库镜像路径未包含在迁移包中：{table}.{column}: {archive_name}"
+                        )
+                    observed[f"{table}.{column}"] += 1
+    normalized_observed = dict(sorted(observed.items()))
+    if normalized_observed != dict(sorted(declared.items())):
+        raise MigrationBundleError("迁移包可移植镜像路径数量与清单不一致")
+    return normalized_observed
+
+
+def _validate_case_collision_renames(
+    manifest: dict[str, Any],
+    artifact_names: set[str],
+) -> dict[str, str]:
+    artifact_manifest = manifest.get("artifacts")
+    raw_renames = artifact_manifest.get("case_collision_renames", {}) if isinstance(artifact_manifest, dict) else {}
+    if not isinstance(raw_renames, dict):
+        raise MigrationBundleError("迁移包大小写冲突重命名清单格式错误")
+    renames: dict[str, str] = {}
+    used: set[str] = set()
+    for original, assigned in raw_renames.items():
+        original_name = _validate_member_name("artifacts/" + str(original)).removeprefix("artifacts/")
+        assigned_archive_name = _validate_member_name("artifacts/" + str(assigned))
+        root = PurePosixPath(original_name).parts[0].casefold()
+        if root not in PORTABLE_CASE_COLLISION_ROOTS:
+            raise MigrationBundleError(f"迁移包包含不允许重命名的镜像路径：{original_name}")
+        if assigned_archive_name not in artifact_names:
+            raise MigrationBundleError(f"大小写冲突重命名文件不在迁移包中：{assigned_archive_name}")
+        lowered = assigned_archive_name.casefold()
+        if lowered in used:
+            raise MigrationBundleError(f"大小写冲突重命名目标重复：{assigned_archive_name}")
+        used.add(lowered)
+        renames[original_name] = assigned_archive_name.removeprefix("artifacts/")
+    return dict(sorted(renames.items()))
 
 
 def _read_limited(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
@@ -690,6 +964,7 @@ def preflight_bundle(
             manifest.get("artifacts", {}).get("bytes", -1)
         ):
             raise MigrationBundleError("镜像文件大小与清单不一致")
+        case_collision_renames = _validate_case_collision_renames(manifest, artifact_names)
 
         ordered_payloads = sorted(payload_names)
         for index, name in enumerate(ordered_payloads):
@@ -706,6 +981,13 @@ def preflight_bundle(
                     5 + int(25 * (index + 1) / max(1, len(ordered_payloads))),
                     f"正在校验迁移包 {index + 1}/{len(ordered_payloads)}",
                 )
+        portable_artifact_paths = _validate_portable_artifact_references(
+            archive,
+            manifest,
+            artifact_names,
+        )
+        if portable_artifact_paths is not None:
+            _progress(progress, "preflight", 32, "数据库镜像路径已与迁移包文件逐项核对")
 
     return {
         "bundle_id": manifest["bundle_id"],
@@ -716,6 +998,8 @@ def preflight_bundle(
         "artifacts": len(artifact_names),
         "artifact_bytes": int(manifest["artifacts"]["bytes"]),
         "uncompressed_bytes": total_size,
+        "portable_artifact_paths": portable_artifact_paths or {},
+        "case_collision_renames": len(case_collision_renames),
         "manifest": manifest,
     }
 
@@ -973,6 +1257,34 @@ def _extract_artifacts(archive: zipfile.ZipFile, release_root: Path, progress: P
             )
 
 
+def _materialize_portable_artifact_row(
+    table: str,
+    columns: Sequence[str],
+    values: Sequence[Any],
+    artifact_root: Path,
+    artifact_names: set[str],
+) -> list[Any]:
+    result = list(values)
+    indexes = [
+        (column, columns.index(column))
+        for column in PORTABLE_ARTIFACT_PATH_COLUMNS.get(table, set())
+        if column in columns and result[columns.index(column)] not in (None, "")
+    ]
+    if not indexes:
+        return result
+    resolved_root = artifact_root.resolve(strict=True)
+    for column, index in indexes:
+        archive_name = _portable_artifact_archive_name(result[index], table, column)
+        if archive_name not in artifact_names:
+            raise MigrationBundleError(f"数据库镜像路径未包含在迁移包中：{table}.{column}")
+        relative = PurePosixPath(archive_name).relative_to("artifacts")
+        target = artifact_root.joinpath(*relative.parts).resolve(strict=True)
+        if resolved_root not in target.parents:
+            raise MigrationBundleError(f"数据库镜像路径越界：{table}.{column}")
+        result[index] = str(target)
+    return result
+
+
 def import_bundle(
     bundle_path: Path,
     target_database_url: str,
@@ -995,6 +1307,13 @@ def import_bundle(
     try:
         with zipfile.ZipFile(bundle_path, "r", allowZip64=True) as archive:
             _extract_artifacts(archive, release_root, progress)
+            artifact_root = release_root / "artifacts"
+            artifact_names = {
+                info.filename
+                for info in archive.infolist()
+                if info.filename.startswith("artifacts/") and not info.is_dir()
+            }
+            portable_paths_enabled = "portable_path_fields" in manifest.get("artifacts", {})
             try:
                 import psycopg2  # type: ignore
                 from psycopg2 import sql  # type: ignore
@@ -1007,6 +1326,7 @@ def import_bundle(
             with connection.cursor() as cursor:
                 cursor.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema_name)))
             ordered = _ordered_tables(manifest["schema"])
+            import_expected_stats: dict[str, dict[str, Any]] = {}
             for index, table in enumerate(ordered):
                 table_name = table["name"]
                 table_manifest = manifest["tables"][table_name]
@@ -1016,6 +1336,11 @@ def import_bundle(
                     sql.SQL(", ").join(sql.Identifier(name) for name in columns),
                 )
                 batch: list[tuple[Any, ...]] = []
+                transformed_stats = (
+                    _empty_stats(columns)
+                    if portable_paths_enabled and table_name in PORTABLE_ARTIFACT_PATH_COLUMNS
+                    else None
+                )
                 with archive.open(table_manifest["path"]) as raw:
                     max_row_bytes = int(
                         os.environ.get("DARKWEB_MIGRATION_MAX_ROW_BYTES", DEFAULT_MAX_ROW_BYTES)
@@ -1038,7 +1363,20 @@ def import_bundle(
                             ) from exc
                         if not isinstance(values, list) or len(values) != len(columns):
                             raise MigrationBundleError(f"表 {table_name} 数据列数错误")
-                        batch.append(tuple(_decode_json_value(value) for value in values))
+                        decoded_values = tuple(_decode_json_value(value) for value in values)
+                        if portable_paths_enabled and table_name in PORTABLE_ARTIFACT_PATH_COLUMNS:
+                            decoded_values = tuple(
+                                _materialize_portable_artifact_row(
+                                    table_name,
+                                    columns,
+                                    decoded_values,
+                                    artifact_root,
+                                    artifact_names,
+                                )
+                            )
+                        if transformed_stats is not None:
+                            _update_stats(transformed_stats, columns, decoded_values)
+                        batch.append(decoded_values)
                         if len(batch) >= 500:
                             with connection.cursor() as cursor:
                                 execute_values(cursor, insert_sql.as_string(connection), batch, page_size=500)
@@ -1046,6 +1384,8 @@ def import_bundle(
                     if batch:
                         with connection.cursor() as cursor:
                             execute_values(cursor, insert_sql.as_string(connection), batch, page_size=500)
+                if transformed_stats is not None:
+                    import_expected_stats[table_name] = _finalize_stats(transformed_stats)
                 _reset_identity(connection, table, schema_name)
                 _progress(
                     progress,
@@ -1057,7 +1397,10 @@ def import_bundle(
             mismatches = []
             for index, table in enumerate(ordered):
                 actual = _table_stats_postgres(connection, table)
-                expected = manifest["tables"][table["name"]]["stats"]
+                expected = import_expected_stats.get(
+                    table["name"],
+                    manifest["tables"][table["name"]]["stats"],
+                )
                 if actual != expected:
                     mismatches.append({"table": table["name"], "expected": expected, "actual": actual})
                 _progress(
