@@ -3087,6 +3087,33 @@ def load_normalized_events(connection, refresh: bool = False) -> list[dict[str, 
     return []
 
 
+def load_normalized_event_page(
+    connection,
+    *,
+    event_type: str = "",
+    limit: int = 500,
+    query: str = "",
+) -> list[dict[str, Any]]:
+    rows = list_normalized_intelligence_events(
+        connection,
+        event_type=event_type,
+        limit=limit,
+        query=query,
+    )
+    if rows:
+        return [_hydrate_event_row(row) for row in rows]
+    if get_normalized_intelligence_cache_state(connection) is None:
+        ensure_normalized_intelligence(connection, force=True)
+        rows = list_normalized_intelligence_events(
+            connection,
+            event_type=event_type,
+            limit=limit,
+            query=query,
+        )
+        return [_hydrate_event_row(row) for row in rows]
+    return []
+
+
 def load_normalized_event_detail(connection, event_id: str, refresh: bool = False) -> dict[str, Any] | None:
     if refresh:
         ensure_normalized_intelligence(connection, force=True)

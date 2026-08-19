@@ -673,16 +673,9 @@ def intelligence_page(page: str, limit: int | None = None) -> dict:
     if limit is not None and not 1 <= limit <= 2000:
         raise HTTPException(status_code=422, detail="limit 必须在 1 到 2000 之间")
     try:
-        payload = _reload_api_modules().build_intelligence_page_payload(page)
+        return _reload_api_modules().build_intelligence_page_payload(page, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if limit is None:
-        return payload
-    payload_key = {"ransomware": "ransomwareEvents", "data-leak": "dataLeakEvents"}.get(page)
-    if not payload_key:
-        return payload
-    items = list(payload.get(payload_key) or [])
-    return {**payload, payload_key: items[:limit], f"{payload_key}Total": len(items)}
 
 
 @app.get("/api/jobs")

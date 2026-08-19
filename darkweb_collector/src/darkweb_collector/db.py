@@ -1578,19 +1578,59 @@ def replace_normalized_intelligence_events(
     )
 
 
-def list_normalized_intelligence_events(connection: sqlite3.Connection) -> list[dict]:
+def list_normalized_intelligence_events(
+    connection: sqlite3.Connection,
+    *,
+    event_type: str = "",
+    limit: int | None = None,
+    query: str = "",
+) -> list[dict]:
+    conditions = []
+    parameters: list[object] = []
+    if event_type:
+        conditions.append("event_type = ?")
+        parameters.append(event_type)
+    search_expression = (
+        "LOWER(COALESCE(title, '') || ' ' || COALESCE(attacker, '') || ' ' || "
+        "COALESCE(victim, '') || ' ' || COALESCE(victim_key, '') || ' ' || "
+        "COALESCE(industry, '') || ' ' || "
+        "COALESCE(region, '') || ' ' || COALESCE(source_site_name, '') || ' ' || "
+        "COALESCE(category, '') || ' ' || COALESCE(detail_text, '') || ' ' || "
+        "COALESCE(source_url, '') || ' ' || COALESCE(event_metadata_json, ''))"
+    )
+    for term in str(query or "").casefold().split():
+        conditions.append(f"{search_expression} LIKE ?")
+        parameters.append(f"%{term}%")
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+    limit_sql = " LIMIT ?" if limit is not None else ""
+    if limit is not None:
+        parameters.append(int(limit))
     cursor = connection.execute(
-        """
+        f"""
         SELECT event_id, source_kind, raw_source_type, source_site_name, source_record_id,
                event_type, category, leak_type, title, attacker, victim, victim_key,
                industry, region, disclosure_time, severity, risk_score, source_url,
                detail_text, mirror_resources_json, screenshot_resources_json,
                json_preview_url, risk_reasons_json, event_metadata_json, updated_at
         FROM normalized_intelligence_events
+        {where}
         ORDER BY COALESCE(disclosure_time, updated_at) DESC, event_id DESC
-        """
+        {limit_sql}
+        """,
+        tuple(parameters),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def count_normalized_intelligence_events(connection: sqlite3.Connection, event_type: str = "") -> int:
+    if event_type:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM normalized_intelligence_events WHERE event_type = ?",
+            (event_type,),
+        ).fetchone()
+    else:
+        row = connection.execute("SELECT COUNT(*) FROM normalized_intelligence_events").fetchone()
+    return int(row[0])
 
 
 def get_normalized_intelligence_event(

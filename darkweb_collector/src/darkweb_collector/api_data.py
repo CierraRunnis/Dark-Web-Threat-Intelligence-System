@@ -18,6 +18,7 @@ from darkweb_collector.document_exposure import (
     build_document_exposure_summary,
 )
 from darkweb_collector.db import (
+    count_normalized_intelligence_events,
     get_db_connection,
     get_normalized_intelligence_cache_state,
     get_site_connectivity_probe_map,
@@ -35,6 +36,7 @@ from darkweb_collector.normalized_intelligence import (
     build_display_title,
     ensure_normalized_intelligence,
     load_normalized_event_detail,
+    load_normalized_event_page,
     load_normalized_events,
     normalized_event_to_detail,
     normalized_event_to_list_item,
@@ -724,7 +726,39 @@ def _select_event_records(
     return selected[:limit] if limit is not None else selected
 
 
+def _event_record_sort_key(item: dict[str, Any]) -> datetime:
+    return _parse_dt(
+        str(
+            item.get("updatedTimeRaw")
+            or item.get("updated_time_raw")
+            or item.get("disclosureTimeRaw")
+            or item.get("disclosure_time_raw")
+            or item.get("disclosureTime")
+            or item.get("disclosure_time")
+            or ""
+        )
+    ) or datetime.min.replace(tzinfo=timezone.utc)
+
+
 def build_event_records(limit: int | None = None, query: str = "") -> list[dict[str, Any]]:
+    if limit is not None:
+        with get_db_connection() as connection:
+            normalized_events = load_normalized_event_page(
+                connection,
+                limit=limit,
+                query=query,
+            )
+        document_events = _select_event_records(
+            build_document_exposure_event_records(limit=limit),
+            limit=limit,
+            query=query,
+        )
+        events = document_events + [
+            normalized_event_to_list_item(item) for item in normalized_events
+        ]
+        events.sort(key=_event_record_sort_key, reverse=True)
+        return events[:limit]
+
     with get_db_connection() as connection:
         cache_key = _payload_cache_key(connection, "events")
         cached_payload = _get_cached_payload("events", cache_key)
@@ -733,21 +767,7 @@ def build_event_records(limit: int | None = None, query: str = "") -> list[dict[
         normalized_events, _ = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
 
     events = build_document_exposure_event_records(limit=None) + [normalized_event_to_list_item(item) for item in normalized_events]
-    events.sort(
-        key=lambda item: _parse_dt(
-            str(
-                item.get("updatedTimeRaw")
-                or item.get("updated_time_raw")
-                or item.get("disclosureTimeRaw")
-                or item.get("disclosure_time_raw")
-                or item.get("disclosureTime")
-                or item.get("disclosure_time")
-                or ""
-            )
-        )
-        or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
+    events.sort(key=_event_record_sort_key, reverse=True)
     _set_cached_payload("events", cache_key, events)
     return _select_event_records(events, limit=limit, query=query)
 
@@ -1568,7 +1588,7 @@ def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[st
     }
 
 
-def build_intelligence_page_payload(page: str) -> dict[str, Any]:
+def build_intelligence_page_payload(page: str, limit: int | None = None) -> dict[str, Any]:
     page_config = {
         "ransomware": ("ransomware", "ransomwareEvents", RANSOMWARE_EVENT_LIMIT),
         "data-leak": ("data_leak", "dataLeakEvents", DATA_LEAK_EVENT_LIMIT),
@@ -1576,18 +1596,27 @@ def build_intelligence_page_payload(page: str) -> dict[str, Any]:
     if page not in page_config:
         raise ValueError(f"unsupported intelligence page: {page}")
 
-    event_type, payload_key, event_limit = page_config[page]
-    namespace = f"intelligence:{page}"
+    event_type, payload_key, configured_limit = page_config[page]
+    event_limit = limit if limit is not None else (configured_limit or None)
+    namespace = f"intelligence:{page}:{event_limit or 'all'}"
     with get_db_connection() as connection:
         cache_key = _payload_cache_key(connection, namespace)
         cached_payload = _get_cached_payload(namespace, cache_key)
         if cached_payload is not None:
             return cached_payload
-        source_events = [
-            item
-            for item in load_normalized_events(connection)
-            if item.get("event_type") == event_type
-        ]
+        total_events = count_normalized_intelligence_events(connection, event_type)
+        if event_limit is not None:
+            source_events = load_normalized_event_page(
+                connection,
+                event_type=event_type,
+                limit=event_limit,
+            )
+        else:
+            source_events = [
+                item
+                for item in load_normalized_events(connection)
+                if item.get("event_type") == event_type
+            ]
 
     source_events.sort(
         key=lambda item: _parse_dt(
@@ -1596,7 +1625,7 @@ def build_intelligence_page_payload(page: str) -> dict[str, Any]:
         or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-    source_events = _apply_event_limit(source_events, event_limit)
+    source_events = _apply_event_limit(source_events, event_limit or 0)
     common_fields = (
         "id",
         "event_type",
@@ -1621,7 +1650,7 @@ def build_intelligence_page_payload(page: str) -> dict[str, Any]:
         {key: value for key in page_fields if (value := item.get(key)) is not None}
         for item in (normalized_event_to_list_item(source_event) for source_event in source_events)
     ]
-    payload: dict[str, Any] = {payload_key: events}
+    payload: dict[str, Any] = {payload_key: events, f"{payload_key}Total": total_events}
     if page == "ransomware":
         actors = Counter(item.get("attacker") or "未知" for item in events if item.get("attacker"))
         industries = Counter(item.get("industry") or "未知" for item in events if item.get("industry"))
@@ -1897,10 +1926,10 @@ def warm_api_payloads() -> None:
     # so the first page load is not blocked on cold work or stale cache.
     with get_db_connection() as connection:
         ensure_normalized_intelligence(connection, force=False, enrichment_budget=0)
-    build_intelligence_page_payload("ransomware")
-    build_intelligence_page_payload("data-leak")
+    build_event_records(limit=500)
+    build_intelligence_page_payload("ransomware", limit=500)
+    build_intelligence_page_payload("data-leak", limit=500)
     build_intelligence_payload()
-    build_event_records()
 
 
 def _runtime_db_status() -> dict[str, Any]:
