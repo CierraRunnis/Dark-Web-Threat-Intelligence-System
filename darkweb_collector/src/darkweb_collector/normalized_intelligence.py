@@ -1349,7 +1349,7 @@ def _propagate_entity_context(events: list[dict[str, Any]]) -> None:
         best_country_event = max(
             victim_events,
             key=lambda item: (
-                item.get("country") != "未知",
+                str(item.get("country") or "").strip() not in {"", "未知"},
                 int(item.get("metadata", {}).get("country_score") or 0),
                 int(item.get("confidence_score") or 0),
             ),
@@ -1357,30 +1357,32 @@ def _propagate_entity_context(events: list[dict[str, Any]]) -> None:
         best_industry_event = max(
             victim_events,
             key=lambda item: (
-                item.get("industry") != "未知",
+                str(item.get("industry") or "").strip() not in {"", "未知"},
                 int(item.get("metadata", {}).get("industry_score") or 0),
                 int(item.get("confidence_score") or 0),
             ),
         )
+        best_country = str(best_country_event.get("country") or "").strip()
+        best_industry = str(best_industry_event.get("industry") or "").strip()
         for event in victim_events:
             metadata = event.setdefault("metadata", {})
             best_country_meta = best_country_event.get("metadata", {}) or {}
             best_country_source = str(best_country_meta.get("country_source") or "")
             best_country_score = int(best_country_meta.get("country_score") or 0)
             can_propagate_country = (
-                best_country_event.get("country") not in {"", "未知"}
+                best_country not in {"", "未知"}
                 and (best_country_source != "ip_geo" or best_country_score >= 6)
             )
-            if event.get("country") in {"", "未知"} and can_propagate_country:
-                event["country"] = best_country_event["country"]
+            if str(event.get("country") or "").strip() in {"", "未知"} and can_propagate_country:
+                event["country"] = best_country
                 event["country_code"] = best_country_event.get("country_code") or ""
                 event["region"] = best_country_event.get("region") or event.get("region") or "未知"
                 metadata["country_source"] = f"{metadata.get('country_source', 'unknown')}+victim_group"
                 metadata.setdefault("tag_sources", []).append("victim_group:country")
                 event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 8, 100)
                 event["completeness_score"] = min(int(event.get("completeness_score") or 0) + 10, 100)
-            if event.get("industry") in {"", "未知"} and best_industry_event.get("industry") not in {"", "未知"}:
-                event["industry"] = best_industry_event["industry"]
+            if str(event.get("industry") or "").strip() in {"", "未知"} and best_industry not in {"", "未知"}:
+                event["industry"] = best_industry
                 metadata["industry_source"] = f"{metadata.get('industry_source', 'unknown')}+victim_group"
                 metadata.setdefault("tag_sources", []).append("victim_group:industry")
                 event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 6, 100)
