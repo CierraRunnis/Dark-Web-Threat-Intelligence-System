@@ -1206,8 +1206,8 @@ async function hydrateIntelligence(root) {
     list.replaceChildren()
   }
   const parameters = new URLSearchParams({ limit: String(INTELLIGENCE_INITIAL_LIMIT) })
-  const query = new URLSearchParams(window.location.search).get('q')?.trim()
-  if (query) parameters.set('q', query)
+  const searchQuery = new URLSearchParams(window.location.search).get('q')?.trim()
+  if (searchQuery) parameters.set('q', searchQuery)
   const events = (await requestJson(`/api/events?${parameters}`, { preferCached: true })).filter((item) => eventType(item))
   renderIntelligenceItems(root, events)
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
