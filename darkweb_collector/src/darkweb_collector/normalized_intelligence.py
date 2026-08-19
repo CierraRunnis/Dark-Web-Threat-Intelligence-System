@@ -513,7 +513,7 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-08-19-legacy-output-dir-v6"
+NORMALIZATION_VERSION = "2026-08-19-resource-preservation-v7"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -1535,6 +1535,7 @@ def _forum_output_resources(row_dict: dict[str, Any]) -> tuple[list[dict[str, st
         detail_dir,
         [artifact_stem],
         [artifact_stem, _clean_display_subject(row_dict.get("title")), topic_url.rsplit("/", 1)[-1]],
+        allow_fuzzy=False,
     )
 
 
@@ -2970,6 +2971,14 @@ def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -
 
 
 def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None = None) -> list[dict[str, Any]]:
+    previous_resources = {
+        str(row.get("event_id") or ""): {
+            "mirror_resources": _coerce_resource_list(_parse_json(row.get("mirror_resources_json"))),
+            "screenshot_resources": _coerce_resource_list(_parse_json(row.get("screenshot_resources_json"))),
+            "json_preview_url": str(row.get("json_preview_url") or ""),
+        }
+        for row in list_normalized_intelligence_events(connection)
+    }
     source_signature = _build_source_signature(connection)
     domain_cache = _load_domain_enrichment_cache()
     effective_enrichment_budget = DOMAIN_ENRICHMENT_BUDGET if enrichment_budget is None else max(0, int(enrichment_budget))
@@ -3012,6 +3021,18 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
     updated_at = _now_utc().isoformat()
     persisted_rows: list[dict[str, Any]] = []
     for event in title_deduped_events.values():
+        previous = previous_resources.get(str(event.get("event_id") or ""), {})
+        mirror_resources = _merge_unique_resources(
+            previous.get("mirror_resources") or [],
+            event.get("mirror_resources") or [],
+        )
+        screenshot_resources = _merge_unique_resources(
+            previous.get("screenshot_resources") or [],
+            event.get("screenshot_resources") or [],
+        )
+        json_preview_url = str(
+            event.get("json_preview_url") or previous.get("json_preview_url") or ""
+        )
         metadata_payload = {
             **event["metadata"],
             "country": event.get("country") or "未知",
@@ -3019,6 +3040,7 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
             "macro_region": event.get("region") or "未知",
             "confidence_score": int(event.get("confidence_score") or 0),
             "completeness_score": int(event.get("completeness_score") or 0),
+            "resource_count": len(mirror_resources),
         }
         persisted_rows.append(
             {
@@ -3041,9 +3063,9 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
                 "risk_score": int(event["risk_score"]),
                 "source_url": event.get("source_url") or "",
                 "detail_text": event.get("detail_text") or "",
-                "mirror_resources_json": _json_dumps(event.get("mirror_resources") or []),
-                "screenshot_resources_json": _json_dumps(event.get("screenshot_resources") or []),
-                "json_preview_url": event.get("json_preview_url") or "",
+                "mirror_resources_json": _json_dumps(mirror_resources),
+                "screenshot_resources_json": _json_dumps(screenshot_resources),
+                "json_preview_url": json_preview_url,
                 "risk_reasons_json": _json_dumps(event["metadata"].get("risk_reasons") or []),
                 "event_metadata_json": _json_dumps(metadata_payload),
                 "updated_at": updated_at,
