@@ -15,6 +15,13 @@ from darkweb_collector.db import get_db_connection
 from darkweb_collector.runtime import project_root
 
 
+ACTIVE_RELEASE_OVERRIDE_KEYS = (
+    "DARKWEB_COLLECTOR_DATABASE_URL",
+    "DARKWEB_COLLECTOR_DATABASE_SCHEMA",
+    "DARKWEB_COLLECTOR_OUTPUT_ROOT",
+)
+
+
 def _run(command: list[str], timeout: int = 600) -> None:
     subprocess.run(command, check=True, timeout=timeout)
 
@@ -74,6 +81,8 @@ def _database_ready() -> None:
 def run(job_id: str) -> int:
     stop_command, start_command = _launcher_commands()
     time.sleep(2)
+    for key in ACTIVE_RELEASE_OVERRIDE_KEYS:
+        os.environ.pop(key, None)
     try:
         _run(stop_command)
         _run(start_command)

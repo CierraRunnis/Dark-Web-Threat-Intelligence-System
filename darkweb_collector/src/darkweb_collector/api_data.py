@@ -684,12 +684,52 @@ def _build_victim_event_records(connection) -> list[dict[str, Any]]:
     return events
 
 
-def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
+def _select_event_records(
+    events: list[dict[str, Any]],
+    *,
+    limit: int | None,
+    query: str,
+) -> list[dict[str, Any]]:
+    terms = [term for term in str(query or "").casefold().split() if term]
+    selected = events
+    if terms:
+        searchable_fields = (
+            "id",
+            "title",
+            "summary",
+            "detail_text",
+            "victim",
+            "attacker",
+            "industry",
+            "region",
+            "country",
+            "cveId",
+            "cve_id",
+            "vendor",
+            "product",
+            "sourceSite",
+            "category",
+            "domain",
+        )
+
+        def matches(item: dict[str, Any]) -> bool:
+            haystack = " ".join(str(item.get(field) or "") for field in searchable_fields).casefold()
+            return all(term in haystack for term in terms)
+
+        selected = [
+            item
+            for item in events
+            if matches(item)
+        ]
+    return selected[:limit] if limit is not None else selected
+
+
+def build_event_records(limit: int | None = None, query: str = "") -> list[dict[str, Any]]:
     with get_db_connection() as connection:
         cache_key = _payload_cache_key(connection, "events")
         cached_payload = _get_cached_payload("events", cache_key)
         if cached_payload is not None:
-            return cached_payload[:limit] if limit is not None else cached_payload
+            return _select_event_records(cached_payload, limit=limit, query=query)
         normalized_events, _ = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
 
     events = build_document_exposure_event_records(limit=None) + [normalized_event_to_list_item(item) for item in normalized_events]
@@ -709,9 +749,7 @@ def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
         reverse=True,
     )
     _set_cached_payload("events", cache_key, events)
-    if limit is not None:
-        return events[:limit]
-    return events
+    return _select_event_records(events, limit=limit, query=query)
 
 
 def _build_forum_event_detail_by_id(

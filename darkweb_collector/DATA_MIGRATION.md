@@ -15,6 +15,8 @@ Windows 首次启动时，如果尚未配置目标 PostgreSQL，启动脚本会�
 
 Debian / Ubuntu / WSL / Codespaces 使用 `scripts/setup_postgresql_linux.sh` 完成同样的首次安装和幂等检查。脚本从 PostgreSQL 官方 PGDG 仓库安装 PostgreSQL 16，校验官方签名指纹，使用本机 `postgres` 系统账号创建项目角色和数据库，并把应用口令保存到当前用户私有的 `postgresql-target.json`（权限 `600`）：
 
+当 Debian / Ubuntu 版本已从 PGDG 主仓库下线时，脚本会验证主仓库的发行版 `Release` 文件并自动切换至 `apt-archive.postgresql.org` 官方归档；显式配置的仓库不可用时不会静默回退。
+
 ```bash
 bash ./scripts/setup_postgresql_linux.sh plan
 bash ./scripts/setup_postgresql_linux.sh status
@@ -89,6 +91,8 @@ SQLite 索引的列顺序、唯一性、部分索引条件以及每列 `ASC` / `
 ## 4. 确认切换与回退
 
 确认切换后，项目写入新的活动版本配置，并调用现有启动脚本停止和重启服务。重启后会检查 PostgreSQL schema 指纹、迁移版本、数据库可查询性和 API 健康状态；任一步失败都会恢复旧活动版本并再次启动。
+
+激活控制器会先清除旧进程继承的 `DARKWEB_COLLECTOR_DATABASE_URL`、`DARKWEB_COLLECTOR_DATABASE_SCHEMA` 和 `DARKWEB_COLLECTOR_OUTPUT_ROOT`，再由活动版本文件重新选择数据库与镜像目录，避免文件存在但 `/collector-output` 仍指向旧目录。
 
 活动版本配置默认位于：
 

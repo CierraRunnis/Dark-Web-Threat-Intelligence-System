@@ -1048,18 +1048,27 @@ export function initializePrototype() {
       window.scrollTo({ top: Math.max(0, section.offsetTop - 66), behavior: reduceMotion ? 'auto' : 'smooth' })
     }
 
+    const openServerSearch = (value) => {
+      const query = String(value || '').trim()
+      const target = query ? `/intelligence?q=${encodeURIComponent(query)}` : '/intelligence'
+      if (`${window.location.pathname}${window.location.search}` === target) {
+        input?.dispatchEvent(new Event('input'))
+        moveToResults()
+        return
+      }
+      window.location.href = target
+    }
+
     form.addEventListener('submit', (event) => {
       event.preventDefault()
-      input?.dispatchEvent(new Event('input'))
-      moveToResults()
+      openServerSearch(input?.value)
     })
 
     $$('[data-intel-hot]').forEach((button) => {
       button.addEventListener('click', () => {
         if (!input) return
         input.value = button.dataset.intelHot || ''
-        input.dispatchEvent(new Event('input'))
-        moveToResults()
+        openServerSearch(input.value)
       })
     })
 
@@ -1071,6 +1080,10 @@ export function initializePrototype() {
     })
 
     $('[data-intel-reset]')?.addEventListener('click', () => {
+      if (new URLSearchParams(window.location.search).has('q')) {
+        openServerSearch('')
+        return
+      }
       if (input) {
         input.value = ''
         input.dispatchEvent(new Event('input'))

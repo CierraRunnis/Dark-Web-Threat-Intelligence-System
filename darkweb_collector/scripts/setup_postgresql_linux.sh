@@ -12,6 +12,8 @@ TARGET_CONFIG_PATH="${DARKWEB_POSTGRESQL_TARGET_CONFIG:-$USER_DATA_ROOT/postgres
 PGDG_KEY_FINGERPRINT="B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
 PGDG_KEYRING="/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg"
 PGDG_SOURCE_LIST="/etc/apt/sources.list.d/darkweb-postgresql-pgdg.list"
+PGDG_PRIMARY_REPOSITORY="https://apt.postgresql.org/pub/repos/apt"
+PGDG_ARCHIVE_REPOSITORY="https://apt-archive.postgresql.org/pub/repos/apt"
 
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -61,14 +63,24 @@ read_os_release() {
 
 ensure_pgdg_repository() {
   read_os_release
-  local key_file fingerprint source_line
+  local key_file fingerprint source_line repository_base release_url
   key_file="$(mktemp)"
   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o "$key_file"
   fingerprint="$(gpg --batch --show-keys --with-colons "$key_file" | awk -F: '$1 == "fpr" { print $10; exit }')"
   [[ "$fingerprint" == "$PGDG_KEY_FINGERPRINT" ]] || die "PostgreSQL repository signing key fingerprint mismatch"
   run_root install -d -m 0755 "$(dirname "$PGDG_KEYRING")"
   run_root gpg --batch --yes --dearmor --output "$PGDG_KEYRING" "$key_file"
-  source_line="deb [signed-by=$PGDG_KEYRING] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main"
+  repository_base="${DARKWEB_PGDG_REPOSITORY_BASE:-$PGDG_PRIMARY_REPOSITORY}"
+  [[ "$repository_base" == https://* ]] || die "PostgreSQL repository URL must use HTTPS"
+  release_url="$repository_base/dists/${VERSION_CODENAME}-pgdg/Release"
+  if ! curl -fsSL --retry 2 --output /dev/null "$release_url"; then
+    [[ -z "${DARKWEB_PGDG_REPOSITORY_BASE:-}" ]] || die "configured PostgreSQL repository does not publish ${VERSION_CODENAME}-pgdg"
+    repository_base="$PGDG_ARCHIVE_REPOSITORY"
+    release_url="$repository_base/dists/${VERSION_CODENAME}-pgdg/Release"
+    curl -fsSL --retry 2 --output /dev/null "$release_url" || die "PostgreSQL archive does not publish ${VERSION_CODENAME}-pgdg"
+    info "using the official PostgreSQL archive for EOL distribution: ${VERSION_CODENAME}"
+  fi
+  source_line="deb [signed-by=$PGDG_KEYRING] $repository_base ${VERSION_CODENAME}-pgdg main"
   printf '%s\n' "$source_line" | run_root tee "$PGDG_SOURCE_LIST" >/dev/null
   rm -f -- "$key_file"
 }

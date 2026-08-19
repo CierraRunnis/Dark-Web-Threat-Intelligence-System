@@ -20,9 +20,15 @@
 - 新增 SQLite / PostgreSQL 运行时选择层和 SQL 兼容适配，活动版本可同时切换数据库 Schema 与镜像根目录。
 - 修复 DragonForce、Lynx 受害者列表与详情排序把日期文本和整数 ID 混入同一 `COALESCE` 导致的 PostgreSQL 500。
 - Windows 首次启动会自动安装或复用 PostgreSQL 16，创建项目专用数据库和最小权限账号，并使用 DPAPI 保存本机恢复配置；已有活动版本不会被覆盖或重置密码。
-- Debian / Ubuntu / WSL / Codespaces 首次启动会从校验过官方签名指纹的 PGDG 仓库安装 PostgreSQL 16，幂等创建项目数据库与角色，并以目录 `700`、配置文件 `600` 保存当前用户私有口令；显式外部目标和关闭自动安装均受支持。
+- Debian / Ubuntu / WSL / Codespaces 首次启动会从校验过官方签名指纹的 PGDG 仓库安装 PostgreSQL 16；发行版退出主仓库后自动切换至 PostgreSQL 官方归档，幂等创建项目数据库与角色，并以目录 `700`、配置文件 `600` 保存当前用户私有口令。
 - 修复 `winget` 已完成安装但返回非零状态时的误判，以及 Windows PowerShell 将 PostgreSQL `NOTICE` 当成终止错误的问题；安装结果只记录脱敏状态。
 - WSL / Linux 启动脚本支持读取活动 PostgreSQL 版本，停止对已激活版本执行 SQLite 运行库同步。
+- 迁移激活控制器会在重启前清除旧数据库和镜像目录环境覆盖，确保 PostgreSQL 活动版本及新镜像根目录真正生效。
+
+### 大数据页面加载
+
+- 全域检索首屏改为最多 500 条并支持服务端关键词过滤；勒索与数据泄露页面各按需返回最近 500 条，避免一次下载并创建上万个 DOM 节点。
+- `/api/events` 与页面级情报接口支持受限 `limit` 参数，全部 API 大响应启用 gzip，镜像静态文件不参与压缩。
 
 ### 前端与镜像适配
 

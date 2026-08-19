@@ -47,7 +47,9 @@ function showToast(message) {
 }
 
 const JSON_CACHE_TTL_MS = 15_000
-const CACHEABLE_JSON_URLS = new Set([
+const INTELLIGENCE_INITIAL_LIMIT = 500
+const PAGE_EVENT_LIMIT = 500
+const CACHEABLE_JSON_PATHS = new Set([
   '/api/intelligence',
   '/api/intelligence/ransomware',
   '/api/intelligence/data-leak',
@@ -59,7 +61,8 @@ const inFlightJsonRequests = new Map()
 async function requestJson(url, options = {}) {
   const { preferCached = false, ...fetchOptions } = options
   const method = String(fetchOptions.method || 'GET').toUpperCase()
-  const cacheable = method === 'GET' && CACHEABLE_JSON_URLS.has(url)
+  const pathname = new URL(url, window.location.origin).pathname
+  const cacheable = method === 'GET' && CACHEABLE_JSON_PATHS.has(pathname)
   if (cacheable) {
     const cached = jsonResponseCache.get(url)
     const fresh = cached && Date.now() - cached.storedAt < JSON_CACHE_TTL_MS
@@ -1202,7 +1205,10 @@ async function hydrateIntelligence(root) {
     list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
     list.replaceChildren()
   }
-  const events = (await requestJson('/api/events', { preferCached: true })).filter((item) => eventType(item))
+  const parameters = new URLSearchParams({ limit: String(INTELLIGENCE_INITIAL_LIMIT) })
+  const query = new URLSearchParams(window.location.search).get('q')?.trim()
+  if (query) parameters.set('q', query)
+  const events = (await requestJson(`/api/events?${parameters}`, { preferCached: true })).filter((item) => eventType(item))
   renderIntelligenceItems(root, events)
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
   const recent = events.filter((item) => {
@@ -1220,7 +1226,7 @@ async function hydrateIntelligence(root) {
 
 async function hydrateRansomware(root, state) {
   const table = clearTable(root, '#ransomware-table')
-  const payload = await requestJson('/api/intelligence/ransomware')
+  const payload = await requestJson(`/api/intelligence/ransomware?limit=${PAGE_EVENT_LIMIT}`)
   const items = payload.ransomwareEvents || []
   replaceFilterOptions(
     root,
@@ -1297,7 +1303,7 @@ function leakSource(item) {
 
 async function hydrateDataLeak(root, state) {
   const table = clearTable(root, '#data-leak-table')
-  const payload = await requestJson('/api/intelligence/data-leak')
+  const payload = await requestJson(`/api/intelligence/data-leak?limit=${PAGE_EVENT_LIMIT}`)
   const items = payload.dataLeakEvents || []
   replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="classification"]', '全部事件分类', items.map((item) => item.category).filter(Boolean))
   replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="attacker"]', '全部攻击者', items.map((item) => item.attacker || item.sourceSite || '未披露'))

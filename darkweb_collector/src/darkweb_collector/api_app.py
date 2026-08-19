@@ -15,6 +15,7 @@ from fastapi import WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, SecretStr
 
 from darkweb_collector.chaojiying import (
@@ -159,6 +160,18 @@ from darkweb_collector.self_update import (
     start_self_update,
 )
 from darkweb_collector.migration_api import router as migration_router
+
+
+class ApiGZipMiddleware:
+    def __init__(self, app, minimum_size: int = 1024, compresslevel: int = 5) -> None:
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=minimum_size, compresslevel=compresslevel)
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") == "http" and str(scope.get("path") or "").startswith("/api/"):
+            await self.gzip(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 app = FastAPI(title="Darkweb Collector API", version="v.11.0")
@@ -351,6 +364,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(ApiGZipMiddleware, minimum_size=1024, compresslevel=5)
 
 app.mount(
     "/collector-output",
@@ -655,11 +669,20 @@ def intelligence() -> dict:
 
 
 @app.get("/api/intelligence/{page}")
-def intelligence_page(page: str) -> dict:
+def intelligence_page(page: str, limit: int | None = None) -> dict:
+    if limit is not None and not 1 <= limit <= 2000:
+        raise HTTPException(status_code=422, detail="limit 必须在 1 到 2000 之间")
     try:
-        return _reload_api_modules().build_intelligence_page_payload(page)
+        payload = _reload_api_modules().build_intelligence_page_payload(page)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if limit is None:
+        return payload
+    payload_key = {"ransomware": "ransomwareEvents", "data-leak": "dataLeakEvents"}.get(page)
+    if not payload_key:
+        return payload
+    items = list(payload.get(payload_key) or [])
+    return {**payload, payload_key: items[:limit], f"{payload_key}Total": len(items)}
 
 
 @app.get("/api/jobs")
@@ -668,8 +691,12 @@ def jobs() -> dict:
 
 
 @app.get("/api/events")
-def events() -> list[dict]:
-    return _reload_api_modules().build_event_records()
+def events(limit: int | None = None, q: str = "") -> list[dict]:
+    if limit is not None and not 1 <= limit <= 2000:
+        raise HTTPException(status_code=422, detail="limit 必须在 1 到 2000 之间")
+    if len(q) > 200:
+        raise HTTPException(status_code=422, detail="检索关键词不能超过 200 个字符")
+    return _reload_api_modules().build_event_records(limit=limit, query=q)
 
 
 @app.get("/api/events/{event_id}")
