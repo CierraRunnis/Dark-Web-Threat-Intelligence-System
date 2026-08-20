@@ -473,7 +473,6 @@ function platformTypeLabel(type) {
 }
 
 function platformAccessMode(row) {
-  if (row.platform === 'pansou') return '本地 API'
   if (row.platform === 'panhub') return '外部 API'
   if (row.discovery_only) return '公开检索'
   if (row.platform_type === 'netdisk_share') return '链接识别'

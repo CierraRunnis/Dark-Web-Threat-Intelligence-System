@@ -91,7 +91,7 @@ bash darkweb_collector/scripts/start_all_services_wsl.sh attach
 bash darkweb_collector/scripts/start_all_services_wsl.sh stop
 ```
 
-WSL 脚本会准备后端虚拟环境、前端依赖、Redis、Playwright、运行时数据库和 Tor 网桥运行组件，并拉起 API、前端、worker、scheduler 等服务。
+WSL / Linux 脚本会准备后端虚拟环境、前端依赖、Redis、Playwright、本机 PostgreSQL 16 迁移目标、运行时数据库和 Tor 网桥运行组件，并拉起 API、前端、worker、scheduler 等服务；显式配置外部 PostgreSQL 时会跳过本机安装。
 
 ### Windows
 
@@ -160,6 +160,12 @@ darkweb uninstall purge-data --yes
 4. 重启 API、前端和后台任务服务。
 
 更新完成后需要重新登录。在线更新要求项目通过 Git 克隆部署；源码压缩包、容器只读文件系统或存在本地未提交修改时，系统会停止更新并显示原因。默认固定跟踪 `main` 分支，也可以通过 `DARKWEB_UPDATE_BRANCH` 显式覆盖，通过 `DARKWEB_SELF_UPDATE_ENABLED=0` 禁用在线更新。
+
+## 数据库与镜像文件迁移
+
+管理员可以在“配置中心 → 数据迁移”导入外部工具生成的 `.dwti` 文件。迁移包同时包含 SQLite 数据和证据镜像；后端会先在独立 PostgreSQL Schema 中完成安全预检、逐表导入、摘要复核和镜像释放，只有全部一致并再次确认后才切换活动数据库和镜像目录。
+
+Windows 以及 Debian / Ubuntu / WSL / Codespaces 首次启动会自动安装或复用 PostgreSQL 16，并创建项目专用数据库和账号；已有 SQLite 数据不会自动删除或覆盖。Linux 应用口令保存在当前用户私有、权限为 `600` 的配置文件中；显式设置外部 PostgreSQL URL 时不会安装本机服务。旧系统的离线打包、校验工具及 `.dwti` 包继续独立存放在项目目录之外。完整流程、回退边界和容量限制见 [`darkweb_collector/DATA_MIGRATION.md`](./darkweb_collector/DATA_MIGRATION.md)。
 
 ## 超级鹰验证码与长安会话守护
 

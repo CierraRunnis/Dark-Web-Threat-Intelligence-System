@@ -201,16 +201,6 @@ PLATFORMS: dict[str, ExposurePlatform] = {
         domains=("xiaobaipan.com", "www.xiaobaipan.com"),
         discovery_only=True,
     ),
-    "pansou": ExposurePlatform(
-        key="pansou",
-        label="PanSou",
-        module="document_exposure",
-        platform_type="netdisk_search",
-        homepage_url="https://github.com/fish2018/pansou",
-        login_url="https://github.com/fish2018/pansou",
-        domains=(),
-        discovery_only=True,
-    ),
     "panhub": ExposurePlatform(
         key="panhub",
         label="PanHub",

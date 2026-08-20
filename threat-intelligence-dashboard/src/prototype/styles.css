@@ -526,7 +526,8 @@ button.app-version.is-busy::after {
 .table-pagination-actions button { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--fg); font: 700 16px var(--font-mono); cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
 .table-pagination-actions button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .table-pagination-actions button:disabled { opacity: .42; cursor: default; }
-.table-pagination-current { min-width: 74px; color: var(--fg); font: 700 12px var(--font-mono); text-align: center; }
+.table-pagination-current { min-width: 104px; display: flex; align-items: center; justify-content: center; gap: 4px; color: var(--fg); font: 700 12px var(--font-mono); text-align: center; }
+.table-pagination-current input { width: 48px; height: 30px; padding: 4px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--fg); font: 700 12px var(--font-mono); text-align: center; }
 .table-pagination-summary { font-size: 12px; }
 .empty-state { display: none; padding: 36px; text-align: center; color: var(--muted); }
 
@@ -2322,6 +2323,8 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 }
 
 /* Site management: open status rail and continuous operations matrix. */
+.collector-site-nav-section { padding: 0; }
+.collector-sites-panel { display: grid; gap: 18px; }
 .page-collector-sites .collector-page {
   gap: 18px;
   padding-top: 16px;
@@ -3070,8 +3073,12 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 
 .settings-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   overflow: visible;
+}
+
+.settings-tabs.collector-site-tabs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .settings-tabs .tab {

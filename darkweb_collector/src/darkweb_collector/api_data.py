@@ -18,6 +18,8 @@ from darkweb_collector.document_exposure import (
     build_document_exposure_summary,
 )
 from darkweb_collector.db import (
+    count_normalized_intelligence_events,
+    count_normalized_intelligence_events_by_type,
     get_db_connection,
     get_normalized_intelligence_cache_state,
     get_site_connectivity_probe_map,
@@ -35,11 +37,12 @@ from darkweb_collector.normalized_intelligence import (
     build_display_title,
     ensure_normalized_intelligence,
     load_normalized_event_detail,
+    load_normalized_event_page,
     load_normalized_events,
     normalized_event_to_detail,
     normalized_event_to_list_item,
 )
-from darkweb_collector.runtime import default_db_path, output_root, project_root
+from darkweb_collector.runtime import active_release_config, default_db_path, output_root, project_root
 from darkweb_collector.sites.darkforums import normalize_darkforums_timestamp
 from darkweb_collector.site_auth import site_auth_readiness, site_display_name
 from darkweb_collector.utils import safe_stem
@@ -467,18 +470,33 @@ def _coerce_resource_list(value: Any) -> list[dict[str, str]]:
             if isinstance(item, dict):
                 url = str(item.get("url") or "").strip()
                 if url:
-                    normalized.append(
-                        {
-                            "label": str(item.get("name") or url),
-                            "url": url,
-                        }
-                    )
+                    kind = str(item.get("kind") or "").strip()
+                    if not kind and Path(url.split("?", 1)[0]).suffix.lower() in {".gif", ".jpg", ".jpeg", ".png", ".webp"}:
+                        kind = "image"
+                    normalized.append({
+                        "label": str(item.get("label") or item.get("name") or ("商品镜像图片" if kind == "image" else url)),
+                        "url": url,
+                        **({"kind": kind} if kind else {}),
+                    })
             elif isinstance(item, str) and item.strip():
-                normalized.append({"label": item.strip(), "url": item.strip()})
+                url = item.strip()
+                kind = "image" if Path(url.split("?", 1)[0]).suffix.lower() in {".gif", ".jpg", ".jpeg", ".png", ".webp"} else ""
+                normalized.append({
+                    "label": "商品镜像图片" if kind else url,
+                    "url": url,
+                    **({"kind": kind} if kind else {}),
+                })
         return normalized
     if isinstance(value, str):
+        if value.lstrip().startswith("["):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list):
+                return _coerce_resource_list(decoded)
         items = [item.strip() for item in value.split(",") if item.strip()]
-        return [{"label": item, "url": item} for item in items]
+        return _coerce_resource_list(items)
     return []
 
 
@@ -486,7 +504,8 @@ def _site_output_dir(site_name: str) -> Path | None:
     try:
         return get_site_config(site_name).output_dir
     except Exception:
-        return None
+        legacy_name = safe_stem(site_name, fallback="")
+        return (output_root() / legacy_name).resolve() if legacy_name else None
 
 
 def _public_output_url(path: Path) -> str:
@@ -628,75 +647,56 @@ def _build_victim_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_forum_event_records(connection) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT d.site_name, d.section, d.topic_url, d.content, d.attachments, d.victims, d.attackers, d.fetched_at, d.raw_json,
-               COALESCE(t.title, d.topic_url) AS title,
-               COALESCE((SELECT industry FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'other') AS industry,
-               COALESCE((SELECT region FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'unknown') AS region
-        FROM forum_details d
-        LEFT JOIN forum_topics t
-          ON t.site_name = d.site_name
-         AND t.section = d.section
-         AND t.url = d.topic_url
-        ORDER BY datetime(d.fetched_at) DESC
-        """
-    ).fetchall()
-    return [_build_forum_event_payload(dict(row)) for row in rows]
+EVENT_SEARCH_TYPES = {
+    "all": "",
+    "ransomware": "ransomware",
+    "data-leak": "data_leak",
+    "vulnerability": "vulnerability",
+}
 
 
-def _build_victim_event_records(connection) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT v.site_name, v.source_url, v.name, v.display_label, v.detail_url, v.status, v.published_at_utc, v.raw_json,
-               v.last_detail_fetch_status, vd.text_excerpt, vd.page_title, vd.fetched_at_utc
-        FROM victims v
-        LEFT JOIN victim_details vd
-          ON vd.victim_id = v.id
-        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, v.id) DESC
-        """
-    ).fetchall()
-    events = []
-    seen: set[str] = set()
-    for row in rows:
-        row_dict = dict(row)
-        event_id = _build_victim_event_payload(row_dict)["id"]
-        if event_id in seen:
-            continue
-        seen.add(event_id)
-        events.append(_build_victim_event_payload(row_dict))
-    return events
-
-
-def build_event_records(limit: int | None = None) -> list[dict[str, Any]]:
+def build_event_search_payload(
+    *,
+    page: int = 1,
+    page_size: int = 20,
+    query: str = "",
+    event_type: str = "all",
+    sort: str = "latest",
+) -> dict[str, Any]:
+    database_event_type = EVENT_SEARCH_TYPES[event_type]
     with get_db_connection() as connection:
-        cache_key = _payload_cache_key(connection, "events")
-        cached_payload = _get_cached_payload("events", cache_key)
-        if cached_payload is not None:
-            return cached_payload[:limit] if limit is not None else cached_payload
-        normalized_events, _ = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
-
-    events = build_document_exposure_event_records(limit=None) + [normalized_event_to_list_item(item) for item in normalized_events]
-    events.sort(
-        key=lambda item: _parse_dt(
-            str(
-                item.get("updatedTimeRaw")
-                or item.get("updated_time_raw")
-                or item.get("disclosureTimeRaw")
-                or item.get("disclosure_time_raw")
-                or item.get("disclosureTime")
-                or item.get("disclosure_time")
-                or ""
-            )
+        database_counts = count_normalized_intelligence_events_by_type(connection, query=query)
+        counts = {
+            "ransomware": int(database_counts.get("ransomware") or 0),
+            "data-leak": int(database_counts.get("data_leak") or 0),
+            "vulnerability": int(database_counts.get("vulnerability") or 0),
+        }
+        counts["all"] = sum(counts.values())
+        total = counts[event_type]
+        page_count = max(1, (total + page_size - 1) // page_size)
+        normalized_page = min(page, page_count)
+        normalized_events = load_normalized_event_page(
+            connection,
+            event_type=database_event_type,
+            limit=page_size,
+            offset=(normalized_page - 1) * page_size,
+            query=query,
+            sort=sort,
         )
-        or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
-    _set_cached_payload("events", cache_key, events)
-    if limit is not None:
-        return events[:limit]
-    return events
+
+    return {
+        "items": [normalized_event_to_list_item(item) for item in normalized_events],
+        "total": total,
+        "page": normalized_page,
+        "page_size": page_size,
+        "page_count": page_count,
+        "has_previous": normalized_page > 1,
+        "has_next": normalized_page < page_count,
+        "query": query,
+        "event_type": event_type,
+        "sort": sort,
+        "counts": counts,
+    }
 
 
 def _build_forum_event_detail_by_id(
@@ -741,7 +741,7 @@ def _build_victim_event_detail_by_id(
         LEFT JOIN victim_details vd
           ON vd.victim_id = v.id
         WHERE v.site_name = ?
-        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, v.id) DESC
+        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, '') DESC, v.id DESC
         """,
         (site_name,),
     ).fetchall()
@@ -1515,7 +1515,7 @@ def _build_executive_cards(events: list[dict[str, Any]], countries: list[dict[st
     }
 
 
-def build_intelligence_page_payload(page: str) -> dict[str, Any]:
+def build_intelligence_page_payload(page: str, limit: int | None = None) -> dict[str, Any]:
     page_config = {
         "ransomware": ("ransomware", "ransomwareEvents", RANSOMWARE_EVENT_LIMIT),
         "data-leak": ("data_leak", "dataLeakEvents", DATA_LEAK_EVENT_LIMIT),
@@ -1523,18 +1523,27 @@ def build_intelligence_page_payload(page: str) -> dict[str, Any]:
     if page not in page_config:
         raise ValueError(f"unsupported intelligence page: {page}")
 
-    event_type, payload_key, event_limit = page_config[page]
-    namespace = f"intelligence:{page}"
+    event_type, payload_key, configured_limit = page_config[page]
+    event_limit = limit if limit is not None else (configured_limit or None)
+    namespace = f"intelligence:{page}:{event_limit or 'all'}"
     with get_db_connection() as connection:
         cache_key = _payload_cache_key(connection, namespace)
         cached_payload = _get_cached_payload(namespace, cache_key)
         if cached_payload is not None:
             return cached_payload
-        source_events = [
-            item
-            for item in load_normalized_events(connection)
-            if item.get("event_type") == event_type
-        ]
+        total_events = count_normalized_intelligence_events(connection, event_type)
+        if event_limit is not None:
+            source_events = load_normalized_event_page(
+                connection,
+                event_type=event_type,
+                limit=event_limit,
+            )
+        else:
+            source_events = [
+                item
+                for item in load_normalized_events(connection)
+                if item.get("event_type") == event_type
+            ]
 
     source_events.sort(
         key=lambda item: _parse_dt(
@@ -1543,7 +1552,7 @@ def build_intelligence_page_payload(page: str) -> dict[str, Any]:
         or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-    source_events = _apply_event_limit(source_events, event_limit)
+    source_events = _apply_event_limit(source_events, event_limit or 0)
     common_fields = (
         "id",
         "event_type",
@@ -1568,7 +1577,7 @@ def build_intelligence_page_payload(page: str) -> dict[str, Any]:
         {key: value for key in page_fields if (value := item.get(key)) is not None}
         for item in (normalized_event_to_list_item(source_event) for source_event in source_events)
     ]
-    payload: dict[str, Any] = {payload_key: events}
+    payload: dict[str, Any] = {payload_key: events, f"{payload_key}Total": total_events}
     if page == "ransomware":
         actors = Counter(item.get("attacker") or "未知" for item in events if item.get("attacker"))
         industries = Counter(item.get("industry") or "未知" for item in events if item.get("industry"))
@@ -1844,20 +1853,38 @@ def warm_api_payloads() -> None:
     # so the first page load is not blocked on cold work or stale cache.
     with get_db_connection() as connection:
         ensure_normalized_intelligence(connection, force=False, enrichment_budget=0)
-    build_intelligence_page_payload("ransomware")
-    build_intelligence_page_payload("data-leak")
+    build_intelligence_page_payload("ransomware", limit=500)
+    build_intelligence_page_payload("data-leak", limit=500)
     build_intelligence_payload()
-    build_event_records()
 
 
 def _runtime_db_status() -> dict[str, Any]:
     runtime_db_path = default_db_path()
     source_db_path = Path(os.environ.get("DARKWEB_COLLECTOR_SOURCE_DB_PATH", project_root() / "data" / "collector.db")).expanduser()
     meta_path = Path(os.environ.get("DARKWEB_RUNTIME_DB_META_PATH", f"{runtime_db_path}.meta.json")).expanduser()
+    active = active_release_config()
+    if active.get("database_engine") == "postgresql":
+        schema = str(active.get("database_schema") or "").strip()
+        return {
+            "database_engine": "postgresql",
+            "runtime_db_path": f"PostgreSQL / {schema}" if schema else "PostgreSQL",
+            "source_db_path": str(source_db_path),
+            "using_runtime_db": True,
+            "runtime_db_exists": True,
+            "source_db_exists": source_db_path.exists(),
+            "runtime_db_updated_at": active.get("activated_at") or "",
+            "runtime_db_size_mb": 0,
+            "meta_exists": True,
+            "prepared_at": active.get("activated_at") or "",
+            "copied_counts": {},
+            "skipped_tables": {},
+            "migration_job_id": active.get("job_id") or "",
+        }
 
     runtime_exists = runtime_db_path.exists()
     source_exists = source_db_path.exists()
     status = {
+        "database_engine": "sqlite",
         "runtime_db_path": str(runtime_db_path),
         "source_db_path": str(source_db_path),
         "using_runtime_db": runtime_db_path.resolve() != source_db_path.resolve() if runtime_exists and source_exists else str(runtime_db_path) != str(source_db_path),

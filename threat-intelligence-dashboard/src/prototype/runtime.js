@@ -1,4 +1,5 @@
-import { clearAuthSession } from '@/composables/useAuth'
+import { clearAuthSession, hasModuleAccess, isCurrentUserAdmin } from '@/composables/useAuth'
+import { MODULE_KEYS } from '@/config/permissions'
 import { openPlatformRemoteLogin } from '@/prototype/dataRuntime'
 
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
@@ -422,45 +423,50 @@ export function initializePrototype() {
     const brand = $('.brand', sidebar)
     if (brand) brand.innerHTML = `<span class="brand-mark" aria-hidden="true"><img src="/assets/xuanjian-mark.svg?v=8" alt=""></span><span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span>`
 
-    nav.innerHTML = `
+    const navLink = (path, label, activeClass = '') => (
+      `<a class="nav-link sub${activeClass}" href="${path}">${label}</a>`
+    )
+    const navGroup = (title, iconName, links, extraTitle = '') => links.length ? `
       <div class="nav-group">
-        <div class="nav-group-title">${icon('overview')}<span>威胁概况</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('dashboard.html')}" href="/">总览</a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('intelligence')}<span>威胁情报</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('intelligence.html')}" href="/intelligence">情报检索</a>
-          <a class="nav-link sub${active('ransomware.html')}" href="/ransomware">勒索情报</a>
-          <a class="nav-link sub${active('data-leak.html')}" href="/data-leak">数据泄露情报</a>
-          <a class="nav-link sub${active('vulnerabilities.html')}" href="/vulnerability-alerts">漏洞预警</a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('exposure')}<span>暴露监测</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('monitoring.html', 'netdisk')}" href="/document-exposure/netdisk">网盘监测</a>
-          <a class="nav-link sub${active('monitoring.html', 'library')}" href="/document-exposure/document-library">文库监测</a>
-          <a class="nav-link sub${active('monitoring.html', 'code')}" href="/document-exposure/code-monitoring">代码监测</a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('collect')}<span class="nav-module-alert" data-task-nav-alert aria-label="存在失败任务" hidden></span><span>采集运营</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('collector-sites.html')}" href="/collector-control/sites">站点管理</a>
-          <a class="nav-link sub${active('collector-sync.html')}" href="/collector-control/sync">同步中心</a>
-          <a class="nav-link sub${active('collector-runtime.html')}" href="/collector-control/runtime">运行环境</a>
-          <a class="nav-link sub${active('collector-failures.html')}" href="/collector-control/failures"><span>任务列表</span><span class="nav-alert-count num" data-task-nav-count hidden>0</span></a>
-        </div>
-      </div>
-      <div class="nav-group">
-        <div class="nav-group-title">${icon('settings')}<span>配置中心</span></div>
-        <div class="nav-group-items">
-          <a class="nav-link sub${active('settings.html')}" href="/settings">监测配置</a>
-        </div>
-      </div>`
+        <div class="nav-group-title">${icon(iconName)}${extraTitle}<span>${title}</span></div>
+        <div class="nav-group-items">${links.join('')}</div>
+      </div>` : ''
+    const currentPath = window.location.pathname
+    const activePath = (path) => currentPath === path || currentPath.startsWith(`${path}/`) ? ' active' : ''
+    const threatLinks = [
+      hasModuleAccess(MODULE_KEYS.INTELLIGENCE_SEARCH) && navLink('/intelligence', '情报检索', active('intelligence.html')),
+      hasModuleAccess(MODULE_KEYS.RANSOMWARE) && navLink('/ransomware', '勒索情报', active('ransomware.html')),
+      hasModuleAccess(MODULE_KEYS.DATA_LEAK) && navLink('/data-leak', '数据泄露情报', active('data-leak.html')),
+      hasModuleAccess(MODULE_KEYS.VULNERABILITY_ALERTS) && navLink('/vulnerability-alerts', '漏洞预警', active('vulnerabilities.html')),
+    ].filter(Boolean)
+    const exposureLinks = hasModuleAccess(MODULE_KEYS.FILE_MONITORING) ? [
+      navLink('/document-exposure/netdisk', '网盘监测', active('monitoring.html', 'netdisk')),
+      navLink('/document-exposure/document-library', '文库监测', active('monitoring.html', 'library')),
+      navLink('/document-exposure/code-monitoring', '代码监测', active('monitoring.html', 'code')),
+    ] : []
+    const collectorLinks = hasModuleAccess(MODULE_KEYS.COLLECTOR_CONTROL) ? [
+      navLink('/collector-control/sites', '站点管理', active('collector-sites.html')),
+      navLink('/collector-control/sync', '同步中心', active('collector-sync.html')),
+      navLink('/collector-control/runtime', '运行环境', active('collector-runtime.html')),
+      `<a class="nav-link sub${active('collector-failures.html')}" href="/collector-control/failures"><span>任务列表</span><span class="nav-alert-count num" data-task-nav-count hidden>0</span></a>`,
+    ] : []
+    const systemLinks = [
+      hasModuleAccess(MODULE_KEYS.FILE_MONITORING) && navLink('/settings', '监测配置', active('settings.html')),
+      isCurrentUserAdmin() && navLink('/settings/data-migration', '数据迁移', active('data-migration.html')),
+      isCurrentUserAdmin() && navLink('/account-management', '账号管理', activePath('/account-management')),
+    ].filter(Boolean)
+    nav.innerHTML = [
+      navGroup('威胁概况', 'overview', [navLink('/', '总览', active('dashboard.html'))]),
+      navGroup('威胁情报', 'intelligence', threatLinks),
+      navGroup('暴露监测', 'exposure', exposureLinks),
+      navGroup(
+        '采集运营',
+        'collect',
+        collectorLinks,
+        '<span class="nav-module-alert" data-task-nav-alert aria-label="存在失败任务" hidden></span>',
+      ),
+      navGroup('配置中心', 'settings', systemLinks),
+    ].join('')
 
     const footer = $('.sidebar-footer', sidebar)
     if (footer) footer.innerHTML = '<div class="sidebar-status"><i></i><span>监测服务运行中</span></div>'
@@ -574,6 +580,7 @@ export function initializePrototype() {
         avatar.replaceWith(button)
       }
       button.type = 'button'
+      button.textContent = accountName()
       button.setAttribute('aria-label', '个人账户')
       button.setAttribute('aria-haspopup', 'menu')
       button.setAttribute('aria-expanded', 'false')
@@ -726,9 +733,11 @@ export function initializePrototype() {
     pagination.innerHTML = `
       <span class="table-pagination-summary" aria-live="polite"></span>
       <div class="table-pagination-actions">
+        <button type="button" data-page-action="first" aria-label="第一页">«</button>
         <button type="button" data-page-action="previous" aria-label="上一页">‹</button>
-        <span class="table-pagination-current" aria-live="polite"></span>
+        <span class="table-pagination-current" aria-live="polite"><input type="number" min="1" value="1" data-page-input aria-label="跳转页码"> / <span data-page-count>1</span> 页</span>
         <button type="button" data-page-action="next" aria-label="下一页">›</button>
+        <button type="button" data-page-action="last" aria-label="最后一页">»</button>
       </div>`
 
     const empty = document.querySelector(`[data-table-empty="${table.id}"]`)
@@ -738,32 +747,79 @@ export function initializePrototype() {
     pagination.addEventListener('click', (event) => {
       const button = event.target.closest('[data-page-action]')
       if (!button || button.disabled) return
-      const direction = button.dataset.pageAction === 'next' ? 1 : -1
-      table.dataset.page = String(Math.max(1, Number(table.dataset.page || 1) + direction))
+      const action = button.dataset.pageAction
+      const currentPage = Math.max(1, Number(table.dataset.serverPage || table.dataset.page || 1))
+      const pageCount = Math.max(1, Number(table.dataset.serverPageCount || table.dataset.paginationPageCount || 1))
+      const targetPage = action === 'first'
+        ? 1
+        : action === 'last'
+          ? pageCount
+          : currentPage + (action === 'next' ? 1 : -1)
+      if (table.dataset.serverPagination === 'true') {
+        table.dispatchEvent(new CustomEvent('prototype:server-page', {
+          detail: { page: targetPage },
+        }))
+        return
+      }
+      table.dataset.page = String(Math.max(1, targetPage))
+      refreshTable(table)
+      saveTableState(table)
+    })
+    pagination.addEventListener('change', (event) => {
+      const input = event.target.closest('[data-page-input]')
+      if (!input) return
+      const pageCount = Math.max(1, Number(table.dataset.serverPageCount || table.dataset.paginationPageCount || 1))
+      const targetPage = Math.min(pageCount, Math.max(1, Number(input.value || 1)))
+      if (table.dataset.serverPagination === 'true') {
+        table.dispatchEvent(new CustomEvent('prototype:server-page', { detail: { page: targetPage } }))
+        return
+      }
+      table.dataset.page = String(targetPage)
       refreshTable(table)
       saveTableState(table)
     })
     return pagination
   }
 
-  function updateTablePagination(table, total, page, pageCount) {
+  function updateTablePagination(table, total, page, pageCount, pageSize = TABLE_PAGE_SIZE) {
     const pagination = ensureTablePagination(table)
     if (!pagination) return
     pagination.hidden = total === 0
 
-    const start = total ? (page - 1) * TABLE_PAGE_SIZE + 1 : 0
-    const end = Math.min(page * TABLE_PAGE_SIZE, total)
+    const start = total ? (page - 1) * pageSize + 1 : 0
+    const end = Math.min(page * pageSize, total)
     $('.table-pagination-summary', pagination).textContent = `第 ${start}–${end} 条，共 ${total} 条`
-    $('.table-pagination-current', pagination).textContent = `${page} / ${pageCount} 页`
+    table.dataset.paginationPageCount = String(pageCount)
+    const pageInput = $('[data-page-input]', pagination)
+    if (pageInput) {
+      pageInput.value = String(page)
+      pageInput.max = String(pageCount)
+    }
+    $('[data-page-count]', pagination).textContent = String(pageCount)
 
+    const first = $('[data-page-action="first"]', pagination)
     const previous = $('[data-page-action="previous"]', pagination)
     const next = $('[data-page-action="next"]', pagination)
+    const last = $('[data-page-action="last"]', pagination)
+    first.disabled = page <= 1
     previous.disabled = page <= 1
     next.disabled = page >= pageCount
+    last.disabled = page >= pageCount
   }
 
   function refreshTable(table) {
     const rows = $$('tbody tr:not([data-table-detail-row]), [data-table-row]:not([data-table-detail-row])', table)
+    if (table.dataset.serverPagination === 'true') {
+      const total = Math.max(0, Number(table.dataset.serverTotal || 0))
+      const page = Math.max(1, Number(table.dataset.serverPage || 1))
+      const pageSize = Math.max(1, Number(table.dataset.serverPageSize || TABLE_PAGE_SIZE))
+      const pageCount = Math.max(1, Number(table.dataset.serverPageCount || 1))
+      rows.forEach((row) => { row.hidden = false })
+      const empty = document.querySelector(`[data-table-empty="${table.id}"]`)
+      if (empty) empty.style.display = rows.length ? 'none' : 'block'
+      updateTablePagination(table, total, page, pageCount, pageSize)
+      return
+    }
     const discoveredTimes = rows
       .map((row) => Date.parse(row.dataset.discoveredAt || ''))
       .filter(Number.isFinite)
@@ -791,6 +847,7 @@ export function initializePrototype() {
     $$('[data-table-search]').forEach((input) => {
       const table = document.getElementById(input.dataset.tableSearch)
       if (!table) return
+      if (table.dataset.serverPagination === 'true') return
       input.addEventListener('input', () => {
         table.dataset.query = input.value
         table.dataset.page = '1'
@@ -829,6 +886,13 @@ export function initializePrototype() {
       if (table) statefulTables.add(table)
     })
     statefulTables.forEach((table) => {
+      if (table.dataset.serverPagination === 'true') {
+        if (table.matches('[data-table]')) {
+          table.addEventListener('prototype:rows-updated', () => refreshTable(table))
+        }
+        refreshTable(table)
+        return
+      }
       const restored = restoreTableState(table)
       if (table.matches('[data-table]')) {
         table.addEventListener('prototype:rows-updated', () => {
@@ -853,6 +917,12 @@ export function initializePrototype() {
           })
           if (table) {
             table.dataset.activeTab = tab.dataset.tab || 'all'
+            if (table.dataset.serverPagination === 'true') {
+              table.dispatchEvent(new CustomEvent('prototype:server-filter', {
+                detail: { eventType: table.dataset.activeTab },
+              }))
+              return
+            }
             refreshTable(table)
             saveTableState(table)
           }
@@ -869,10 +939,25 @@ export function initializePrototype() {
     const requestedSettingsTab = new URLSearchParams(window.location.search).get('tab')
     const settingsTabAliases = { 'code-terms': 'rules' }
     const resolvedSettingsTab = settingsTabAliases[requestedSettingsTab] || requestedSettingsTab
-    const settingsTabs = ['objects', 'access', 'rules', 'notifications']
+    const settingsTabs = ['objects', 'rules', 'notifications']
     if (settingsTabs.includes(resolvedSettingsTab)) {
       $(`.settings-tabs .tab[data-tab="${resolvedSettingsTab}"]`)?.click()
     }
+    const requestedCollectorSitesTab = new URLSearchParams(window.location.search).get('view')
+    if (['sites', 'access'].includes(requestedCollectorSitesTab)) {
+      $(`.collector-site-tabs .tab[data-tab="${requestedCollectorSitesTab}"]`)?.click()
+    }
+    $$('[data-collector-sites-tab]').forEach((button) => {
+      button.addEventListener('click', () => {
+        $(`.collector-site-tabs .tab[data-tab="${button.dataset.collectorSitesTab}"]`)?.click()
+        const moduleFilter = $('[data-filter-target="collector-health-table"][data-filter-key="module"]')
+        if (moduleFilter && button.dataset.settingsModule) {
+          moduleFilter.value = button.dataset.settingsModule
+          moduleFilter.dispatchEvent(new Event('change'))
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' })
+      })
+    })
     const requestedSettingsModule = new URLSearchParams(window.location.search).get('module')
     const settingsModule = ['netdisk', 'library'].includes(requestedSettingsModule) ? requestedSettingsModule : ''
     if (settingsModule) {
@@ -1026,18 +1111,30 @@ export function initializePrototype() {
       window.scrollTo({ top: Math.max(0, section.offsetTop - 66), behavior: reduceMotion ? 'auto' : 'smooth' })
     }
 
+    const openServerSearch = (value) => {
+      const query = String(value || '').trim()
+      const url = new URL(window.location.href)
+      if (query) url.searchParams.set('q', query)
+      else url.searchParams.delete('q')
+      url.searchParams.delete('page')
+      const target = `${url.pathname}${url.search}`
+      if (`${window.location.pathname}${window.location.search}` === target) {
+        moveToResults()
+        return
+      }
+      window.location.href = target
+    }
+
     form.addEventListener('submit', (event) => {
       event.preventDefault()
-      input?.dispatchEvent(new Event('input'))
-      moveToResults()
+      openServerSearch(input?.value)
     })
 
     $$('[data-intel-hot]').forEach((button) => {
       button.addEventListener('click', () => {
         if (!input) return
         input.value = button.dataset.intelHot || ''
-        input.dispatchEvent(new Event('input'))
-        moveToResults()
+        openServerSearch(input.value)
       })
     })
 
@@ -1049,6 +1146,14 @@ export function initializePrototype() {
     })
 
     $('[data-intel-reset]')?.addEventListener('click', () => {
+      if (results.dataset.serverPagination === 'true') {
+        window.location.href = '/intelligence'
+        return
+      }
+      if (new URLSearchParams(window.location.search).has('q')) {
+        openServerSearch('')
+        return
+      }
       if (input) {
         input.value = ''
         input.dispatchEvent(new Event('input'))
@@ -1059,6 +1164,12 @@ export function initializePrototype() {
     })
 
     sort?.addEventListener('change', () => {
+      if (results.dataset.serverPagination === 'true') {
+        results.dispatchEvent(new CustomEvent('prototype:server-sort', {
+          detail: { sort: sort.value },
+        }))
+        return
+      }
       const items = $$('[data-table-row]', results)
       items.sort((a, b) => {
         if (sort.value === 'oldest') return Number(a.dataset.date || 0) - Number(b.dataset.date || 0)
@@ -2412,7 +2523,8 @@ export function initializePrototype() {
       bindText('browser-workers', `${Number(browser.browser_worker_count || 0)}/${Number(browser.browser_concurrency || browser.configured_concurrency || 2)}`)
       bindText('browser-pool', `${Number(pool.running_or_pending || 0)}/${Number(pool.max_workers || browser.browser_concurrency || 2)}`)
       const runtime = payload.runtime_db || {}
-      setBadge('runtime-db-mode', runtime.using_runtime_db ? 'WSL 运行库' : 'Windows 源库', runtime.using_runtime_db ? 'badge-success' : 'badge-high')
+      const postgresActive = runtime.database_engine === 'postgresql'
+      setBadge('runtime-db-mode', postgresActive ? 'PostgreSQL' : (runtime.using_runtime_db ? 'WSL 运行库' : 'Windows 源库'), postgresActive || runtime.using_runtime_db ? 'badge-success' : 'badge-high')
       bindText('runtime-db-path', runtime.runtime_db_path || '—')
       bindText('source-db-path', runtime.source_db_path || '—')
       bindText('runtime-prepared-at', formatDate(runtime.prepared_at))
@@ -2467,11 +2579,13 @@ export function initializePrototype() {
         tasks.push(['/api/ransomware/sync/status', renderRansomwareSync, 'ransomware'])
         tasks.push(['/api/ransomware/config', renderRansomwareConfig, 'ransomware'])
       }
-      if (root.hasAttribute('data-needs-code-config')) {
+      if (root.hasAttribute('data-needs-platform-access')) {
         tasks.push(['/api/code-monitoring/github-app', renderGithubApp, 'github'])
         tasks.push(['/api/captcha-providers/chaojiying', renderChaojiying, 'chaojiying'])
         tasks.push(['/api/platform-sessions/changan/auto-login', renderChanganAutoLogin, 'changan'])
         tasks.push(['/api/platform-sessions?module=code_monitoring', renderCodeSessions, 'code-sessions'])
+      }
+      if (root.hasAttribute('data-needs-code-config')) {
         tasks.push(['/api/code-monitoring/watchlists', renderCodeWatchlists, 'watchlists'])
         tasks.push(['/api/exposure-watchlists', renderExposureWatchlists, 'watchlists'])
       }

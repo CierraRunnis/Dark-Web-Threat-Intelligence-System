@@ -1,6 +1,16 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hasAuthSession, isAuthSessionValidated, loadCurrentUser } from '@/composables/useAuth'
+import { ElMessage } from 'element-plus'
+import {
+  hasAuthSession,
+  hasModuleAccess,
+  isAuthSessionValidated,
+  isCurrentUserAdmin,
+  loadCurrentUser,
+} from '@/composables/useAuth'
+import { ASSIGNABLE_MODULE_KEYS, MODULE_KEYS } from '@/config/permissions'
 import PrototypeScreen from '@/views/PrototypeScreen.vue'
+import DataMigration from '@/views/DataMigration.vue'
+import AccountManagement from '@/views/AccountManagement.vue'
 
 const screen = (path, name, file, meta = {}) => ({
   path,
@@ -31,6 +41,13 @@ const routes = [
   screen('/collector-control/failures', 'CollectorFailures', 'collector-failures.html'),
   screen('/collector-control/run/:runId', 'CollectorRunDetail', 'collector-run-detail.html'),
   screen('/settings', 'Settings', 'settings.html'),
+  { path: '/settings/data-migration', name: 'DataMigration', component: DataMigration, meta: { adminOnly: true } },
+  {
+    path: '/account-management',
+    name: 'AccountManagement',
+    component: AccountManagement,
+    meta: { adminOnly: true, layout: 'prototype-vue' },
+  },
   screen('/event/:eventId', 'EventDetail', 'event-detail.html'),
   { path: '/threat-situation', redirect: '/' },
   { path: '/collector-control', redirect: '/collector-control/sites' },
@@ -50,6 +67,38 @@ const router = createRouter({
   routes,
 })
 
+const PATH_MODULES = [
+  ['/intelligence', MODULE_KEYS.INTELLIGENCE_SEARCH],
+  ['/ransomware', MODULE_KEYS.RANSOMWARE],
+  ['/data-leak', MODULE_KEYS.DATA_LEAK],
+  ['/vulnerability-alerts', MODULE_KEYS.VULNERABILITY_ALERTS],
+  ['/collector-control', MODULE_KEYS.COLLECTOR_CONTROL],
+  ['/document-exposure', MODULE_KEYS.FILE_MONITORING],
+  ['/settings', MODULE_KEYS.FILE_MONITORING],
+]
+
+function eventDetailModule(to) {
+  const rawModule = Array.isArray(to.query.module) ? to.query.module[0] : to.query.module
+  const requestedModule = String(rawModule || '')
+  if (ASSIGNABLE_MODULE_KEYS.includes(requestedModule)) return requestedModule
+
+  const eventId = String(to.params.eventId || '')
+  if (eventId.startsWith('vuln:')) return MODULE_KEYS.VULNERABILITY_ALERTS
+  if (eventId.startsWith('document:')) return MODULE_KEYS.FILE_MONITORING
+  return ''
+}
+
+function requiredModuleForRoute(to) {
+  if (to.name === 'EventDetail') return eventDetailModule(to)
+  const match = PATH_MODULES.find(([path]) => to.path === path || to.path.startsWith(`${path}/`))
+  return match?.[1] || ''
+}
+
+function permissionDeniedRedirect(message) {
+  ElMessage.warning(message)
+  return { name: 'Dashboard' }
+}
+
 router.beforeEach(async (to) => {
   if (to.meta.public) {
     if (!hasAuthSession()) return true
@@ -60,6 +109,18 @@ router.beforeEach(async (to) => {
   if (!hasAuthSession()) return { path: '/login', query: { redirect: to.fullPath } }
   if (!isAuthSessionValidated() && !(await loadCurrentUser())) {
     return { path: '/login', query: { redirect: to.fullPath } }
+  }
+
+  if (to.meta.adminOnly && !isCurrentUserAdmin()) {
+    return permissionDeniedRedirect('仅管理员可以访问该功能')
+  }
+
+  const requiredModule = requiredModuleForRoute(to)
+  if (to.name === 'EventDetail' && !requiredModule && !isCurrentUserAdmin()) {
+    return permissionDeniedRedirect('无法确认事件所属模块，暂无权限查看详情')
+  }
+  if (requiredModule && !hasModuleAccess(requiredModule)) {
+    return permissionDeniedRedirect('当前账号没有该模块的访问权限')
   }
   return true
 })

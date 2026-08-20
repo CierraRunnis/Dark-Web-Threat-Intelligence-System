@@ -8,7 +8,13 @@ import sqlite3
 from threading import Lock
 import time
 
-from darkweb_collector.runtime import default_db_path
+from darkweb_collector.postgres_backend import connect_postgres
+from darkweb_collector.runtime import (
+    active_release_config,
+    configured_database_schema,
+    configured_database_url,
+    default_db_path,
+)
 
 
 class ManagedConnection(sqlite3.Connection):
@@ -693,6 +699,17 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
+    database_url = configured_database_url()
+    if database_url:
+        if not database_url.lower().startswith(("postgres://", "postgresql://")):
+            raise ValueError("configured database URL must use PostgreSQL")
+        active = active_release_config()
+        return connect_postgres(
+            database_url,
+            schema=configured_database_schema(),
+            expected_fingerprint=str(active.get("schema_fingerprint") or "").strip(),
+            expected_version=str(active.get("schema_version") or "0002_sqlite_compat").strip(),
+        )
     db_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = db_path.resolve()
     last_error: Exception | None = None
@@ -1561,19 +1578,102 @@ def replace_normalized_intelligence_events(
     )
 
 
-def list_normalized_intelligence_events(connection: sqlite3.Connection) -> list[dict]:
+_NORMALIZED_INTELLIGENCE_SEARCH_EXPRESSION = (
+    "LOWER(COALESCE(title, '') || ' ' || COALESCE(attacker, '') || ' ' || "
+    "COALESCE(victim, '') || ' ' || COALESCE(victim_key, '') || ' ' || "
+    "COALESCE(industry, '') || ' ' || "
+    "COALESCE(region, '') || ' ' || COALESCE(source_site_name, '') || ' ' || "
+    "COALESCE(category, '') || ' ' || COALESCE(detail_text, '') || ' ' || "
+    "COALESCE(source_url, '') || ' ' || COALESCE(event_metadata_json, ''))"
+)
+
+
+def _normalized_intelligence_filters(event_type: str = "", query: str = "") -> tuple[str, list[object]]:
+    conditions = []
+    parameters: list[object] = []
+    if event_type:
+        conditions.append("event_type = ?")
+        parameters.append(event_type)
+    for term in str(query or "").casefold().split():
+        conditions.append(f"{_NORMALIZED_INTELLIGENCE_SEARCH_EXPRESSION} LIKE ?")
+        parameters.append(f"%{term}%")
+    where = " WHERE " + " AND ".join(conditions) if conditions else ""
+    return where, parameters
+
+
+def list_normalized_intelligence_events(
+    connection: sqlite3.Connection,
+    *,
+    event_type: str = "",
+    limit: int | None = None,
+    offset: int = 0,
+    query: str = "",
+    sort: str = "latest",
+) -> list[dict]:
+    order_by = {
+        "latest": "COALESCE(NULLIF(disclosure_time, ''), updated_at) DESC, event_id DESC",
+        "oldest": "COALESCE(NULLIF(disclosure_time, ''), updated_at) ASC, event_id ASC",
+        "severity": (
+            "CASE LOWER(severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
+            "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, "
+            "risk_score DESC, COALESCE(NULLIF(disclosure_time, ''), updated_at) DESC, event_id DESC"
+        ),
+    }.get(sort)
+    if order_by is None:
+        raise ValueError(f"unsupported normalized intelligence sort: {sort}")
+    if offset < 0:
+        raise ValueError("offset must not be negative")
+    if offset and limit is None:
+        raise ValueError("offset requires limit")
+    where, parameters = _normalized_intelligence_filters(event_type, query)
+    limit_sql = " LIMIT ? OFFSET ?" if limit is not None else ""
+    if limit is not None:
+        parameters.extend((int(limit), int(offset)))
     cursor = connection.execute(
-        """
+        f"""
         SELECT event_id, source_kind, raw_source_type, source_site_name, source_record_id,
                event_type, category, leak_type, title, attacker, victim, victim_key,
                industry, region, disclosure_time, severity, risk_score, source_url,
                detail_text, mirror_resources_json, screenshot_resources_json,
                json_preview_url, risk_reasons_json, event_metadata_json, updated_at
         FROM normalized_intelligence_events
-        ORDER BY COALESCE(disclosure_time, updated_at) DESC, event_id DESC
-        """
+        {where}
+        ORDER BY {order_by}
+        {limit_sql}
+        """,
+        tuple(parameters),
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def count_normalized_intelligence_events(
+    connection: sqlite3.Connection,
+    event_type: str = "",
+    query: str = "",
+) -> int:
+    where, parameters = _normalized_intelligence_filters(event_type, query)
+    row = connection.execute(
+        f"SELECT COUNT(*) FROM normalized_intelligence_events{where}",
+        tuple(parameters),
+    ).fetchone()
+    return int(row[0])
+
+
+def count_normalized_intelligence_events_by_type(
+    connection: sqlite3.Connection,
+    query: str = "",
+) -> dict[str, int]:
+    where, parameters = _normalized_intelligence_filters(query=query)
+    rows = connection.execute(
+        f"""
+        SELECT event_type, COUNT(*) AS event_count
+        FROM normalized_intelligence_events
+        {where}
+        GROUP BY event_type
+        """,
+        tuple(parameters),
+    ).fetchall()
+    return {str(row[0]): int(row[1]) for row in rows}
 
 
 def get_normalized_intelligence_event(
