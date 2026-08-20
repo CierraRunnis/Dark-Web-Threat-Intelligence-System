@@ -683,13 +683,31 @@ def jobs() -> dict:
     return _reload_api_modules().build_jobs_payload()
 
 
-@app.get("/api/events")
-def events(limit: int | None = None, q: str = "") -> list[dict]:
-    if limit is not None and not 1 <= limit <= 2000:
-        raise HTTPException(status_code=422, detail="limit 必须在 1 到 2000 之间")
+@app.get("/api/events/search")
+def event_search(
+    page: int = 1,
+    page_size: int = 20,
+    q: str = "",
+    event_type: str = "all",
+    sort: str = "latest",
+) -> dict:
+    if page < 1:
+        raise HTTPException(status_code=422, detail="page 必须大于等于 1")
+    if not 1 <= page_size <= 100:
+        raise HTTPException(status_code=422, detail="page_size 必须在 1 到 100 之间")
     if len(q) > 200:
         raise HTTPException(status_code=422, detail="检索关键词不能超过 200 个字符")
-    return _reload_api_modules().build_event_records(limit=limit, query=q)
+    if event_type not in {"all", "ransomware", "data-leak", "vulnerability"}:
+        raise HTTPException(status_code=422, detail="不支持的事件类型")
+    if sort not in {"latest", "oldest", "severity"}:
+        raise HTTPException(status_code=422, detail="不支持的排序方式")
+    return _reload_api_modules().build_event_search_payload(
+        page=page,
+        page_size=page_size,
+        query=q.strip(),
+        event_type=event_type,
+        sort=sort,
+    )
 
 
 @app.get("/api/events/{event_id}")

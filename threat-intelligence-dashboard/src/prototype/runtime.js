@@ -733,9 +733,11 @@ export function initializePrototype() {
     pagination.innerHTML = `
       <span class="table-pagination-summary" aria-live="polite"></span>
       <div class="table-pagination-actions">
+        <button type="button" data-page-action="first" aria-label="第一页">«</button>
         <button type="button" data-page-action="previous" aria-label="上一页">‹</button>
-        <span class="table-pagination-current" aria-live="polite"></span>
+        <span class="table-pagination-current" aria-live="polite"><input type="number" min="1" value="1" data-page-input aria-label="跳转页码"> / <span data-page-count>1</span> 页</span>
         <button type="button" data-page-action="next" aria-label="下一页">›</button>
+        <button type="button" data-page-action="last" aria-label="最后一页">»</button>
       </div>`
 
     const empty = document.querySelector(`[data-table-empty="${table.id}"]`)
@@ -745,32 +747,79 @@ export function initializePrototype() {
     pagination.addEventListener('click', (event) => {
       const button = event.target.closest('[data-page-action]')
       if (!button || button.disabled) return
-      const direction = button.dataset.pageAction === 'next' ? 1 : -1
-      table.dataset.page = String(Math.max(1, Number(table.dataset.page || 1) + direction))
+      const action = button.dataset.pageAction
+      const currentPage = Math.max(1, Number(table.dataset.serverPage || table.dataset.page || 1))
+      const pageCount = Math.max(1, Number(table.dataset.serverPageCount || table.dataset.paginationPageCount || 1))
+      const targetPage = action === 'first'
+        ? 1
+        : action === 'last'
+          ? pageCount
+          : currentPage + (action === 'next' ? 1 : -1)
+      if (table.dataset.serverPagination === 'true') {
+        table.dispatchEvent(new CustomEvent('prototype:server-page', {
+          detail: { page: targetPage },
+        }))
+        return
+      }
+      table.dataset.page = String(Math.max(1, targetPage))
+      refreshTable(table)
+      saveTableState(table)
+    })
+    pagination.addEventListener('change', (event) => {
+      const input = event.target.closest('[data-page-input]')
+      if (!input) return
+      const pageCount = Math.max(1, Number(table.dataset.serverPageCount || table.dataset.paginationPageCount || 1))
+      const targetPage = Math.min(pageCount, Math.max(1, Number(input.value || 1)))
+      if (table.dataset.serverPagination === 'true') {
+        table.dispatchEvent(new CustomEvent('prototype:server-page', { detail: { page: targetPage } }))
+        return
+      }
+      table.dataset.page = String(targetPage)
       refreshTable(table)
       saveTableState(table)
     })
     return pagination
   }
 
-  function updateTablePagination(table, total, page, pageCount) {
+  function updateTablePagination(table, total, page, pageCount, pageSize = TABLE_PAGE_SIZE) {
     const pagination = ensureTablePagination(table)
     if (!pagination) return
     pagination.hidden = total === 0
 
-    const start = total ? (page - 1) * TABLE_PAGE_SIZE + 1 : 0
-    const end = Math.min(page * TABLE_PAGE_SIZE, total)
+    const start = total ? (page - 1) * pageSize + 1 : 0
+    const end = Math.min(page * pageSize, total)
     $('.table-pagination-summary', pagination).textContent = `第 ${start}–${end} 条，共 ${total} 条`
-    $('.table-pagination-current', pagination).textContent = `${page} / ${pageCount} 页`
+    table.dataset.paginationPageCount = String(pageCount)
+    const pageInput = $('[data-page-input]', pagination)
+    if (pageInput) {
+      pageInput.value = String(page)
+      pageInput.max = String(pageCount)
+    }
+    $('[data-page-count]', pagination).textContent = String(pageCount)
 
+    const first = $('[data-page-action="first"]', pagination)
     const previous = $('[data-page-action="previous"]', pagination)
     const next = $('[data-page-action="next"]', pagination)
+    const last = $('[data-page-action="last"]', pagination)
+    first.disabled = page <= 1
     previous.disabled = page <= 1
     next.disabled = page >= pageCount
+    last.disabled = page >= pageCount
   }
 
   function refreshTable(table) {
     const rows = $$('tbody tr:not([data-table-detail-row]), [data-table-row]:not([data-table-detail-row])', table)
+    if (table.dataset.serverPagination === 'true') {
+      const total = Math.max(0, Number(table.dataset.serverTotal || 0))
+      const page = Math.max(1, Number(table.dataset.serverPage || 1))
+      const pageSize = Math.max(1, Number(table.dataset.serverPageSize || TABLE_PAGE_SIZE))
+      const pageCount = Math.max(1, Number(table.dataset.serverPageCount || 1))
+      rows.forEach((row) => { row.hidden = false })
+      const empty = document.querySelector(`[data-table-empty="${table.id}"]`)
+      if (empty) empty.style.display = rows.length ? 'none' : 'block'
+      updateTablePagination(table, total, page, pageCount, pageSize)
+      return
+    }
     const discoveredTimes = rows
       .map((row) => Date.parse(row.dataset.discoveredAt || ''))
       .filter(Number.isFinite)
@@ -798,6 +847,7 @@ export function initializePrototype() {
     $$('[data-table-search]').forEach((input) => {
       const table = document.getElementById(input.dataset.tableSearch)
       if (!table) return
+      if (table.dataset.serverPagination === 'true') return
       input.addEventListener('input', () => {
         table.dataset.query = input.value
         table.dataset.page = '1'
@@ -836,6 +886,13 @@ export function initializePrototype() {
       if (table) statefulTables.add(table)
     })
     statefulTables.forEach((table) => {
+      if (table.dataset.serverPagination === 'true') {
+        if (table.matches('[data-table]')) {
+          table.addEventListener('prototype:rows-updated', () => refreshTable(table))
+        }
+        refreshTable(table)
+        return
+      }
       const restored = restoreTableState(table)
       if (table.matches('[data-table]')) {
         table.addEventListener('prototype:rows-updated', () => {
@@ -860,6 +917,12 @@ export function initializePrototype() {
           })
           if (table) {
             table.dataset.activeTab = tab.dataset.tab || 'all'
+            if (table.dataset.serverPagination === 'true') {
+              table.dispatchEvent(new CustomEvent('prototype:server-filter', {
+                detail: { eventType: table.dataset.activeTab },
+              }))
+              return
+            }
             refreshTable(table)
             saveTableState(table)
           }
@@ -1050,9 +1113,12 @@ export function initializePrototype() {
 
     const openServerSearch = (value) => {
       const query = String(value || '').trim()
-      const target = query ? `/intelligence?q=${encodeURIComponent(query)}` : '/intelligence'
+      const url = new URL(window.location.href)
+      if (query) url.searchParams.set('q', query)
+      else url.searchParams.delete('q')
+      url.searchParams.delete('page')
+      const target = `${url.pathname}${url.search}`
       if (`${window.location.pathname}${window.location.search}` === target) {
-        input?.dispatchEvent(new Event('input'))
         moveToResults()
         return
       }
@@ -1080,6 +1146,10 @@ export function initializePrototype() {
     })
 
     $('[data-intel-reset]')?.addEventListener('click', () => {
+      if (results.dataset.serverPagination === 'true') {
+        window.location.href = '/intelligence'
+        return
+      }
       if (new URLSearchParams(window.location.search).has('q')) {
         openServerSearch('')
         return
@@ -1094,6 +1164,12 @@ export function initializePrototype() {
     })
 
     sort?.addEventListener('change', () => {
+      if (results.dataset.serverPagination === 'true') {
+        results.dispatchEvent(new CustomEvent('prototype:server-sort', {
+          detail: { sort: sort.value },
+        }))
+        return
+      }
       const items = $$('[data-table-row]', results)
       items.sort((a, b) => {
         if (sort.value === 'oldest') return Number(a.dataset.date || 0) - Number(b.dataset.date || 0)

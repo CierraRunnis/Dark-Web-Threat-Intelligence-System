@@ -47,13 +47,13 @@ function showToast(message) {
 }
 
 const JSON_CACHE_TTL_MS = 15_000
-const INTELLIGENCE_INITIAL_LIMIT = 500
+const INTELLIGENCE_PAGE_SIZE = 20
 const PAGE_EVENT_LIMIT = 500
 const CACHEABLE_JSON_PATHS = new Set([
   '/api/intelligence',
   '/api/intelligence/ransomware',
   '/api/intelligence/data-leak',
-  '/api/events',
+  '/api/events/search',
 ])
 const jsonResponseCache = new Map()
 const inFlightJsonRequests = new Map()
@@ -612,7 +612,6 @@ function prepareDataPage(root, file) {
   queryAll(root, '[data-pagination-for]').forEach((pagination) => {
     pagination.hidden = true
     setText(pagination, '.table-pagination-summary', '')
-    setText(pagination, '.table-pagination-current', '')
   })
   setConicChart(query(root, '.situation-donut'), [], ['var(--danger)'], '--runtime-donut')
   queryAll(root, '.severity-donut, .monitor-donut, .code-risk-donut, .signal-ring').forEach((node) => setConicChart(node, [], ['var(--border)']))
@@ -641,7 +640,7 @@ function prepareDataPage(root, file) {
       list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
       list.replaceChildren()
     }
-    queryAll(root, '.intel-result-tabs b, [data-table-count="intel-results"]').forEach((node) => { node.textContent = '0' })
+    queryAll(root, '.intel-result-tabs b, [data-intel-total]').forEach((node) => { node.textContent = '0' })
   }
 
   if (INCIDENT_FILES.has(file) || REVIEW_FILES.has(file) || file === 'collector-run-detail.html') {
@@ -1141,7 +1140,7 @@ async function hydrateDashboard(root, state) {
   state.refresh = () => hydrateDashboard(root, state)
 }
 
-function renderIntelligenceItems(root, events) {
+function renderIntelligenceItems(root, events, counts = null) {
   const list = query(root, '#intel-results')
   if (!list) return
   const template = list.__runtimeItemTemplate?.cloneNode(true)
@@ -1193,10 +1192,16 @@ function renderIntelligenceItems(root, events) {
   })
   list.replaceChildren(...rows)
   list.dispatchEvent(new CustomEvent('prototype:rows-updated'))
-  for (const type of ['all', 'ransomware', 'data-leak', 'vulnerability']) {
-    const count = type === 'all' ? rows.length : rows.filter((row) => row.dataset.category === type).length
-    setText(root, `.intel-result-tabs [data-tab="${type}"] b`, count)
+  const resolvedCounts = counts || {
+    all: rows.length,
+    ransomware: rows.filter((row) => row.dataset.category === 'ransomware').length,
+    'data-leak': rows.filter((row) => row.dataset.category === 'data-leak').length,
+    vulnerability: rows.filter((row) => row.dataset.category === 'vulnerability').length,
   }
+  for (const type of ['all', 'ransomware', 'data-leak', 'vulnerability']) {
+    setText(root, `.intel-result-tabs [data-tab="${type}"] b`, Number(resolvedCounts[type] || 0))
+  }
+  setText(root, '[data-intel-total]', Number(resolvedCounts.all || 0))
 }
 
 async function hydrateIntelligence(root) {
@@ -1205,11 +1210,79 @@ async function hydrateIntelligence(root) {
     list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
     list.replaceChildren()
   }
-  const parameters = new URLSearchParams({ limit: String(INTELLIGENCE_INITIAL_LIMIT) })
-  const searchQuery = new URLSearchParams(window.location.search).get('q')?.trim()
+  if (!list) return
+
+  const locationParameters = new URLSearchParams(window.location.search)
+  const searchQuery = locationParameters.get('q')?.trim() || ''
+  const requestedPage = Math.max(1, Number(locationParameters.get('page') || 1) || 1)
+  const requestedType = ['ransomware', 'data-leak', 'vulnerability'].includes(locationParameters.get('type'))
+    ? locationParameters.get('type')
+    : 'all'
+  const requestedSort = ['oldest', 'severity'].includes(locationParameters.get('sort'))
+    ? locationParameters.get('sort')
+    : 'latest'
+
+  const searchInput = query(root, '[data-table-search="intel-results"]')
+  if (searchInput) searchInput.value = searchQuery
+  const sortControl = query(root, '[data-intel-sort]')
+  if (sortControl) sortControl.value = requestedSort
+  list.dataset.activeTab = requestedType
+  queryAll(root, '.intel-result-tabs .tab').forEach((button) => {
+    const active = button.dataset.tab === requestedType
+    button.classList.toggle('active', active)
+    button.setAttribute('aria-selected', String(active))
+  })
+
+  const navigate = (changes, resetPage = false) => {
+    const url = new URL(window.location.href)
+    Object.entries(changes).forEach(([key, value]) => {
+      if (value == null || value === '' || value === 'all' || (key === 'sort' && value === 'latest')) {
+        url.searchParams.delete(key)
+      } else {
+        url.searchParams.set(key, String(value))
+      }
+    })
+    if (resetPage) url.searchParams.delete('page')
+    const target = `${url.pathname}${url.search}`
+    if (target === `${window.location.pathname}${window.location.search}`) return
+    const link = document.createElement('a')
+    link.href = target
+    link.hidden = true
+    root.appendChild(link)
+    link.click()
+    link.remove()
+  }
+
+  list.addEventListener('prototype:server-page', (event) => {
+    navigate({ page: Math.max(1, Number(event.detail?.page || 1)) })
+  })
+  list.addEventListener('prototype:server-filter', (event) => {
+    navigate({ type: event.detail?.eventType || 'all' }, true)
+  })
+  list.addEventListener('prototype:server-sort', (event) => {
+    navigate({ sort: event.detail?.sort || 'latest' }, true)
+  })
+
+  const parameters = new URLSearchParams({
+    page: String(requestedPage),
+    page_size: String(INTELLIGENCE_PAGE_SIZE),
+    event_type: requestedType,
+    sort: requestedSort,
+  })
   if (searchQuery) parameters.set('q', searchQuery)
-  const events = (await requestJson(`/api/events?${parameters}`, { preferCached: true })).filter((item) => eventType(item))
-  renderIntelligenceItems(root, events)
+  const payload = await requestJson(`/api/events/search?${parameters}`, { preferCached: true })
+  const events = (payload.items || []).filter((item) => eventType(item))
+  list.dataset.serverTotal = String(payload.total || 0)
+  list.dataset.serverPage = String(payload.page || 1)
+  list.dataset.serverPageSize = String(payload.page_size || INTELLIGENCE_PAGE_SIZE)
+  list.dataset.serverPageCount = String(payload.page_count || 1)
+  if (Number(payload.page || 1) !== requestedPage) {
+    const normalizedUrl = new URL(window.location.href)
+    if (Number(payload.page || 1) > 1) normalizedUrl.searchParams.set('page', String(payload.page))
+    else normalizedUrl.searchParams.delete('page')
+    window.history.replaceState({}, '', `${normalizedUrl.pathname}${normalizedUrl.search}`)
+  }
+  renderIntelligenceItems(root, events, payload.counts || {})
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
   const recent = events.filter((item) => {
     const timestamp = new Date(item.updatedTimeRaw || item.updated_time_raw || item.disclosureTimeRaw || item.disclosure_time_raw || 0).getTime()

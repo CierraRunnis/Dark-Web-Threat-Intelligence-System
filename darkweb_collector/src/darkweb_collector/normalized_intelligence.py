@@ -3117,13 +3117,17 @@ def load_normalized_event_page(
     *,
     event_type: str = "",
     limit: int = 500,
+    offset: int = 0,
     query: str = "",
+    sort: str = "latest",
 ) -> list[dict[str, Any]]:
     rows = list_normalized_intelligence_events(
         connection,
         event_type=event_type,
         limit=limit,
+        offset=offset,
         query=query,
+        sort=sort,
     )
     if rows:
         return [_hydrate_event_row(row) for row in rows]
@@ -3133,7 +3137,9 @@ def load_normalized_event_page(
             connection,
             event_type=event_type,
             limit=limit,
+            offset=offset,
             query=query,
+            sort=sort,
         )
         return [_hydrate_event_row(row) for row in rows]
     return []

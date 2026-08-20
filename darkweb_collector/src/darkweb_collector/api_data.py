@@ -19,6 +19,7 @@ from darkweb_collector.document_exposure import (
 )
 from darkweb_collector.db import (
     count_normalized_intelligence_events,
+    count_normalized_intelligence_events_by_type,
     get_db_connection,
     get_normalized_intelligence_cache_state,
     get_site_connectivity_probe_map,
@@ -646,131 +647,56 @@ def _build_victim_event_payload(row_dict: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_forum_event_records(connection) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT d.site_name, d.section, d.topic_url, d.content, d.attachments, d.victims, d.attackers, d.fetched_at, d.raw_json,
-               COALESCE(t.title, d.topic_url) AS title,
-               COALESCE((SELECT industry FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'other') AS industry,
-               COALESCE((SELECT region FROM forum_victims fv WHERE fv.forum_detail_id = d.id LIMIT 1), 'unknown') AS region
-        FROM forum_details d
-        LEFT JOIN forum_topics t
-          ON t.site_name = d.site_name
-         AND t.section = d.section
-         AND t.url = d.topic_url
-        ORDER BY datetime(d.fetched_at) DESC
-        """
-    ).fetchall()
-    return [_build_forum_event_payload(dict(row)) for row in rows]
+EVENT_SEARCH_TYPES = {
+    "all": "",
+    "ransomware": "ransomware",
+    "data-leak": "data_leak",
+    "vulnerability": "vulnerability",
+}
 
 
-def _build_victim_event_records(connection) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        """
-        SELECT v.site_name, v.source_url, v.name, v.display_label, v.detail_url, v.status, v.published_at_utc, v.raw_json,
-               v.last_detail_fetch_status, vd.text_excerpt, vd.page_title, vd.fetched_at_utc
-        FROM victims v
-        LEFT JOIN victim_details vd
-          ON vd.victim_id = v.id
-        ORDER BY COALESCE(vd.fetched_at_utc, v.published_at_utc, '') DESC, v.id DESC
-        """
-    ).fetchall()
-    events = []
-    seen: set[str] = set()
-    for row in rows:
-        row_dict = dict(row)
-        event_id = _build_victim_event_payload(row_dict)["id"]
-        if event_id in seen:
-            continue
-        seen.add(event_id)
-        events.append(_build_victim_event_payload(row_dict))
-    return events
-
-
-def _select_event_records(
-    events: list[dict[str, Any]],
+def build_event_search_payload(
     *,
-    limit: int | None,
-    query: str,
-) -> list[dict[str, Any]]:
-    terms = [term for term in str(query or "").casefold().split() if term]
-    selected = events
-    if terms:
-        searchable_fields = (
-            "id",
-            "title",
-            "summary",
-            "detail_text",
-            "victim",
-            "attacker",
-            "industry",
-            "region",
-            "country",
-            "cveId",
-            "cve_id",
-            "vendor",
-            "product",
-            "sourceSite",
-            "category",
-            "domain",
-        )
-
-        def matches(item: dict[str, Any]) -> bool:
-            haystack = " ".join(str(item.get(field) or "") for field in searchable_fields).casefold()
-            return all(term in haystack for term in terms)
-
-        selected = [
-            item
-            for item in events
-            if matches(item)
-        ]
-    return selected[:limit] if limit is not None else selected
-
-
-def _event_record_sort_key(item: dict[str, Any]) -> datetime:
-    return _parse_dt(
-        str(
-            item.get("updatedTimeRaw")
-            or item.get("updated_time_raw")
-            or item.get("disclosureTimeRaw")
-            or item.get("disclosure_time_raw")
-            or item.get("disclosureTime")
-            or item.get("disclosure_time")
-            or ""
-        )
-    ) or datetime.min.replace(tzinfo=timezone.utc)
-
-
-def build_event_records(limit: int | None = None, query: str = "") -> list[dict[str, Any]]:
-    if limit is not None:
-        with get_db_connection() as connection:
-            normalized_events = load_normalized_event_page(
-                connection,
-                limit=limit,
-                query=query,
-            )
-        document_events = _select_event_records(
-            build_document_exposure_event_records(limit=limit),
-            limit=limit,
-            query=query,
-        )
-        events = document_events + [
-            normalized_event_to_list_item(item) for item in normalized_events
-        ]
-        events.sort(key=_event_record_sort_key, reverse=True)
-        return events[:limit]
-
+    page: int = 1,
+    page_size: int = 20,
+    query: str = "",
+    event_type: str = "all",
+    sort: str = "latest",
+) -> dict[str, Any]:
+    database_event_type = EVENT_SEARCH_TYPES[event_type]
     with get_db_connection() as connection:
-        cache_key = _payload_cache_key(connection, "events")
-        cached_payload = _get_cached_payload("events", cache_key)
-        if cached_payload is not None:
-            return _select_event_records(cached_payload, limit=limit, query=query)
-        normalized_events, _ = monitoring_rules_module.build_monitoring_payload(connection, load_normalized_events(connection))
+        database_counts = count_normalized_intelligence_events_by_type(connection, query=query)
+        counts = {
+            "ransomware": int(database_counts.get("ransomware") or 0),
+            "data-leak": int(database_counts.get("data_leak") or 0),
+            "vulnerability": int(database_counts.get("vulnerability") or 0),
+        }
+        counts["all"] = sum(counts.values())
+        total = counts[event_type]
+        page_count = max(1, (total + page_size - 1) // page_size)
+        normalized_page = min(page, page_count)
+        normalized_events = load_normalized_event_page(
+            connection,
+            event_type=database_event_type,
+            limit=page_size,
+            offset=(normalized_page - 1) * page_size,
+            query=query,
+            sort=sort,
+        )
 
-    events = build_document_exposure_event_records(limit=None) + [normalized_event_to_list_item(item) for item in normalized_events]
-    events.sort(key=_event_record_sort_key, reverse=True)
-    _set_cached_payload("events", cache_key, events)
-    return _select_event_records(events, limit=limit, query=query)
+    return {
+        "items": [normalized_event_to_list_item(item) for item in normalized_events],
+        "total": total,
+        "page": normalized_page,
+        "page_size": page_size,
+        "page_count": page_count,
+        "has_previous": normalized_page > 1,
+        "has_next": normalized_page < page_count,
+        "query": query,
+        "event_type": event_type,
+        "sort": sort,
+        "counts": counts,
+    }
 
 
 def _build_forum_event_detail_by_id(
@@ -1927,7 +1853,6 @@ def warm_api_payloads() -> None:
     # so the first page load is not blocked on cold work or stale cache.
     with get_db_connection() as connection:
         ensure_normalized_intelligence(connection, force=False, enrichment_budget=0)
-    build_event_records(limit=500)
     build_intelligence_page_payload("ransomware", limit=500)
     build_intelligence_page_payload("data-leak", limit=500)
     build_intelligence_payload()
