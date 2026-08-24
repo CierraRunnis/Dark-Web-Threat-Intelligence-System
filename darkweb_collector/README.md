@@ -33,7 +33,7 @@
 
 - `http://abc.onion/...` 走 Tor
 - `https://abc.onion/...` 也走 Tor
-- `https://darkforums.su/...` 走普通代理或直连
+- `https://darkforums.ru/...` 走普通代理或直连
 
 `sites.yaml` 中的：
 

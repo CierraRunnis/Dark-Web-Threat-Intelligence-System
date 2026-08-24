@@ -11,9 +11,9 @@ from darkweb_collector.normalize import content_hash
 
 
 FORUM_SECTIONS = {
-    "databases": "https://darkforums.su/Forum-Databases",
-    "other_leaks": "https://darkforums.su/Forum-Other-Leaks", 
-    "sellers_place": "https://darkforums.su/Forum-Sellers-Place"
+    "databases": "https://darkforums.ru/Forum-Databases",
+    "other_leaks": "https://darkforums.ru/Forum-Other-Leaks",
+    "sellers_place": "https://darkforums.ru/Forum-Sellers-Place"
 }
 
 # HTML cleaning
