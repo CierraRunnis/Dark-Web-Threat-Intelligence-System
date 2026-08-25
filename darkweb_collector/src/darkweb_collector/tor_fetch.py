@@ -71,6 +71,7 @@ def fetch_url(
     timeout_seconds: int,
     render_wait_seconds: int = 8,
     retries: int = 1,
+    cookie_header: str | None = None,
 ) -> str:
     if mode == "browser":
         from darkweb_collector.browser_client import fetch_html_with_browser
@@ -90,6 +91,7 @@ def fetch_url(
             socks_port=socks_port,
             timeout=timeout_seconds,
             retries=retries,
+            cookie_header=cookie_header,
         )
 
     proxy_host, proxy_port = get_http_proxy_settings()
@@ -100,6 +102,7 @@ def fetch_url(
         timeout=timeout_seconds,
         retries=retries,
         backoff_seconds=3.0,
+        cookie_header=cookie_header,
     )
 
 
@@ -113,6 +116,7 @@ def fetch_page_artifacts(
     hide_selectors: tuple[str, ...] = (),
     screenshot_styles: str = "",
     render_html_for_screenshot: bool = False,
+    cookie_header: str | None = None,
 ) -> tuple[str, bytes | None]:
     if mode == "browser":
         from darkweb_collector.browser_client import fetch_page_artifacts_with_browser
@@ -135,6 +139,7 @@ def fetch_page_artifacts(
         timeout_seconds=timeout_seconds,
         render_wait_seconds=render_wait_seconds,
         retries=1,
+        cookie_header=cookie_header,
     )
 
     try:
@@ -179,6 +184,7 @@ def fetch_via_tor_curl(
     timeout: int = 90,
     retries: int = 0,
     backoff_seconds: float = 2.0,
+    cookie_header: str | None = None,
 ) -> str:
     curl = shutil.which("curl")
     if not curl:
@@ -200,8 +206,10 @@ def fetch_via_tor_curl(
             "--user-agent",
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            url,
         ]
+        if cookie_header:
+            command.extend(["--cookie", cookie_header])
+        command.append(url)
 
         result = subprocess.run(command, capture_output=True, check=False)
         if result.returncode == 0:
@@ -343,6 +351,7 @@ def fetch_via_http_proxy(
     timeout: int = 90,
     retries: int = 3,
     backoff_seconds: float = 3.0,
+    cookie_header: str | None = None,
 ) -> str:
     """
     Fetch URL using HTTP/HTTPS proxy (e.g., Clash, Shadowsocks, etc.)
@@ -437,6 +446,9 @@ def fetch_via_http_proxy(
         # Add proxy if configured
         if proxy_host and proxy_port:
             command.extend(["--proxy", f"http://{proxy_host}:{proxy_port}"])
+
+        if cookie_header:
+            command.extend(["--header", f"Cookie: {cookie_header}"])
         
         command.extend(headers + [url])
         

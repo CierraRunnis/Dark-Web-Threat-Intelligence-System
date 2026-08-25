@@ -146,6 +146,12 @@ from darkweb_collector.db import (
 )
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
 from darkweb_collector.runtime import output_root
+from darkweb_collector.session_cookies import (
+    clear_session_cookie,
+    get_session_cookie_status,
+    list_cookie_capable_sites,
+    set_session_cookie,
+)
 from darkweb_collector.tor_bridge_control import (
     get_tor_bridge_status,
     save_tor_bridge_settings,
@@ -776,6 +782,10 @@ class RansomwareConfigRequest(BaseModel):
     api_key: str
 
 
+class SessionCookieRequest(BaseModel):
+    cookie: str = Field(min_length=1, max_length=16384)
+
+
 class TorBridgeConfigRequest(BaseModel):
     enabled: bool = False
     bridge_mode: str = "snowflake"
@@ -1092,6 +1102,37 @@ def probe_site(site_name: str) -> dict:
     try:
         return probe_site_connectivity(site_name)
     except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/sites/cookies")
+def list_site_cookies() -> dict:
+    return {"sites": list_cookie_capable_sites()}
+
+
+@app.get("/api/sites/{site_name}/cookie")
+def get_site_cookie(site_name: str) -> dict:
+    try:
+        return get_session_cookie_status(site_name)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/sites/{site_name}/cookie")
+def save_site_cookie(site_name: str, payload: SessionCookieRequest) -> dict:
+    try:
+        return set_session_cookie(site_name=site_name, cookie_value=payload.cookie)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/sites/{site_name}/cookie")
+def delete_site_cookie(site_name: str) -> dict:
+    try:
+        return clear_session_cookie(site_name)
+    except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

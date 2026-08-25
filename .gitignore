@@ -49,6 +49,7 @@ threat-intelligence-dashboard/.codex*.log
 .env
 .env.*
 !.env.example
+darkweb_collector/secrets/
 **/auth-password.txt
 **/cookies.json
 **/credentials.json
