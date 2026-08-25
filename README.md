@@ -169,7 +169,7 @@ darkweb uninstall purge-data --yes
 
 管理员可以在“配置中心 → 数据迁移”导入外部工具生成的 `.dwti` 文件。迁移包同时包含 SQLite 数据和证据镜像；后端会先在独立 PostgreSQL Schema 中完成安全预检、逐表导入、摘要复核和镜像释放，只有全部一致并再次确认后才切换活动数据库和镜像目录。
 
-Windows 以及 Debian / Ubuntu / WSL / Codespaces 首次启动会自动安装或复用 PostgreSQL 16，并创建项目专用数据库和账号；已有 SQLite 数据不会自动删除或覆盖。Linux 应用口令保存在当前用户私有、权限为 `600` 的配置文件中；显式设置外部 PostgreSQL URL 时不会安装本机服务。旧系统的离线打包、校验工具及 `.dwti` 包继续独立存放在项目目录之外。完整流程、回退边界和容量限制见 [`darkweb_collector/DATA_MIGRATION.md`](./darkweb_collector/DATA_MIGRATION.md)。
+Windows 以及 Debian / Ubuntu / WSL / Codespaces 首次启动会自动安装或复用 PostgreSQL 16，并创建项目专用数据库和账号；已有 SQLite 数据不会自动删除或覆盖。Windows 直接下载并校验固定版本的 EDB 官方安装程序，不依赖 `winget` 或 Microsoft App Installer；离线部署可用 `DARKWEB_POSTGRESQL_INSTALLER_PATH` 指向预先下载的安装程序，仍会执行固定 SHA-256 校验。Linux 应用口令保存在当前用户私有、权限为 `600` 的配置文件中；显式设置外部 PostgreSQL URL 时不会安装本机服务。旧系统的离线打包、校验工具及 `.dwti` 包继续独立存放在项目目录之外。完整流程、回退边界和容量限制见 [`darkweb_collector/DATA_MIGRATION.md`](./darkweb_collector/DATA_MIGRATION.md)。
 
 ## 超级鹰验证码与长安会话守护
 

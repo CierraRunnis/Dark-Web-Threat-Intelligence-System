@@ -37,6 +37,9 @@ else {
 $CollectorRoot = Join-Path $ProjectRootPath "darkweb_collector"
 $Launcher = Join-Path $CollectorRoot "scripts\start_all_services_windows.ps1"
 $PackageId = "PostgreSQL.PostgreSQL.$PostgreSqlMajor"
+$PostgreSqlInstallerVersion = "16.15-1"
+$PostgreSqlInstallerUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64.exe"
+$PostgreSqlInstallerSha256 = "de926fefad00e313e212cd438c0f04bf033e200099ad56c012724efcebed79f2"
 $UserDataRoot = Join-Path $env:LOCALAPPDATA "DarkWebThreatIntel"
 $TargetConfigPath = Join-Path $UserDataRoot "postgresql-target.json"
 $SetupResultPath = Join-Path $UserDataRoot "postgresql-setup-result.json"
@@ -246,6 +249,69 @@ function Add-UserPathEntry {
     }
 }
 
+function Install-VerifiedPostgreSql {
+    param([string]$BootstrapPassword)
+
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        throw "PostgreSQL $PostgreSqlInstallerVersion requires a 64-bit Windows operating system"
+    }
+    if ($env:DARKWEB_POSTGRESQL_AUTO_INSTALL -eq "0") {
+        throw "PostgreSQL is missing and DARKWEB_POSTGRESQL_AUTO_INSTALL=0"
+    }
+    if (-not $PSCmdlet.ShouldProcess("EDB PostgreSQL $PostgreSqlInstallerVersion", "Install verified PostgreSQL distribution")) {
+        return $false
+    }
+
+    $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ("darkweb-postgresql-" + [Guid]::NewGuid().ToString("N"))
+    $installerPath = Join-Path $stagingRoot "postgresql-installer.exe"
+    $sourceInstallerPath = [string]$env:DARKWEB_POSTGRESQL_INSTALLER_PATH
+    $previousProgressPreference = $ProgressPreference
+    try {
+        New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+        $ProgressPreference = "SilentlyContinue"
+        if ($sourceInstallerPath) {
+            $sourceInstallerPath = [IO.Path]::GetFullPath($sourceInstallerPath)
+            if (-not (Test-Path -LiteralPath $sourceInstallerPath -PathType Leaf)) {
+                throw "PostgreSQL installer was not found: $sourceInstallerPath"
+            }
+            Copy-Item -LiteralPath $sourceInstallerPath -Destination $installerPath
+        }
+        else {
+            Write-Info "Downloading EDB PostgreSQL $PostgreSqlInstallerVersion"
+            [Net.ServicePointManager]::SecurityProtocol =
+                [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -UseBasicParsing -Uri $PostgreSqlInstallerUrl -OutFile $installerPath -TimeoutSec 600
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $PostgreSqlInstallerSha256) {
+            throw "PostgreSQL installer checksum verification failed"
+        }
+
+        Write-Info "Installing verified EDB PostgreSQL $PostgreSqlInstallerVersion"
+        $arguments = @(
+            "--mode", "unattended",
+            "--unattendedmodeui", "none",
+            "--superpassword", $BootstrapPassword,
+            "--servicepassword", $BootstrapPassword,
+            "--serverport", [string]$Port,
+            "--enable-components", "server,commandlinetools",
+            "--disable-components", "pgAdmin,stackbuilder"
+        )
+        $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+        if ($process.ExitCode -ne 0) {
+            throw "EDB PostgreSQL installation failed with exit code $($process.ExitCode)"
+        }
+        return $true
+    }
+    finally {
+        $ProgressPreference = $previousProgressPreference
+        if (Test-Path -LiteralPath $stagingRoot) {
+            Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+        }
+    }
+}
+
 function Find-PostgreSqlTools {
     $candidates = [System.Collections.Generic.List[string]]::new()
     $command = Get-Command psql.exe -ErrorAction SilentlyContinue
@@ -383,7 +449,7 @@ function Restart-ProjectIfRunning {
 
 function Show-Plan {
     Write-Host "Windows PostgreSQL one-click setup plan"
-    Write-Host "  Package:  $PackageId (installed through winget when missing)"
+    Write-Host "  Package:  EDB PostgreSQL $PostgreSqlInstallerVersion (verified direct download when missing)"
     Write-Host "  Endpoint: 127.0.0.1:$Port"
     Write-Host "  Database: $DatabaseName"
     Write-Host "  Role:     $ApplicationUser"
@@ -466,26 +532,13 @@ function Install-PostgreSqlTarget {
             }
             throw "Administrator privileges are required to install PostgreSQL"
         }
-        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
-        if (-not $winget) {
-            throw "winget is unavailable; install Microsoft App Installer first"
-        }
         $bootstrapPassword = New-RandomPassword
         Add-SensitiveValue $bootstrapPassword
-        $override = "--mode unattended --unattendedmodeui none --superpassword $bootstrapPassword --servicepassword $bootstrapPassword --serverport $Port --enable-components server,commandlinetools --disable-components pgAdmin,stackbuilder"
-        if (-not $PSCmdlet.ShouldProcess($PackageId, "Install PostgreSQL with winget")) {
+        $installed = Install-VerifiedPostgreSql $bootstrapPassword
+        if (-not $installed) {
             return 0
         }
-        Write-Info "Installing $PackageId through winget"
-        & $winget.Source install --id $PackageId --exact --silent --scope machine --accept-package-agreements --accept-source-agreements --override $override
-        $wingetExitCode = $LASTEXITCODE
         $tools = Find-PostgreSqlTools
-        if ($wingetExitCode -ne 0 -and -not $tools) {
-            throw "winget PostgreSQL installation failed with exit code $wingetExitCode"
-        }
-        if ($wingetExitCode -ne 0) {
-            Write-Warn "winget returned exit code $wingetExitCode, but PostgreSQL tools are installed; continuing with service and database verification"
-        }
         if (-not $tools) {
             throw "PostgreSQL was installed, but psql.exe could not be located"
         }
