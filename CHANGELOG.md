@@ -13,6 +13,11 @@
 - 兼容旧版写入的 `redis://127.0.0.1:6379/0`：该端点可用时继续复用，不可用时迁移到托管 Garnet；其他显式 `REDIS_URL` 保持用户配置权威，连接失败时不会被静默覆盖。
 - Garnet 不作为完整 Redis 替代：当前生产路径已验证 Celery broker/result、`SET NX EX` 状态锁、列表、事务和发布订阅；不得引入 Redis Streams 或非 DB 0 依赖，除非重新进行兼容测试。
 
+### Windows Server PostgreSQL 安装兼容
+
+- Windows 首次准备 PostgreSQL 16 时不再依赖 `winget` 或 Microsoft App Installer；缺少本机服务时直接下载 EDB 官方 PostgreSQL 16.15-1 x64 安装程序，校验固定 SHA-256 后静默安装服务和命令行工具。
+- 已安装 PostgreSQL 和显式外部迁移目标继续优先复用；离线环境可通过 `DARKWEB_POSTGRESQL_INSTALLER_PATH` 提供同一官方安装程序，哈希不一致时拒绝执行。
+
 ### 站点采集与前端
 
 - 新增 Cracked 与 PwnedForums 列表、详情解析和采集适配器，接入站点注册、标准化刷新和来源名称展示。
