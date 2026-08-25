@@ -36,7 +36,9 @@ from darkweb_collector.db import (
     upsert_normalized_intelligence_cache_state,
 )
 from darkweb_collector.runtime import output_root, project_root
+from darkweb_collector.sites.cracked import normalize_cracked_timestamp
 from darkweb_collector.sites.darkforums import clean_extracted_attackers, normalize_darkforums_timestamp
+from darkweb_collector.sites.pwnfrm import normalize_pwnfrm_timestamp
 from darkweb_collector.utils import safe_stem
 from darkweb_collector.vulnerability_i18n import (
     build_affected_version_items,
@@ -57,11 +59,13 @@ WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 SOURCE_LABELS = {
     "changan": "长安不夜城",
+    "cracked": "Cracked",
     "darkforums": "DarkForums",
     "dragonforce": "DragonForce",
     "dragonforceblog": "DragonForce",
     "chaos": "Chaos",
     "lynx": "Lynx",
+    "pwnfrm": "PwnedForums",
     "baidu_wenku": "百度文库",
     "docin": "豆丁",
     "doc88": "道客巴巴",
@@ -398,14 +402,40 @@ NOISY_VICTIM_DOMAINS = {
 }
 
 SOURCE_HOSTNAME_KEYWORDS = {
+    "cracked",
     "darkforums",
     "dragonforce",
     "chaos",
     "lynx",
+    "pwnfrm",
     "blogspot",
     "wordpress",
     "onion",
 }
+
+
+_FORUM_TIMESTAMP_NORMALIZERS = {
+    "cracked": normalize_cracked_timestamp,
+    "darkforums": normalize_darkforums_timestamp,
+    "pwnfrm": normalize_pwnfrm_timestamp,
+}
+
+
+def _normalize_forum_timestamp(
+    site_name: str | None,
+    value: str | None,
+    *,
+    collected_at_utc: str | None,
+) -> str:
+    normalizer = _FORUM_TIMESTAMP_NORMALIZERS.get(
+        str(site_name or "").lower(),
+        normalize_darkforums_timestamp,
+    )
+    try:
+        return normalizer(value, collected_at_utc=collected_at_utc) or ""
+    except Exception as exc:
+        logger.warning("timestamp normalization failed for site=%r: %s", site_name, exc)
+        return ""
 
 INDUSTRY_PRIORITY = [
     "军事",
@@ -1958,7 +1988,8 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
     raw_json = _parse_json(row.get("raw_json"))
     disclosure_time = (
         raw_json.get("published_at_utc")
-        or normalize_darkforums_timestamp(
+        or _normalize_forum_timestamp(
+            row.get("site_name"),
             raw_json.get("timestamp") or row.get("timestamps"),
             collected_at_utc=row.get("fetched_at"),
         )

@@ -7,9 +7,9 @@
 - 暗网与公开风险线索采集：支持站点配置、定时入队、列表页和详情页采集。
 - 威胁情报标准化：将采集内容整理为可检索、可筛选、可追踪的数据记录。
 - 前端分析工作台：提供数据浏览、任务状态、采集结果和风险线索查看能力。
-- 后台任务调度：使用 Redis 和 Celery 处理采集、渲染、详情解析和同步任务。
+- 后台任务调度：使用 Redis 协议兼容服务和 Celery 处理采集、渲染、详情解析和同步任务；Windows 一键启动默认使用项目托管的 Microsoft Garnet。
 - Tor 网桥控制：支持在系统内配置并启动 Snowflake / obfs4 等 Tor 网桥模式，为采集代理提供本地 SOCKS 入口。
-- 一键在线更新：在版本信息区域直接更新当前 Git 分支，并自动同步依赖和重启服务。
+- 一键在线更新：在版本信息区域直接获取配置的 `main` 分支最新提交，并自动同步依赖和重启服务。
 - Windows / WSL 启动脚本：提供一键准备依赖、注册命令、启动服务和查看状态的脚本。
 
 ## 项目结构
@@ -33,7 +33,7 @@
 
 - Python 3.10+
 - Node.js 18+
-- Redis 或兼容服务
+- Redis 或兼容服务；Windows 一键启动可自动准备 Garnet
 - npm
 
 使用 Windows / WSL 启动脚本时，脚本会尽量自动检测和补齐缺失依赖。
@@ -121,7 +121,11 @@ darkweb status
 darkweb stop
 ```
 
-Windows 脚本会优先复用本机已有环境。缺少 Python、Node.js 或 Redis 兼容服务且本机有 `winget` 时，会自动安装 Python 3.12、Node.js LTS 和 Memurai Developer；没有 `winget` 时，需要按错误提示手动安装缺失组件。
+Windows 脚本会优先复用可达的显式 `REDIS_URL`。未配置服务时，脚本自动下载并校验 Microsoft Garnet 2.1.4 与项目私有 .NET 10.0.11，监听 `127.0.0.1:6380` 并固定使用 DB 0，不再要求通过 `winget` 安装 Memurai Developer。Garnet 检查点和 AOF 位于 `%LOCALAPPDATA%\DarkWebThreatIntel\garnet-data`，默认每 6 小时执行一次后台检查点；完整第三方许可见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。
+
+可通过 `DARKWEB_GARNET_CHECKPOINT_INTERVAL_SECONDS` 调整后台检查点间隔，最低为 300 秒；离线部署可分别用 `DARKWEB_GARNET_ARCHIVE_PATH` 和 `DARKWEB_DOTNET_RUNTIME_ARCHIVE_PATH` 指向已下载的官方压缩包，启动器仍会执行固定哈希校验。
+
+当前托管 Garnet 路径覆盖项目已使用的 Redis 命令、Celery broker/result backend 和状态锁，不支持把它当作任意 Redis 功能的完整替代。不要为该实例引入 Redis Streams 或非 DB 0 依赖；外部 Redis、Valkey 或其他兼容服务仍可通过 `REDIS_URL` 显式配置。
 
 ## 安全卸载
 
@@ -148,7 +152,7 @@ darkweb uninstall purge-data
 darkweb uninstall purge-data --yes
 ```
 
-卸载只处理项目明确管理的路径。指向项目目录和默认数据目录之外的自定义数据库、输出目录或 Tor 运行时会保留并给出提示；源码目录和 Python、Node.js、Redis、Docker 等共享系统依赖不会被删除。Windows 可用 `-WhatIf`、WSL / Linux 可用 `--dry-run` 预览操作。
+卸载只处理项目明确管理的路径。指向项目目录和默认数据目录之外的自定义数据库、输出目录或 Tor 运行时会保留并给出提示；源码目录和 Python、Node.js、外部 Redis 或 Docker 等共享系统依赖不会被删除。Windows 的 `keep-data` 会删除项目托管的 Garnet/.NET 二进制但保留检查点，`purge-data` 才删除 Garnet 数据。Windows 可用 `-WhatIf`、WSL / Linux 可用 `--dry-run` 预览操作。
 
 ## 一键更新
 

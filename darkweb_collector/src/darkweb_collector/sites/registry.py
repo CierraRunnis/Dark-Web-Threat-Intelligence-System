@@ -6,6 +6,8 @@ from darkweb_collector.sites.example_forum import parse_example_forum_homepage
 from darkweb_collector.sites.dragonforce import parse_dragonforce_homepage
 from darkweb_collector.sites.darkforums import parse_darkforums_list, parse_darkforums_detail
 from darkweb_collector.sites.chaos import parse_chaos_homepage, parse_chaos_detail
+from darkweb_collector.sites.cracked import parse_cracked_detail, parse_cracked_list
+from darkweb_collector.sites.pwnfrm import parse_pwnfrm_detail, parse_pwnfrm_list
 
 
 Parser = Callable[[str, str], dict]
@@ -18,6 +20,10 @@ PARSERS: dict[str, Parser] = {
     "darkforums_detail": parse_darkforums_detail,
     "chaos": parse_chaos_homepage,
     "chaos_detail": parse_chaos_detail,
+    "cracked_list": parse_cracked_list,
+    "cracked_detail": parse_cracked_detail,
+    "pwnfrm_list": parse_pwnfrm_list,
+    "pwnfrm_detail": parse_pwnfrm_detail,
 }
 
 

@@ -253,6 +253,81 @@
 
     <section class="ti-card ti-reveal-up">
       <div class="ti-card-header">
+        <div class="ti-card-title">登录态站点 Cookie 管理</div>
+        <div class="health-actions">
+          <span class="ti-card-subtitle">{{ cookieSites.length }} 个站点需要会话 Cookie</span>
+          <el-button plain :loading="cookieListLoading" @click="loadCookieSites">刷新全部</el-button>
+        </div>
+      </div>
+      <div class="ti-card-body">
+        <el-empty v-if="!cookieListLoading && cookieSites.length === 0" description="暂无需要 Cookie 的站点" />
+        <el-collapse v-else v-model="activeCookiePanels" class="cookie-collapse">
+          <el-collapse-item v-for="site in cookieSites" :key="site.site_name" :name="site.site_name">
+            <template #title>
+              <div class="cookie-panel-title">
+                <strong>{{ site.display_name || site.site_name }}</strong>
+                <el-tag :type="site.configured ? 'success' : 'warning'" size="small" effect="light">
+                  {{ site.configured ? '已配置' : '未配置' }}
+                </el-tag>
+                <el-tag v-if="site.cookie_engine" size="small" effect="plain">{{ site.cookie_engine }}</el-tag>
+                <span v-if="site.configured" class="cookie-panel-meta">来源：{{ cookieSourceLabel(site.source) }}</span>
+              </div>
+            </template>
+            <div class="cookie-panel-body">
+              <div class="status-grid status-grid--compact">
+                <div class="metric-card">
+                  <span>当前状态</span>
+                  <strong>{{ site.configured ? '已配置' : '未配置' }}</strong>
+                </div>
+                <div class="metric-card">
+                  <span>来源</span>
+                  <strong class="metric-card__value metric-card__value--small">{{ cookieSourceLabel(site.source) }}</strong>
+                </div>
+                <div class="metric-card">
+                  <span>环境变量</span>
+                  <strong class="metric-card__value metric-card__value--small">{{ site.cookie_env || '未配置' }}</strong>
+                </div>
+                <div class="metric-card">
+                  <span>最近更新</span>
+                  <strong class="metric-card__value metric-card__value--small">{{ site.updated_at || '未知' }}</strong>
+                </div>
+              </div>
+              <div class="credential-row">
+                <el-input
+                  v-model="cookieInputs[site.site_name]"
+                  type="password"
+                  show-password
+                  :placeholder="cookieInputPlaceholder(site)"
+                  class="credential-row__input"
+                />
+                <el-button type="primary" :loading="isCookieLoading(site.site_name, 'save')" @click="saveCookie(site.site_name)">保存 Cookie</el-button>
+                <el-button
+                  type="danger"
+                  plain
+                  :loading="isCookieLoading(site.site_name, 'clear')"
+                  :disabled="!site.cookie_file_exists"
+                  @click="clearCookie(site.site_name)"
+                >清除文件 Cookie</el-button>
+                <el-button plain :loading="isCookieLoading(site.site_name, 'refresh')" @click="refreshCookieStatus(site.site_name)">刷新</el-button>
+              </div>
+              <div class="panel-note-block">
+                <p class="panel-note">当前预览：{{ site.masked_preview || '暂无' }}</p>
+                <p class="panel-note panel-note--mono">文件路径：{{ site.cookie_file || '未配置 session_cookie_file' }}</p>
+                <p class="panel-note">
+                  <template v-if="site.cookie_engine || site.cookie_example">
+                    {{ site.display_name || site.site_name }}<template v-if="site.cookie_engine"> 是 {{ site.cookie_engine }} 站点</template><template v-if="site.cookie_example">，请粘贴包含 {{ site.cookie_example }} 的完整 Cookie 字符串</template>。
+                  </template>
+                  环境变量优先于文件配置。
+                </p>
+              </div>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
+      </div>
+    </section>
+
+    <section class="ti-card ti-reveal-up">
+      <div class="ti-card-header">
         <div class="ti-card-title">Bot 助手推送</div>
         <div class="health-actions">
           <el-button plain :loading="botConfigLoading" @click="loadBotConfig">刷新配置</el-button>
@@ -488,7 +563,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import StatusBadge from '@/components/common/StatusBadge.vue'
@@ -736,6 +811,43 @@ const togglingSiteMap = ref({})
 const keywordLoading = ref(false)
 const monitoringStatus = ref({ keywordCount: 0, enabledKeywordCount: 0, highPriorityCount: 0, sampleEvidenceCount: 0, eventCount: 0 })
 const monitoringKeywords = ref([])
+const cookieSites = ref([])
+const cookieInputs = reactive({})
+const cookieLoadingFlags = reactive({})
+const cookieListLoading = ref(false)
+const activeCookiePanels = ref([])
+
+function cookieSourceLabel(source) {
+  const labels = {
+    env: '环境变量',
+    file: '文件',
+    inline: 'sites.yaml 内联',
+  }
+  return labels[source] || '未配置'
+}
+
+function cookieInputPlaceholder(site) {
+  return `粘贴新的 ${site.display_name || site.site_name} 会话 Cookie`
+}
+
+function ensureCookieSiteState(siteName) {
+  if (!(siteName in cookieInputs)) cookieInputs[siteName] = ''
+  if (!(siteName in cookieLoadingFlags)) {
+    cookieLoadingFlags[siteName] = { save: false, clear: false, refresh: false }
+  }
+}
+
+function isCookieLoading(siteName, action) {
+  return Boolean(cookieLoadingFlags[siteName]?.[action])
+}
+
+function applyCookieSiteUpdate(updated) {
+  if (!updated?.site_name) return
+  const index = cookieSites.value.findIndex((site) => site.site_name === updated.site_name)
+  if (index >= 0) cookieSites.value[index] = { ...cookieSites.value[index], ...updated }
+  else cookieSites.value = [...cookieSites.value, updated]
+  ensureCookieSiteState(updated.site_name)
+}
 
 function isSiteRunBlocked(row) {
   return row?.auth_required || row?.blockingReason === 'active_seed_job' || row?.activeSeedJobStatus === 'running' || row?.activeSeedJobStatus === 'enqueued'
@@ -808,6 +920,77 @@ async function readApiError(response, fallbackMessage) {
     return payload?.detail || payload?.message || fallbackMessage
   } catch {
     return fallbackMessage
+  }
+}
+
+async function loadCookieSites() {
+  cookieListLoading.value = true
+  try {
+    const response = await fetchWithTimeout('/api/sites/cookies')
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    const payload = await response.json()
+    const sites = Array.isArray(payload?.sites) ? payload.sites : []
+    cookieSites.value = sites
+    sites.forEach((site) => ensureCookieSiteState(site.site_name))
+    if (!activeCookiePanels.value.length && sites.length) activeCookiePanels.value = [sites[0].site_name]
+  } catch (error) {
+    ElMessage.error(error.message || '读取 Cookie 站点列表失败')
+  } finally {
+    cookieListLoading.value = false
+  }
+}
+
+async function refreshCookieStatus(siteName) {
+  ensureCookieSiteState(siteName)
+  cookieLoadingFlags[siteName].refresh = true
+  try {
+    const response = await fetchWithTimeout(`/api/sites/${encodeURIComponent(siteName)}/cookie`)
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyCookieSiteUpdate(await response.json())
+  } catch (error) {
+    ElMessage.error(error.message || `读取 ${siteName} Cookie 状态失败`)
+  } finally {
+    cookieLoadingFlags[siteName].refresh = false
+  }
+}
+
+async function saveCookie(siteName) {
+  ensureCookieSiteState(siteName)
+  const cookie = String(cookieInputs[siteName] || '').trim()
+  if (!cookie) {
+    ElMessage.error('请粘贴新的 Cookie 字符串')
+    return
+  }
+  cookieLoadingFlags[siteName].save = true
+  try {
+    const response = await fetchWithTimeout(`/api/sites/${encodeURIComponent(siteName)}/cookie`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyCookieSiteUpdate(await response.json())
+    cookieInputs[siteName] = ''
+    ElMessage.success(`已保存 ${siteName} Cookie`)
+  } catch (error) {
+    ElMessage.error(error.message || '保存 Cookie 失败')
+  } finally {
+    cookieLoadingFlags[siteName].save = false
+  }
+}
+
+async function clearCookie(siteName) {
+  ensureCookieSiteState(siteName)
+  cookieLoadingFlags[siteName].clear = true
+  try {
+    const response = await fetchWithTimeout(`/api/sites/${encodeURIComponent(siteName)}/cookie`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    applyCookieSiteUpdate(await response.json())
+    ElMessage.success(`已清除 ${siteName} 文件 Cookie`)
+  } catch (error) {
+    ElMessage.error(error.message || '清除 Cookie 失败')
+  } finally {
+    cookieLoadingFlags[siteName].clear = false
   }
 }
 
@@ -1024,6 +1207,7 @@ async function refreshAllPanels() {
     refreshContinuous(),
     loadMonitoringKeywords(),
     loadRansomwareConfig(),
+    loadCookieSites(),
     loadBotConfig(),
     loadTorBridgeStatus(),
   ])
@@ -1461,6 +1645,38 @@ onBeforeUnmount(() => {
 .credential-row__input {
   flex: 1 1 360px;
   min-width: 220px;
+}
+
+.cookie-collapse {
+  border: none;
+}
+
+.cookie-collapse :deep(.el-collapse-item__header) {
+  padding: 4px;
+  background: transparent;
+}
+
+.cookie-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.cookie-panel-title strong {
+  color: var(--ti-text-primary);
+  font-size: 15px;
+}
+
+.cookie-panel-meta {
+  margin-left: auto;
+  color: var(--ti-text-muted);
+  font-size: 12px;
+}
+
+.cookie-panel-body {
+  padding: 12px 4px 4px;
 }
 
 .tor-bridge-panel {

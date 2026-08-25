@@ -59,6 +59,49 @@
       "render_wait_seconds": 12
     },
     {
+      "site_name": "cracked",
+      "enabled": true,
+      "seed_urls": [
+        "https://cracked.st/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
+        "https://cracked.st/Forum-Combolists--297?sortby=started&order=desc&datecut=9999&prefix=0"
+      ],
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 10,
+      "max_detail_pages_per_run": 6,
+      "cooldown_seconds": 900,
+      "output_dir": "output/cracked",
+      "dedupe_window_minutes": 180,
+      "display_name": "Cracked",
+      "render_wait_seconds": 8,
+      "fetch_timeout_seconds": 90
+    },
+    {
+      "site_name": "pwnfrm",
+      "enabled": false,
+      "seed_urls": [
+        "http://pwnfrm7rbf6kyerigxi677lcz5ifmoagdbqqknwdu2by27wfdst5qmqd.onion/Forum-Databases?sortby=started&order=desc&datecut=9999&prefix=0",
+        "http://pwnfrm7rbf6kyerigxi677lcz5ifmoagdbqqknwdu2by27wfdst5qmqd.onion/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
+        "http://pwnfrm7rbf6kyerigxi677lcz5ifmoagdbqqknwdu2by27wfdst5qmqd.onion/Forum-Sellers-Place?sortby=started&order=desc&datecut=9999&prefix=0"
+      ],
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 10,
+      "max_detail_pages_per_run": 6,
+      "cooldown_seconds": 900,
+      "output_dir": "output/pwnfrm",
+      "dedupe_window_minutes": 180,
+      "display_name": "PwnedForums",
+      "render_wait_seconds": 20,
+      "fetch_timeout_seconds": 180,
+      "session_cookie_env": "PWNFRM_SESSION_COOKIE",
+      "session_cookie_file": "secrets/pwnfrm_cookies.txt",
+      "session_cookie_engine": "MyBB",
+      "session_cookie_example": "mybbuser=...; sid=..."
+    },
+    {
       "site_name": "chaos",
       "enabled": true,
       "seed_urls": [
