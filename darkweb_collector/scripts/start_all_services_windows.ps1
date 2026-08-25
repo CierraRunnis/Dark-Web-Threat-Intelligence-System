@@ -13,6 +13,11 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+catch {
+}
 
 $SessionName = "bishe-stack-windows"
 $ApiHost = "127.0.0.1"
@@ -78,6 +83,27 @@ $DefaultTorExpertRoot = Join-Path $DefaultUserDataDir "tor-expert"
 $DefaultTorBridgeRuntimeDir = Join-Path $DefaultUserDataDir "tor_bridge_runtime"
 $DefaultTorBridgeAutoRuntimeDir = Join-Path $DefaultUserDataDir "tor_bridge_runtime_auto"
 $DefaultNpmCacheDir = Join-Path $DefaultUserDataDir "npm-cache"
+$DefaultRuntimeRoot = Join-Path $DefaultUserDataDir "runtimes"
+$GarnetVersion = "2.1.4"
+$GarnetArchiveUrl = "https://github.com/microsoft/garnet/releases/download/v2.1.4/win-x64-based-readytorun.zip"
+$GarnetArchiveSha256 = "2c429b145638224823cd55bf900dc932dcddebda690728665051dcc17901c412"
+$GarnetServerSha256 = "794d03476f1d9da43c7997987fa2d1fb1296e7dd9e1008449c47edd2d4e6b5a9"
+$GarnetRuntimeRoot = Join-Path $DefaultRuntimeRoot "garnet\$GarnetVersion"
+$GarnetServerExecutable = Join-Path $GarnetRuntimeRoot "net10.0\GarnetServer.exe"
+$GarnetDotnetVersion = "10.0.11"
+$GarnetDotnetArchiveUrl = "https://builds.dotnet.microsoft.com/dotnet/Runtime/10.0.11/dotnet-runtime-10.0.11-win-x64.zip"
+$GarnetDotnetArchiveSha512 = "d9ab9c0d9916b8fa3585b5f403057f594ffffb8364dac09e0007dd8ac671c86754935b980d8fb5da83cb1b82ac3cd57cc407c969e6d837aaa2fae21047cb7448"
+$GarnetDotnetExecutableSha256 = "ab1b71fd3dd71062e074c9fab8312081a81b7f2b3e0327c48c4d249c8d1a3135"
+$GarnetDotnetRoot = Join-Path $DefaultRuntimeRoot "dotnet\$GarnetDotnetVersion"
+$GarnetDotnetExecutable = Join-Path $GarnetDotnetRoot "dotnet.exe"
+$DefaultGarnetDataRoot = Join-Path $DefaultUserDataDir "garnet-data"
+$GarnetDataRoot = if ($env:DARKWEB_GARNET_DATA_ROOT) { [System.IO.Path]::GetFullPath($env:DARKWEB_GARNET_DATA_ROOT) } else { $DefaultGarnetDataRoot }
+$GarnetCheckpointDir = Join-Path $GarnetDataRoot "checkpoints"
+$GarnetCheckpointIntervalSeconds = if ($env:DARKWEB_GARNET_CHECKPOINT_INTERVAL_SECONDS) { [Math]::Max([int]$env:DARKWEB_GARNET_CHECKPOINT_INTERVAL_SECONDS, 300) } else { 21600 }
+$GarnetRuntimeManifest = Join-Path $DefaultUserDataDir "garnet-runtime.json"
+$ManagedGarnetRedisUrl = "redis://127.0.0.1:6380/0"
+$LegacyManagedRedisUrl = "redis://127.0.0.1:6379/0"
+$script:RedisProvider = "external"
 $LegacyCollectorOutputRoot = Join-Path $DefaultUserDataDir "output"
 $ProjectCollectorOutputRoot = Join-Path $CollectorRoot "output"
 $ProjectCollectorOutputArchiveRoot = Join-Path $CollectorRoot "output-archive"
@@ -93,7 +119,7 @@ $NodeBinDir = ""
 $RequirementsStamp = Join-Path $VenvDir ".requirements.sha256"
 $PlaywrightStamp = Join-Path $VenvDir ".playwright.browsers.ready"
 $PackageLockStamp = Join-Path $DashboardRoot "node_modules\.package-lock.sha256"
-$RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { "redis://127.0.0.1:6379/0" }
+$RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { $ManagedGarnetRedisUrl }
 $CollectorDbPath = if ($env:DARKWEB_COLLECTOR_DB_PATH) { $env:DARKWEB_COLLECTOR_DB_PATH } else { Join-Path $DefaultUserDataDir "collector.db" }
 $ConfiguredCollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) {
     [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_SITES_FILE)
@@ -377,6 +403,21 @@ function Test-SamePath {
     $leftPath = [System.IO.Path]::GetFullPath($Left).TrimEnd("\")
     $rightPath = [System.IO.Path]::GetFullPath($Right).TrimEnd("\")
     return $leftPath.Equals($rightPath, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-ProjectOwnedRedisEnvironment {
+    $registeredProjectRoot = [Environment]::GetEnvironmentVariable("DARKWEB_PROJECT_ROOT", "User")
+    $registeredCollectorRoot = [Environment]::GetEnvironmentVariable("DARKWEB_COLLECTOR_ROOT", "User")
+    if (-not ((Test-SamePath -Left $registeredProjectRoot -Right $ProjectRoot) -and
+        (Test-SamePath -Left $registeredCollectorRoot -Right $CollectorRoot))) {
+        return $false
+    }
+    $registeredRedisUrl = [Environment]::GetEnvironmentVariable("REDIS_URL", "User")
+    $provider = [Environment]::GetEnvironmentVariable("DARKWEB_REDIS_PROVIDER", "User")
+    if ($provider -eq "garnet" -and $registeredRedisUrl -eq $ManagedGarnetRedisUrl) {
+        return $true
+    }
+    return -not $provider -and $registeredRedisUrl -eq $LegacyManagedRedisUrl
 }
 
 function Test-PathUnderRoot {
@@ -880,10 +921,6 @@ function Install-WingetPackage {
     Update-ProcessPathFromRegistry
 }
 
-function Resolve-DockerCommand {
-    return (Resolve-OptionalCommandPath @("docker.exe", "docker"))
-}
-
 function Get-FileHashText {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
@@ -892,10 +929,200 @@ function Get-FileHashText {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
 }
 
+function Install-VerifiedZipRuntime {
+    param(
+        [string]$Label,
+        [string]$Url,
+        [string]$ExpectedHash,
+        [ValidateSet("SHA256", "SHA512")]
+        [string]$HashAlgorithm,
+        [string]$TargetRoot,
+        [string]$RequiredRelativePath,
+        [string]$SourceArchivePath = "",
+        [switch]$ForceRepair
+    )
+
+    $requiredPath = Join-Path $TargetRoot $RequiredRelativePath
+    if (-not $ForceRepair -and (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        return (Resolve-Path -LiteralPath $requiredPath).Path
+    }
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        Stop-WithError "$Label requires a 64-bit Windows operating system."
+    }
+
+    $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("darkweb-runtime-" + [Guid]::NewGuid().ToString("N"))
+    $archivePath = Join-Path $stagingRoot "runtime.zip"
+    $unpackRoot = Join-Path $stagingRoot "unpacked"
+    $previousProgressPreference = $ProgressPreference
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        New-Item -ItemType Directory -Force -Path $stagingRoot,$unpackRoot | Out-Null
+        if ($SourceArchivePath) {
+            $sourcePath = [System.IO.Path]::GetFullPath($SourceArchivePath)
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                Stop-WithError "$Label archive was not found: $sourcePath"
+            }
+            Copy-Item -LiteralPath $sourcePath -Destination $archivePath
+        }
+        else {
+            Write-Info "Downloading $Label"
+            Invoke-WebRequest -Uri $Url -OutFile $archivePath -UseBasicParsing -TimeoutSec 300
+        }
+
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm $HashAlgorithm).Hash.ToLowerInvariant()
+        if ($actualHash -ne $ExpectedHash.ToLowerInvariant()) {
+            Stop-WithError "$Label checksum verification failed."
+        }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $unpackRoot
+        $unpackedRequiredPath = Join-Path $unpackRoot $RequiredRelativePath
+        if (-not (Test-Path -LiteralPath $unpackedRequiredPath -PathType Leaf)) {
+            Stop-WithError "$Label archive is missing $RequiredRelativePath."
+        }
+
+        Ensure-Directory (Split-Path -Parent $TargetRoot)
+        if (Test-Path -LiteralPath $TargetRoot) {
+            $invalidTarget = "$TargetRoot.invalid.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+            Move-Item -LiteralPath $TargetRoot -Destination $invalidTarget
+            Write-Warn "Preserved incomplete $Label runtime at $invalidTarget"
+        }
+        Move-Item -LiteralPath $unpackRoot -Destination $TargetRoot
+    }
+    finally {
+        $ProgressPreference = $previousProgressPreference
+        if (Test-Path -LiteralPath $stagingRoot) {
+            Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        Stop-WithError "$Label installation did not produce $requiredPath."
+    }
+    return (Resolve-Path -LiteralPath $requiredPath).Path
+}
+
+function Save-GarnetRuntimeManifest {
+    $payload = [ordered]@{
+        provider = "garnet"
+        version = $GarnetVersion
+        archive_sha256 = $GarnetArchiveSha256
+        server_executable_sha256 = $GarnetServerSha256
+        dotnet_version = $GarnetDotnetVersion
+        dotnet_archive_sha512 = $GarnetDotnetArchiveSha512
+        dotnet_executable_sha256 = $GarnetDotnetExecutableSha256
+        endpoint = $ManagedGarnetRedisUrl
+        runtime_root = $GarnetRuntimeRoot
+        dotnet_root = $GarnetDotnetRoot
+        checkpoint_root = $GarnetCheckpointDir
+        installed_at = [DateTime]::UtcNow.ToString("o")
+    }
+    Ensure-Directory (Split-Path -Parent $GarnetRuntimeManifest)
+    $temporaryPath = "$GarnetRuntimeManifest.tmp"
+    [System.IO.File]::WriteAllText(
+        $temporaryPath,
+        ($payload | ConvertTo-Json -Depth 4),
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    Move-Item -LiteralPath $temporaryPath -Destination $GarnetRuntimeManifest -Force
+}
+
+function Resolve-ManagedGarnetRuntime {
+    if (-not ((Test-Path -LiteralPath $GarnetServerExecutable -PathType Leaf) -and
+        (Test-Path -LiteralPath $GarnetDotnetExecutable -PathType Leaf) -and
+        (Test-Path -LiteralPath $GarnetRuntimeManifest -PathType Leaf))) {
+        return $null
+    }
+
+    try {
+        $manifest = Get-Content -LiteralPath $GarnetRuntimeManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($manifest.provider -ne "garnet" -or
+            $manifest.version -ne $GarnetVersion -or
+            $manifest.archive_sha256 -ne $GarnetArchiveSha256 -or
+            $manifest.server_executable_sha256 -ne $GarnetServerSha256 -or
+            $manifest.dotnet_version -ne $GarnetDotnetVersion -or
+            $manifest.dotnet_archive_sha512 -ne $GarnetDotnetArchiveSha512 -or
+            $manifest.dotnet_executable_sha256 -ne $GarnetDotnetExecutableSha256) {
+            return $null
+        }
+        if ((Get-FileHash -LiteralPath $GarnetServerExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -ne $GarnetServerSha256 -or
+            (Get-FileHash -LiteralPath $GarnetDotnetExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -ne $GarnetDotnetExecutableSha256) {
+            return $null
+        }
+    }
+    catch {
+        return $null
+    }
+
+    $previousDotnetRoot = [Environment]::GetEnvironmentVariable("DOTNET_ROOT", "Process")
+    $previousDotnetRootX64 = [Environment]::GetEnvironmentVariable("DOTNET_ROOT_X64", "Process")
+    $previousPath = $env:Path
+    $runtimeValid = $false
+    try {
+        Set-Item -Path "Env:DOTNET_ROOT" -Value $GarnetDotnetRoot
+        Set-Item -Path "Env:DOTNET_ROOT_X64" -Value $GarnetDotnetRoot
+        Add-ProcessPathEntry $GarnetDotnetRoot
+        & $GarnetServerExecutable --help *> $null
+        $runtimeValid = $LASTEXITCODE -eq 0
+    }
+    catch {
+        $runtimeValid = $false
+    }
+    finally {
+        $env:Path = $previousPath
+        if ($null -eq $previousDotnetRoot) { Remove-Item Env:DOTNET_ROOT -ErrorAction SilentlyContinue } else { Set-Item Env:DOTNET_ROOT -Value $previousDotnetRoot }
+        if ($null -eq $previousDotnetRootX64) { Remove-Item Env:DOTNET_ROOT_X64 -ErrorAction SilentlyContinue } else { Set-Item Env:DOTNET_ROOT_X64 -Value $previousDotnetRootX64 }
+    }
+    if (-not $runtimeValid) {
+        return $null
+    }
+    return [pscustomobject]@{
+        ServerExecutable = (Resolve-Path -LiteralPath $GarnetServerExecutable).Path
+        DotnetExecutable = (Resolve-Path -LiteralPath $GarnetDotnetExecutable).Path
+        DataRoot = $GarnetDataRoot
+        CheckpointDir = $GarnetCheckpointDir
+    }
+}
+
+function Ensure-ManagedGarnetRuntime {
+    $runtime = Resolve-ManagedGarnetRuntime
+    if ($runtime) {
+        return $runtime
+    }
+    if ($env:DARKWEB_GARNET_AUTO_INSTALL -eq "0") {
+        Stop-WithError "Managed Garnet is missing and DARKWEB_GARNET_AUTO_INSTALL=0. Place the verified runtime under $GarnetRuntimeRoot and .NET under $GarnetDotnetRoot."
+    }
+
+    Install-VerifiedZipRuntime `
+        -Label "Microsoft .NET Runtime $GarnetDotnetVersion" `
+        -Url $GarnetDotnetArchiveUrl `
+        -ExpectedHash $GarnetDotnetArchiveSha512 `
+        -HashAlgorithm "SHA512" `
+        -TargetRoot $GarnetDotnetRoot `
+        -RequiredRelativePath "dotnet.exe" `
+        -SourceArchivePath ([string]$env:DARKWEB_DOTNET_RUNTIME_ARCHIVE_PATH) `
+        -ForceRepair | Out-Null
+    Install-VerifiedZipRuntime `
+        -Label "Microsoft Garnet $GarnetVersion" `
+        -Url $GarnetArchiveUrl `
+        -ExpectedHash $GarnetArchiveSha256 `
+        -HashAlgorithm "SHA256" `
+        -TargetRoot $GarnetRuntimeRoot `
+        -RequiredRelativePath "net10.0\GarnetServer.exe" `
+        -SourceArchivePath ([string]$env:DARKWEB_GARNET_ARCHIVE_PATH) `
+        -ForceRepair | Out-Null
+
+    Save-GarnetRuntimeManifest
+    $runtime = Resolve-ManagedGarnetRuntime
+    if (-not $runtime) {
+        Stop-WithError "Microsoft Garnet was installed but could not run with the project-private .NET runtime."
+    }
+    Write-Info "Managed Garnet runtime ready: $GarnetServerExecutable"
+    return $runtime
+}
+
 function Get-RedisEndpoint {
     $endpoint = [pscustomobject]@{
         Host = "127.0.0.1"
-        Port = 6379
+        Port = 6380
         IsLocal = $true
     }
 
@@ -930,18 +1157,46 @@ function Test-RedisReady {
         }
     }
 
+    $client = $null
     try {
         $client = New-Object System.Net.Sockets.TcpClient
+        $client.ReceiveTimeout = 1000
+        $client.SendTimeout = 1000
         $async = $client.BeginConnect($endpoint.Host, $endpoint.Port, $null, $null)
-        $connected = $async.AsyncWaitHandle.WaitOne(1000, $false)
-        if ($connected) {
-            $client.EndConnect($async)
+        $waitHandle = $async.AsyncWaitHandle
+        try {
+            if (-not $waitHandle.WaitOne(1000, $false)) {
+                return $false
+            }
         }
-        $client.Close()
-        return $connected
+        finally {
+            $waitHandle.Close()
+        }
+        $client.EndConnect($async)
+        $stream = $client.GetStream()
+        $request = [Text.Encoding]::ASCII.GetBytes("*1`r`n`$4`r`nPING`r`n")
+        $stream.Write($request, 0, $request.Length)
+        $buffer = New-Object byte[] 64
+        $responseBuilder = New-Object System.Text.StringBuilder
+        while ($responseBuilder.Length -lt 1024) {
+            $count = $stream.Read($buffer, 0, $buffer.Length)
+            if ($count -le 0) {
+                break
+            }
+            $null = $responseBuilder.Append([Text.Encoding]::ASCII.GetString($buffer, 0, $count))
+            if ($responseBuilder.ToString().Contains("`r`n")) {
+                break
+            }
+        }
+        return $responseBuilder.ToString().StartsWith("+PONG`r`n", [StringComparison]::Ordinal)
     }
     catch {
         return $false
+    }
+    finally {
+        if ($client) {
+            $client.Dispose()
+        }
     }
 }
 
@@ -1077,32 +1332,6 @@ function Get-ListeningProcessIds {
     }
 }
 
-function Stop-ListenersOnPort {
-    param(
-        [int]$Port,
-        [string]$Reason
-    )
-    foreach ($processId in Get-ListeningProcessIds -Port $Port) {
-        if ($processId -and $processId -ne $PID) {
-            Write-Warn "Stopping process $processId listening on port $Port ($Reason)"
-            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
-            if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-                $oldErrorActionPreference = $ErrorActionPreference
-                try {
-                    $ErrorActionPreference = "Continue"
-                    & taskkill.exe /PID $processId /T /F 2>$null | Out-Null
-                }
-                finally {
-                    $ErrorActionPreference = $oldErrorActionPreference
-                }
-                if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
-                    Write-Warn "Process $processId could not be stopped; a fallback port will be used if needed"
-                }
-            }
-        }
-    }
-}
-
 function Test-PortBindable {
     param([int]$Port)
     $listener = $null
@@ -1150,7 +1379,7 @@ function Find-AvailablePort {
 }
 
 function Ensure-ApiPort {
-    Stop-ListenersOnPort -Port $ApiPort -Reason "required by darkweb collector API"
+    Stop-ProjectListenersOnPort -Port $ApiPort -Reason "required by darkweb collector API"
     Start-Sleep -Milliseconds 500
     if (Test-PortAvailable -Port $ApiPort) {
         return
@@ -1162,7 +1391,7 @@ function Ensure-ApiPort {
 }
 
 function Ensure-FrontendPort {
-    Stop-ListenersOnPort -Port $FrontendPort -Reason "required by darkweb dashboard"
+    Stop-ProjectListenersOnPort -Port $FrontendPort -Reason "required by darkweb dashboard"
     Start-Sleep -Milliseconds 500
     if (Test-PortAvailable -Port $FrontendPort) {
         return
@@ -1194,12 +1423,17 @@ function Test-ManagedServicesRunning {
         $requiredNames += "worker-browser-$index"
     }
     $records = @(Get-ServiceRecords)
+    if ($records | Where-Object { $_.name -eq "garnet" } | Select-Object -First 1) {
+        $requiredNames += @("garnet", "garnet-checkpoint")
+    }
+    $processRows = @(Get-ProcessRows)
+    $processRowMap = New-ProcessRowMap -ProcessRows $processRows
     foreach ($name in $requiredNames) {
         $record = $records | Where-Object { $_.name -eq $name } | Select-Object -First 1
         if (-not $record) {
             return $false
         }
-        if (-not (Test-ProcessRunning -ProcessId ([int]$record.pid))) {
+        if (-not (Test-ServiceRecordOwnsProcess -Record $record -ProcessRows $processRows -ProcessRowMap $processRowMap)) {
             return $false
         }
     }
@@ -1234,6 +1468,85 @@ function Test-ProcessRunning {
     return [bool](Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+function Get-ManagedGarnetProcesses {
+    $records = @(Get-ServiceRecords | Where-Object { $_.name -eq "garnet" })
+    $processRows = @(Get-ProcessRows)
+    $processRowMap = New-ProcessRowMap -ProcessRows $processRows
+    $managed = @()
+    foreach ($process in @(Get-Process -Name "GarnetServer" -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and $_.Path.Equals($GarnetServerExecutable, [StringComparison]::OrdinalIgnoreCase)
+    })) {
+        $record = $records | Where-Object { [int]$_.pid -eq $process.Id } | Select-Object -First 1
+        if ($record -and (Test-ServiceRecordOwnsProcess -Record $record -ProcessRows $processRows -ProcessRowMap $processRowMap)) {
+            $managed += $process
+            continue
+        }
+        if ($processRowMap.ContainsKey($process.Id) -and
+            (Test-ProjectManagedCommandLine -CommandLine ([string]$processRowMap[$process.Id].CommandLine))) {
+            $managed += $process
+        }
+    }
+    return $managed
+}
+
+function Stop-ManagedGarnetProcesses {
+    foreach ($process in @(Get-ManagedGarnetProcesses)) {
+        if ($process.Id -eq $PID) {
+            continue
+        }
+        Write-Info "Stopping managed Garnet child pid $($process.Id)"
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Stop-ManagedProjectPythonProcesses {
+    if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+        return
+    }
+    $processRows = @(Get-ProcessRows)
+    $processRowMap = New-ProcessRowMap -ProcessRows $processRows
+    foreach ($process in @(Get-Process -Name "python" -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -and $_.Path.Equals($VenvPython, [StringComparison]::OrdinalIgnoreCase)
+    })) {
+        if ($processRowMap.ContainsKey($process.Id) -and
+            (Test-ProjectManagedProcess -ProcessRow $processRowMap[$process.Id] -ProcessRowMap $processRowMap)) {
+            Write-Info "Stopping project Python child pid $($process.Id)"
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ProcessUsesDashboardRuntime {
+    param([object]$Process)
+    if ($Process.Path -and (Test-PathUnderRoot -Path $Process.Path -Root $DashboardNodeModulesDir)) {
+        return $true
+    }
+    try {
+        foreach ($module in @($Process.Modules)) {
+            if ($module.FileName -and (Test-PathUnderRoot -Path $module.FileName -Root $DashboardNodeModulesDir)) {
+                return $true
+            }
+        }
+    }
+    catch {
+    }
+    return $false
+}
+
+function Stop-ManagedDashboardProcesses {
+    $processRows = @(Get-ProcessRows)
+    $processRowMap = New-ProcessRowMap -ProcessRows $processRows
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        Test-ProcessUsesDashboardRuntime -Process $_
+    })) {
+        if ($processRowMap.ContainsKey($process.Id) -and
+            (Test-ProjectManagedProcess -ProcessRow $processRowMap[$process.Id] -ProcessRowMap $processRowMap)) {
+            Write-Info "Stopping dashboard child pid $($process.Id)"
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-ProcessRows {
     try {
         return @(Get-CimInstance Win32_Process -ErrorAction Stop)
@@ -1252,6 +1565,50 @@ function New-ProcessRowMap {
         }
     }
     return $map
+}
+
+function Test-ServiceRecordOwnsProcess {
+    param(
+        [object]$Record,
+        [object[]]$ProcessRows,
+        [hashtable]$ProcessRowMap
+    )
+    $processId = [int]$Record.pid
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $false
+    }
+    try {
+        $recordStartedAt = [DateTime]::Parse([string]$Record.started_at)
+        if ([Math]::Abs(($process.StartTime - $recordStartedAt).TotalSeconds) -gt 15) {
+            return $false
+        }
+    }
+    catch {
+        return $false
+    }
+
+    if ($Record.name -eq "garnet") {
+        if (-not ($process.Path -and $process.Path.Equals($GarnetServerExecutable, [StringComparison]::OrdinalIgnoreCase))) {
+            return $false
+        }
+        if ($ProcessRowMap.ContainsKey($processId)) {
+            return (Test-ProjectManagedCommandLine -CommandLine ([string]$ProcessRowMap[$processId].CommandLine))
+        }
+        return $true
+    }
+
+    if ($Record.name -eq "garnet-checkpoint") {
+        if ($ProcessRowMap.ContainsKey($processId) -and $ProcessRowMap[$processId].CommandLine) {
+            return (Test-ProjectManagedCommandLine -CommandLine ([string]$ProcessRowMap[$processId].CommandLine))
+        }
+        return $process.ProcessName -in @("powershell", "pwsh")
+    }
+
+    if (-not $ProcessRowMap.ContainsKey($processId)) {
+        return $false
+    }
+    return (Test-ProjectManagedProcess -ProcessRow $ProcessRowMap[$processId] -ProcessRowMap $ProcessRowMap)
 }
 
 function Invoke-TaskKill {
@@ -1311,6 +1668,11 @@ function Test-ProjectManagedCommandLine {
         return $false
     }
 
+    if ($CommandLine.IndexOf($GarnetServerExecutable, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $CommandLine.IndexOf($GarnetCheckpointDir, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+
     $projectProcessPattern = [regex]::Escape($ProjectRoot)
     if ($CommandLine -notmatch $projectProcessPattern) {
         return $false
@@ -1324,7 +1686,8 @@ function Test-ProjectManagedCommandLine {
         "node_modules\.bin",
         "vite\bin\vite.js",
         "npm-cli.js",
-        "npm run dev"
+        "npm run dev",
+        "DARKWEB_GARNET_CHECKPOINT_LOOP"
     )
     return [bool]($markers | Where-Object { $CommandLine -like "*$_*" } | Select-Object -First 1)
 }
@@ -1476,6 +1839,66 @@ function Start-ManagedProcess {
     }
 }
 
+function Start-ManagedGarnetProcess {
+    param(
+        [object]$Runtime,
+        [int]$Port
+    )
+
+    Ensure-Directory $LogDir
+    $logPath = Join-Path $LogDir "garnet.log"
+    $errorLogPath = Join-Path $LogDir "garnet-error.log"
+    foreach ($path in @($logPath, $errorLogPath)) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $arguments = @(
+        "--port", [string]$Port,
+        "--bind", "127.0.0.1",
+        "--memory", "256m",
+        "--page", "4m",
+        "--segment", "64m",
+        "--aof",
+        "--aof-commit-wait",
+        "--checkpointdir", ('"{0}"' -f [string]$Runtime.CheckpointDir),
+        "--recover",
+        "--lua",
+        "--logger-level", "Information"
+    )
+
+    $previousDotnetRoot = [Environment]::GetEnvironmentVariable("DOTNET_ROOT", "Process")
+    $previousDotnetRootX64 = [Environment]::GetEnvironmentVariable("DOTNET_ROOT_X64", "Process")
+    $previousPath = $env:Path
+    try {
+        Set-Item -Path "Env:DOTNET_ROOT" -Value $GarnetDotnetRoot
+        Set-Item -Path "Env:DOTNET_ROOT_X64" -Value $GarnetDotnetRoot
+        Add-ProcessPathEntry $GarnetDotnetRoot
+        $process = Start-Process `
+            -FilePath $Runtime.ServerExecutable `
+            -ArgumentList $arguments `
+            -WorkingDirectory $Runtime.DataRoot `
+            -RedirectStandardOutput $logPath `
+            -RedirectStandardError $errorLogPath `
+            -WindowStyle Hidden `
+            -PassThru
+    }
+    finally {
+        $env:Path = $previousPath
+        if ($null -eq $previousDotnetRoot) { Remove-Item Env:DOTNET_ROOT -ErrorAction SilentlyContinue } else { Set-Item Env:DOTNET_ROOT -Value $previousDotnetRoot }
+        if ($null -eq $previousDotnetRootX64) { Remove-Item Env:DOTNET_ROOT_X64 -ErrorAction SilentlyContinue } else { Set-Item Env:DOTNET_ROOT_X64 -Value $previousDotnetRootX64 }
+    }
+
+    return [pscustomobject]@{
+        name = "garnet"
+        pid = $process.Id
+        log = $logPath
+        error_log = $errorLogPath
+        started_at = (Get-Date).ToString("s")
+    }
+}
+
 function Ensure-PythonRuntime {
     $python = Resolve-PythonExe
     if ($python) {
@@ -1609,127 +2032,38 @@ function Ensure-NodeRuntime {
     return $npm
 }
 
-function Resolve-RedisServerCommand {
-    $redisServer = Resolve-OptionalCommandPath @("redis-server.exe", "redis-server")
-    if ($redisServer) {
-        return $redisServer
-    }
-
-    $memurai = Resolve-OptionalCommandPath @("memurai.exe", "memurai")
-    if ($memurai) {
-        return $memurai
-    }
-
-    $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-    $candidates = @()
-    if ($env:ProgramFiles) {
-        $candidates += (Join-Path $env:ProgramFiles "Memurai\memurai.exe")
-        $candidates += (Join-Path $env:ProgramFiles "Redis\redis-server.exe")
-    }
-    if ($programFilesX86) {
-        $candidates += (Join-Path $programFilesX86 "Memurai\memurai.exe")
-        $candidates += (Join-Path $programFilesX86 "Redis\redis-server.exe")
-    }
-    foreach ($candidate in $candidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-            return $candidate
-        }
-    }
-    return $null
-}
-
-function Start-RedisServiceIfAvailable {
-    $services = @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -like "*Memurai*" -or
-        $_.DisplayName -like "*Memurai*" -or
-        $_.Name -like "*Redis*" -or
-        $_.DisplayName -like "*Redis*"
-    })
-    foreach ($service in $services) {
-        if ($service.Status -ne "Running") {
-            try {
-                Write-Info "Starting Redis-compatible service: $($service.Name)"
-                Start-Service -Name $service.Name -ErrorAction Stop
-            }
-            catch {
-                Write-Warn "Could not start service $($service.Name): $($_.Exception.Message)"
-            }
-        }
-        if (Wait-ForRedis -TimeoutSeconds 10) {
-            return $true
-        }
-    }
-    return $false
-}
-
-function Start-DockerRedisIfAvailable {
-    $endpoint = Get-RedisEndpoint
-    if (-not $endpoint.IsLocal) {
-        return $false
-    }
-
-    $docker = Resolve-DockerCommand
-    if (-not $docker) {
-        return $false
-    }
-
-    & $docker info *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Docker was found, but the Docker engine is not running"
-        return $false
-    }
-
-    $containerName = "darkweb-redis"
-    $running = (& $docker ps --filter "name=^/${containerName}$" --format "{{.Names}}" 2>$null) -join ""
-    if ($running -eq $containerName) {
-        return (Wait-ForRedis -TimeoutSeconds 15)
-    }
-
-    $existing = (& $docker ps -a --filter "name=^/${containerName}$" --format "{{.Names}}" 2>$null) -join ""
-    if ($existing -eq $containerName) {
-        Write-Info "Starting Redis Docker container: $containerName"
-        & $docker start $containerName *> $null
-    }
-    else {
-        Write-Info "Creating Redis Docker container: $containerName"
-        & $docker run -d --name $containerName -p "$($endpoint.Port):6379" redis:7-alpine *> $null
-    }
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Docker could not start a Redis container"
-        return $false
-    }
-    return (Wait-ForRedis -TimeoutSeconds $ServiceWaitSeconds)
-}
-
 function Ensure-RedisRuntime {
     if (Test-RedisReady) {
-        return
+        if ($RedisUrl -eq $LegacyManagedRedisUrl -and (Test-ProjectOwnedRedisEnvironment)) {
+            Write-Info "Migrating the project-owned legacy Redis endpoint to managed Garnet."
+            $script:RedisUrl = $ManagedGarnetRedisUrl
+            Set-Item -Path "Env:REDIS_URL" -Value $ManagedGarnetRedisUrl
+        }
+        else {
+            if (@((Get-ManagedGarnetProcesses)).Count -gt 0) {
+                $script:RedisProvider = "garnet"
+            }
+            return
+        }
     }
     $endpoint = Get-RedisEndpoint
     if (-not $endpoint.IsLocal) {
         Stop-WithError "REDIS_URL points to $RedisUrl, but it is not reachable. Start that Redis instance or change REDIS_URL."
     }
-    if (Start-RedisServiceIfAvailable) {
-        return
+    if ($RedisUrl -eq $LegacyManagedRedisUrl) {
+        if (-not (Test-ProjectOwnedRedisEnvironment)) {
+            Stop-WithError "Configured REDIS_URL $LegacyManagedRedisUrl is not reachable. It was not marked as project-managed, so it will not be replaced automatically."
+        }
+        Write-Info "Legacy Redis endpoint $LegacyManagedRedisUrl is unavailable; switching to managed Garnet."
+        $script:RedisUrl = $ManagedGarnetRedisUrl
+        Set-Item -Path "Env:REDIS_URL" -Value $ManagedGarnetRedisUrl
     }
-    if (Start-DockerRedisIfAvailable) {
-        return
-    }
-    if (Resolve-RedisServerCommand) {
-        return
-    }
-
-    Install-WingetPackage -PackageId "Memurai.MemuraiDeveloper" -DisplayName "Memurai Developer (Redis-compatible server)"
-    Update-ProcessPathFromRegistry
-    if (Start-RedisServiceIfAvailable) {
-        return
-    }
-    if (Resolve-RedisServerCommand) {
-        return
+    elseif ($RedisUrl -ne $ManagedGarnetRedisUrl) {
+        Stop-WithError "Configured REDIS_URL $RedisUrl is not reachable. The project only auto-manages Garnet at $ManagedGarnetRedisUrl."
     }
 
-    Stop-WithError "Memurai was installed, but no Redis-compatible service or executable could be found."
+    Ensure-ManagedGarnetRuntime | Out-Null
+    $script:RedisProvider = "garnet"
 }
 
 function Register-DarkwebCommand {
@@ -1768,7 +2102,10 @@ if "%~1"=="" (
     Set-UserEnv -Name "DARKWEB_COLLECTOR_SITES_FILE" -Value $CollectorSitesFile
     Set-UserEnv -Name "DARKWEB_COLLECTOR_OUTPUT_ROOT" -Value $CollectorOutputRoot
     Set-UserEnv -Name "DARKWEB_AUTH_PASSWORD_FILE" -Value $AuthPasswordFile
-    Set-UserEnv -Name "REDIS_URL" -Value $RedisUrl
+    if ($script:RedisProvider -eq "garnet") {
+        Set-UserEnv -Name "REDIS_URL" -Value $RedisUrl
+        Set-UserEnv -Name "DARKWEB_REDIS_PROVIDER" -Value "garnet"
+    }
     Set-UserEnv -Name "DARKWEB_API_PORT" -Value ([string]$ApiPort)
     Set-UserEnv -Name "DARKWEB_API_TARGET" -Value $ApiBaseUrl
     Set-UserEnv -Name "DARKWEB_FRONTEND_PORT" -Value ([string]$FrontendPort)
@@ -1988,6 +2325,17 @@ print(",".join(config.site_name for config in configs))
 function Ensure-Redis {
     if (Test-RedisReady) {
         Write-Info "Redis is already running"
+        $managedGarnet = @(Get-ManagedGarnetProcesses) | Select-Object -First 1
+        if ($managedGarnet) {
+            $script:RedisProvider = "garnet"
+            return [pscustomobject]@{
+                name = "garnet"
+                pid = $managedGarnet.Id
+                log = Join-Path $LogDir "garnet.log"
+                error_log = Join-Path $LogDir "garnet-error.log"
+                started_at = $managedGarnet.StartTime.ToString("s")
+            }
+        }
         return $null
     }
 
@@ -1996,16 +2344,20 @@ function Ensure-Redis {
         Stop-WithError "REDIS_URL points to $RedisUrl, but it is not reachable. Start that Redis instance or change REDIS_URL."
     }
 
-    $redisServer = Resolve-RedisServerCommand
-    if (-not $redisServer) {
-        Stop-WithError "Redis is not running and redis-server was not found in PATH. Start Redis on 127.0.0.1:6379 or install Redis for Windows, Memurai, or Redis in WSL with port forwarding."
+    if ($RedisUrl -ne $ManagedGarnetRedisUrl) {
+        Stop-WithError "Redis-compatible endpoint $RedisUrl is not ready and is not managed by this project."
     }
+    $runtime = Ensure-ManagedGarnetRuntime
+    Ensure-Directory $runtime.DataRoot
+    Ensure-Directory $runtime.CheckpointDir
 
-    Write-Info "Starting Redis"
-    $body = "& $(Quote-PS $redisServer) --port $($endpoint.Port)"
-    $record = Start-ManagedProcess -Name "redis" -WorkingDirectory $CollectorRoot -Body $body
+    Write-Info "Starting managed Microsoft Garnet $GarnetVersion"
+    $record = Start-ManagedGarnetProcess -Runtime $runtime -Port $endpoint.Port
     if (-not (Wait-ForRedis -TimeoutSeconds $ServiceWaitSeconds)) {
-        Stop-WithError "Redis did not become ready. Check $($record.log)."
+        if (Test-ProcessRunning -ProcessId ([int]$record.pid)) {
+            Stop-ProcessTree -ProcessId ([int]$record.pid) -Label "failed Garnet"
+        }
+        Stop-WithError "Garnet did not become ready. Check $($record.log)."
     }
     return $record
 }
@@ -2149,8 +2501,14 @@ function Start-Services {
     $redisRecord = Ensure-Redis
     if ($redisRecord) {
         $records += $redisRecord
+        Save-ServiceRecords $records
     }
     $python = Quote-PS $VenvPython
+    if ($redisRecord) {
+        $checkpointCode = Quote-PS "import os, redis; redis.Redis.from_url(os.environ['REDIS_URL'], socket_connect_timeout=5, socket_timeout=30).bgsave(schedule=True)"
+        $checkpointBody = "`$env:DARKWEB_GARNET_CHECKPOINT_LOOP = '1'; while (`$true) { Start-Sleep -Seconds $GarnetCheckpointIntervalSeconds; & $python -c $checkpointCode; if (`$LASTEXITCODE -ne 0) { Write-Warning 'Managed Garnet checkpoint failed' } }"
+        $records += Start-ManagedProcess -Name "garnet-checkpoint" -WorkingDirectory $CollectorRoot -Body $checkpointBody
+    }
     $null = Ensure-NodeRuntime
     $node = Quote-PS $script:NodeExePath
     $crawler = Quote-PS (Join-Path $CollectorRoot "scripts\crawl.py")
@@ -2193,10 +2551,16 @@ function Stop-Services {
     $records = @(Get-ServiceRecords)
     $processRows = @(Get-ProcessRows)
     $processRowMap = New-ProcessRowMap -ProcessRows $processRows
-    foreach ($record in $records) {
+    $stopRecords = @($records | Sort-Object @{ Expression = { if ($_.name -eq "garnet") { 1 } else { 0 } } })
+    foreach ($record in $stopRecords) {
         $pidValue = [int]$record.pid
         if (Test-ProcessRunning -ProcessId $pidValue) {
-            Stop-ProcessTree -ProcessId $pidValue -ProcessRows $processRows -ProcessRowMap $processRowMap -Label $record.name
+            if (Test-ServiceRecordOwnsProcess -Record $record -ProcessRows $processRows -ProcessRowMap $processRowMap) {
+                Stop-ProcessTree -ProcessId $pidValue -ProcessRows $processRows -ProcessRowMap $processRowMap -Label $record.name
+            }
+            else {
+                Write-Warn "Ignoring stale PID record for $($record.name): $pidValue"
+            }
         }
     }
 
@@ -2208,9 +2572,12 @@ function Stop-Services {
         ForEach-Object {
             Stop-ProcessTree -ProcessId ([int]$_.ProcessId) -ProcessRows $processRows -ProcessRowMap $processRowMap -Label "project process"
         }
+    Stop-ManagedDashboardProcesses
+    Stop-ManagedProjectPythonProcesses
+    Stop-ManagedGarnetProcesses
 
     foreach ($port in @($runtimePortsToClean | Where-Object { $_ -and [int]$_ -gt 0 } | Sort-Object -Unique)) {
-        Stop-ListenersOnPort -Port ([int]$port) -Reason "darkweb runtime port cleanup"
+        Stop-ProjectListenersOnPort -Port ([int]$port) -Reason "darkweb runtime port cleanup"
     }
     foreach ($port in @($projectPortsToClean | Where-Object { $_ -and [int]$_ -gt 0 } | Sort-Object -Unique)) {
         Stop-ProjectListenersOnPort -Port ([int]$port) -Reason "darkweb stop cleanup"
@@ -2269,6 +2636,7 @@ function Remove-DarkwebRegistration {
     Remove-ManagedPath -Path $DarkwebCommandPath -ExpectedPath (Join-Path $DefaultUserDataDir "bin\darkweb.cmd") -Label "darkweb command" -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-EmptyManagedDirectory -Path $CommandBinDir -ExpectedPath (Join-Path $DefaultUserDataDir "bin") -WhatIf:$WhatIfPreference -Confirm:$false
 
+    $projectOwnsRedisEnvironment = Test-ProjectOwnedRedisEnvironment
     $managedVariables = @(
         @{ Name = "DARKWEB_PROJECT_ROOT"; Values = @($ProjectRoot) },
         @{ Name = "DARKWEB_HOME"; Values = @($ProjectRoot) },
@@ -2278,7 +2646,6 @@ function Remove-DarkwebRegistration {
         @{ Name = "DARKWEB_COLLECTOR_SITES_FILE"; Values = @($CollectorSitesFile, (Join-Path $CollectorRoot "sites.yaml")) },
         @{ Name = "DARKWEB_COLLECTOR_OUTPUT_ROOT"; Values = @($CollectorOutputRoot, $ProjectCollectorOutputRoot, $LegacyCollectorOutputRoot) },
         @{ Name = "DARKWEB_AUTH_PASSWORD_FILE"; Values = @($AuthPasswordFile, (Join-Path $DefaultUserDataDir "auth-password.txt")) },
-        @{ Name = "REDIS_URL"; Values = @($RedisUrl) },
         @{ Name = "DARKWEB_API_PORT"; Values = @([string]$ApiPort) },
         @{ Name = "DARKWEB_API_TARGET"; Values = @($ApiBaseUrl) },
         @{ Name = "DARKWEB_FRONTEND_PORT"; Values = @([string]$FrontendPort) },
@@ -2286,6 +2653,10 @@ function Remove-DarkwebRegistration {
     )
     foreach ($variable in $managedVariables) {
         Remove-ManagedUserEnv -Name $variable.Name -ExpectedValues $variable.Values -WhatIf:$WhatIfPreference -Confirm:$false
+    }
+    if ($projectOwnsRedisEnvironment) {
+        Remove-ManagedUserEnv -Name "REDIS_URL" -ExpectedValues @($ManagedGarnetRedisUrl, $LegacyManagedRedisUrl) -WhatIf:$WhatIfPreference -Confirm:$false
+        Remove-ManagedUserEnv -Name "DARKWEB_REDIS_PROVIDER" -ExpectedValues @("garnet") -WhatIf:$WhatIfPreference -Confirm:$false
     }
     foreach ($name in @("DARKWEB_TOR_EXECUTABLE", "DARKWEB_TOR_TRANSPORT_EXECUTABLE", "DARKWEB_TOR_PT_CONFIG_PATH")) {
         Remove-ManagedUserEnv -Name $name -ExpectedRoot $DefaultTorExpertRoot -WhatIf:$WhatIfPreference -Confirm:$false
@@ -2321,6 +2692,12 @@ function Uninstall-Darkweb {
     Remove-ManagedPath -Path $DefaultTorBridgeAutoRuntimeDir -ExpectedPath (Join-Path $DefaultUserDataDir "tor_bridge_runtime_auto") -Label "Tor bridge probe runtime files" -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-ManagedPath -Path $DefaultTorExpertRoot -ExpectedPath (Join-Path $DefaultUserDataDir "tor-expert") -Label "project Tor Expert Bundle" -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-ManagedPath -Path $DefaultNpmCacheDir -ExpectedPath (Join-Path $DefaultUserDataDir "npm-cache") -Label "project npm cache" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $GarnetRuntimeRoot -ExpectedPath (Join-Path $DefaultRuntimeRoot "garnet\$GarnetVersion") -Label "managed Garnet runtime" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $GarnetDotnetRoot -ExpectedPath (Join-Path $DefaultRuntimeRoot "dotnet\$GarnetDotnetVersion") -Label "managed Garnet .NET runtime" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $GarnetRuntimeManifest -ExpectedPath (Join-Path $DefaultUserDataDir "garnet-runtime.json") -Label "managed Garnet runtime manifest" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-EmptyManagedDirectory -Path (Join-Path $DefaultRuntimeRoot "garnet") -ExpectedPath (Join-Path $DefaultRuntimeRoot "garnet") -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-EmptyManagedDirectory -Path (Join-Path $DefaultRuntimeRoot "dotnet") -ExpectedPath (Join-Path $DefaultRuntimeRoot "dotnet") -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-EmptyManagedDirectory -Path $DefaultRuntimeRoot -ExpectedPath (Join-Path $DefaultUserDataDir "runtimes") -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-ManagedPath -Path (Join-Path $CollectorRoot "dump.rdb") -ExpectedPath (Join-Path $CollectorRoot "dump.rdb") -Label "project Redis cache" -WhatIf:$WhatIfPreference -Confirm:$false
 
     if (-not (Test-SamePath -Left $TorExpertRoot -Right $DefaultTorExpertRoot)) {
@@ -2328,6 +2705,9 @@ function Uninstall-Darkweb {
     }
 
     if ($Mode -eq "purge-data") {
+        if (-not (Test-SamePath -Left $GarnetDataRoot -Right $DefaultGarnetDataRoot)) {
+            Write-Warn "Preserving custom Garnet data outside the managed user data directory: $GarnetDataRoot"
+        }
         if (-not (Test-SamePath -Left $CollectorOutputRoot -Right $ProjectCollectorOutputRoot) -and
             -not (Test-SamePath -Left $CollectorOutputRoot -Right $LegacyCollectorOutputRoot)) {
             Write-Warn "Preserving custom output directory outside managed locations: $CollectorOutputRoot"
@@ -2350,6 +2730,7 @@ function Uninstall-Darkweb {
         Write-Info "Uninstall complete: data was preserved"
         Write-Info "Preserved database: $CollectorDbPath"
         Write-Info "Preserved collected output: $CollectorOutputRoot"
+        Write-Info "Preserved Garnet checkpoints: $GarnetCheckpointDir"
     }
     Write-Info "The source checkout and shared system dependencies were not removed"
 }
@@ -2368,11 +2749,18 @@ function Show-Status {
         }
     }
 
+    $garnetRecord = $records | Where-Object { $_.name -eq "garnet" } | Select-Object -First 1
+    $garnetRunning = @((Get-ManagedGarnetProcesses)).Count -gt 0
     if (Test-RedisReady) {
-        Write-Info "redis: up"
+        $provider = if ($garnetRunning) { "managed Garnet $GarnetVersion" } else { "external Redis-compatible service" }
+        Write-Info "redis-compatible: up ($RedisUrl; $provider)"
     }
     else {
-        Write-Info "redis: down"
+        Write-Info "redis-compatible: down ($RedisUrl)"
+    }
+    if ((Test-Path -LiteralPath $GarnetServerExecutable -PathType Leaf) -or $garnetRecord) {
+        $garnetState = if ($garnetRunning) { "up" } else { "down" }
+        Write-Info "garnet: $garnetState (version $GarnetVersion; checkpoints $GarnetCheckpointDir)"
     }
 
     Ensure-TorBridgeRuntime
@@ -2401,14 +2789,51 @@ function Show-Status {
     }
 }
 
+function Invoke-WithProjectRuntimeLock {
+    param([scriptblock]$Body)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($ProjectRoot.ToLowerInvariant())
+        $identity = [BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace("-", "").Substring(0, 16)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    $lockPath = Join-Path ([System.IO.Path]::GetTempPath()) "DarkWebThreatIntel-$identity.lock"
+    $lockStream = $null
+    $deadline = [DateTime]::UtcNow.AddMinutes(2)
+    try {
+        while (-not $lockStream -and [DateTime]::UtcNow -lt $deadline) {
+            try {
+                $lockStream = [System.IO.File]::Open($lockPath, "OpenOrCreate", "ReadWrite", "None")
+            }
+            catch [System.IO.IOException] {
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        if (-not $lockStream) {
+            Stop-WithError "Another darkweb runtime operation is still running for this project."
+        }
+        & $Body
+    }
+    finally {
+        if ($lockStream) {
+            $lockStream.Dispose()
+        }
+    }
+}
+
 switch ($Action) {
-    "start" { Start-Services }
-    "stop" { Stop-Services }
+    "start" { Invoke-WithProjectRuntimeLock { Start-Services } }
+    "stop" { Invoke-WithProjectRuntimeLock { Stop-Services } }
     "status" { Show-Status }
     "install" {
-        Ensure-Environment
-        Write-Info "Environment is ready. Run 'darkweb' to start the system."
+        Invoke-WithProjectRuntimeLock {
+            Ensure-Environment
+            Write-Info "Environment is ready. Run 'darkweb' to start the system."
+        }
     }
-    "register" { Register-DarkwebCommand }
-    "uninstall" { Uninstall-Darkweb -Mode $UninstallMode -ForceDelete:$Force -WhatIf:$WhatIfPreference -Confirm:$false }
+    "register" { Invoke-WithProjectRuntimeLock { Register-DarkwebCommand } }
+    "uninstall" { Invoke-WithProjectRuntimeLock { Uninstall-Darkweb -Mode $UninstallMode -ForceDelete:$Force -WhatIf:$WhatIfPreference -Confirm:$false } }
 }

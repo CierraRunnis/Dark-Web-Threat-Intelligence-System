@@ -1,5 +1,35 @@
 # 更新记录
 
+## v20260825 - 2026-08-25
+
+发布分支：`main`
+
+### Windows 原生 Garnet 运行时
+
+- Windows 一键启动不再把 Memurai Developer 作为缺省 Redis 后端；缺少可用服务时自动安装并启动项目托管的 Microsoft Garnet 2.1.4。
+- 固定下载微软官方 Windows x64 ReadyToRun 资产和项目私有 .NET 10.0.11 运行时，分别执行 SHA-256 与 SHA-512 校验，不依赖 `winget`、Docker、Git、SDK 或系统级 .NET 安装。
+- Garnet 仅监听 `127.0.0.1:6380`，固定使用 Redis DB 0；启用 AOF、提交等待、检查点和恢复，并默认每 6 小时执行一次后台检查点，数据保存在用户数据目录，普通停止和保留数据卸载不会删除检查点。
+- 启动器通过 RESP `PING` 判断服务是否真正兼容 Redis，不再把普通 TCP 端口占用误判为可用服务；PID 丢失时也只识别本项目固定运行时及检查点目录对应的 Garnet 进程。
+- 兼容旧版写入的 `redis://127.0.0.1:6379/0`：该端点可用时继续复用，不可用时迁移到托管 Garnet；其他显式 `REDIS_URL` 保持用户配置权威，连接失败时不会被静默覆盖。
+- Garnet 不作为完整 Redis 替代：当前生产路径已验证 Celery broker/result、`SET NX EX` 状态锁、列表、事务和发布订阅；不得引入 Redis Streams 或非 DB 0 依赖，除非重新进行兼容测试。
+
+### 站点采集与前端
+
+- 新增 Cracked 与 PwnedForums 列表、详情解析和采集适配器，接入站点注册、标准化刷新和来源名称展示。
+- PwnedForums 支持从环境变量或受 Git 忽略的本地文件读取会话 Cookie，并通过 Tor/HTTP 抓取层安全透传。
+- 采集控制台新增登录态站点 Cookie 管理，支持脱敏查看、保存、刷新和清除文件 Cookie；Cracked 默认启用，PwnedForums 默认停用。
+
+### 版本与更新
+
+- 当前版本改用日期编号 `v20260825`，后续版本继续使用 `vYYYYMMDD`；历史版本记录保持不变。
+- 在线更新默认跟踪 `Threat-Intelligence-monitor/Dark-Web-Threat-Intelligence-System` 的 `main` 分支，可由环境变量显式覆盖；仍以 Git 提交和安全 fast-forward 判断是否可更新，不依赖语义版本比较。
+
+### 验证
+
+- Microsoft Garnet 官方 v2.1.4 发布资产通过 Redis 协议、项目 `RedisStateStore`、10/100 任务 Celery 往返、结果后端、控制 ping、定时 BGSAVE、AOF 强制终止恢复、未消费任务恢复和运行中 Worker 重连验证。
+- Cracked 解析与适配器测试、PwnedForums 列表/详情/时间/Cookie 透传、Cookie API、Python 编译、PowerShell 解析和前端生产构建通过。
+- 发布候选树不包含测试脚本、数据库、日志、运行数据、Cookie 或凭据文件。
+
 ## v0.22.0 - 2026-08-17
 
 发布分支：`v0.22.0`

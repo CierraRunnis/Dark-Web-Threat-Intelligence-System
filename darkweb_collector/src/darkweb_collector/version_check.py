@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_REPOSITORY = "CierraRunnis/Dark-Web-Threat-Intelligence-System"
+DEFAULT_REPOSITORY = "Threat-Intelligence-monitor/Dark-Web-Threat-Intelligence-System"
 DEFAULT_BRANCH = "main"
 DEFAULT_TIMEOUT_SECONDS = 6
 

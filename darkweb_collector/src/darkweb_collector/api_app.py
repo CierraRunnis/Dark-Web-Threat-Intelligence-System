@@ -180,7 +180,7 @@ class ApiGZipMiddleware:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="Darkweb Collector API", version="v.11.0")
+app = FastAPI(title="Darkweb Collector API", version="v20260825")
 app.include_router(migration_router)
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()

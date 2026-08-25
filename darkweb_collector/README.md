@@ -286,6 +286,8 @@ python -m uvicorn darkweb_collector.api_app:app --host 127.0.0.1 --port 8000
 export REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
+Windows 一键启动未显式配置 `REDIS_URL` 时会自动准备项目托管的 Microsoft Garnet，并使用 `redis://127.0.0.1:6380/0`。该兼容路径固定使用 DB 0，支持本项目当前 Celery 与状态锁命令，不应扩展为 Redis Streams 或其他未经验证的命令。
+
 启动 worker：
 
 ```bash
