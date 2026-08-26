@@ -24,6 +24,7 @@ from darkweb_collector.migration_bundle import (
     public_active_release,
     restore_previous_active,
 )
+from darkweb_collector.storage_paths import storage_summary
 
 
 router = APIRouter(prefix="/api/migrations", tags=["database-migrations"])
@@ -174,9 +175,11 @@ def _spawn_restart_controller(job_id: str) -> int | None:
 @router.get("/config")
 def migration_config(request: Request) -> dict[str, Any]:
     _require_admin(request)
+    active_release = public_active_release()
     return {
         "target": _target_summary(),
-        "active_release": public_active_release(),
+        "active_release": active_release,
+        "storage": storage_summary(active_release),
         "max_bundle_bytes": int(
             os.environ.get("DARKWEB_MIGRATION_MAX_BUNDLE_BYTES", DEFAULT_MAX_BUNDLE_BYTES)
         ),

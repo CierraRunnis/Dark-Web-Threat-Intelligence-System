@@ -8,6 +8,8 @@ param(
     [ValidateSet("keep-data", "purge-data")]
     [string]$UninstallMode = "keep-data",
 
+    [string]$DataRoot = "",
+
     [switch]$Force
 )
 
@@ -49,6 +51,81 @@ $ProjectRoot = (Resolve-Path (Join-Path $CollectorRoot "..")).Path
 $DashboardRoot = Join-Path $ProjectRoot "threat-intelligence-dashboard"
 $PostgreSqlSetupScript = Join-Path $ScriptDir "setup_postgresql_windows.ps1"
 $LocalAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE "AppData\Local" } else { Join-Path $ProjectRoot ".runtime\user" }
+$ControlRoot = [System.IO.Path]::GetFullPath((Join-Path $LocalAppDataRoot "DarkWebThreatIntel"))
+$DataRootConfigPath = Join-Path $ControlRoot "data-root.json"
+$PostgreSqlTargetConfigPath = Join-Path $ControlRoot "postgresql-target.json"
+$dataRootConfig = $null
+if (Test-Path -LiteralPath $DataRootConfigPath -PathType Leaf) {
+    try {
+        $dataRootConfig = Get-Content -LiteralPath $DataRootConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$dataRootConfig.format -ne 1 -or -not $dataRootConfig.data_root) {
+            throw "unsupported configuration"
+        }
+    }
+    catch {
+        throw "Data root configuration is invalid: $DataRootConfigPath"
+    }
+}
+$configuredDataRoot = if ($DataRoot) {
+    $DataRoot
+}
+elseif ([Environment]::GetEnvironmentVariable("DARKWEB_DATA_ROOT", "User")) {
+    [Environment]::GetEnvironmentVariable("DARKWEB_DATA_ROOT", "User")
+}
+elseif ($dataRootConfig) {
+    [string]$dataRootConfig.data_root
+}
+elseif ($env:DARKWEB_DATA_ROOT) {
+    $env:DARKWEB_DATA_ROOT
+}
+elseif ($env:DARKWEB_USER_DATA_ROOT) {
+    $env:DARKWEB_USER_DATA_ROOT
+}
+else {
+    $ControlRoot
+}
+if (-not [System.IO.Path]::IsPathRooted($configuredDataRoot)) {
+    throw "DataRoot must be an absolute path below a drive root."
+}
+$DefaultUserDataDir = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredDataRoot)).TrimEnd("\")
+if ($DefaultUserDataDir.StartsWith("\\", [StringComparison]::Ordinal)) {
+    throw "DataRoot must be on a local Windows volume; network and WSL UNC paths are not supported."
+}
+$dataDriveRoot = [System.IO.Path]::GetPathRoot($DefaultUserDataDir).TrimEnd("\")
+if ($DefaultUserDataDir -ieq $dataDriveRoot) {
+    throw "DataRoot cannot be a drive root; use a dedicated directory such as D:\DarkWebThreatIntel."
+}
+foreach ($protectedDataRoot in @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if (-not $protectedDataRoot) { continue }
+    $protectedPath = [System.IO.Path]::GetFullPath($protectedDataRoot).TrimEnd("\")
+    if ($DefaultUserDataDir -ieq $protectedPath -or
+        $DefaultUserDataDir.StartsWith($protectedPath + "\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "DataRoot cannot be under a protected system directory: $protectedPath"
+    }
+}
+$PreviousDataRoot = if ($dataRootConfig -and $dataRootConfig.previous_data_root) {
+    [System.IO.Path]::GetFullPath([string]$dataRootConfig.previous_data_root).TrimEnd("\")
+}
+else {
+    ""
+}
+function Resolve-MigratedDataPath {
+    param([string]$Value, [string]$DefaultPath)
+    if (-not $Value) { return $DefaultPath }
+    $resolvedValue = [System.IO.Path]::GetFullPath($Value).TrimEnd("\")
+    if ($PreviousDataRoot -and $PreviousDataRoot -ine $DefaultUserDataDir) {
+        if ($resolvedValue -ieq $PreviousDataRoot) { return $DefaultUserDataDir }
+        $previousPrefix = $PreviousDataRoot + "\"
+        if ($resolvedValue.StartsWith($previousPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            return $DefaultUserDataDir.TrimEnd("\") + $resolvedValue.Substring($PreviousDataRoot.Length)
+        }
+    }
+    return $resolvedValue
+}
+$MigrationRoot = Resolve-MigratedDataPath $env:DARKWEB_MIGRATION_ROOT (Join-Path $DefaultUserDataDir "migrations")
+$env:DARKWEB_DATA_ROOT = $DefaultUserDataDir
+$env:DARKWEB_USER_DATA_ROOT = $DefaultUserDataDir
+$env:DARKWEB_MIGRATION_ROOT = $MigrationRoot
 $VenvDir = Join-Path $CollectorRoot "venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $RuntimeDir = Join-Path $CollectorRoot ".runtime\windows"
@@ -57,15 +134,9 @@ $DashboardDistDir = Join-Path $DashboardRoot "dist"
 $LogDir = Join-Path $RuntimeDir "logs"
 $PidFile = Join-Path $RuntimeDir "services.json"
 $RuntimePortsFile = Join-Path $RuntimeDir "ports.json"
-$CommandBinDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel\bin"
+$CommandBinDir = Join-Path $ControlRoot "bin"
 $DarkwebCommandPath = Join-Path $CommandBinDir "darkweb.cmd"
-$DefaultUserDataDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel"
-$ActiveReleaseFile = if ($env:DARKWEB_ACTIVE_RELEASE_FILE) {
-    [System.IO.Path]::GetFullPath($env:DARKWEB_ACTIVE_RELEASE_FILE)
-}
-else {
-    Join-Path $DefaultUserDataDir "active-release.json"
-}
+$ActiveReleaseFile = Resolve-MigratedDataPath $env:DARKWEB_ACTIVE_RELEASE_FILE (Join-Path $DefaultUserDataDir "active-release.json")
 $ActiveRelease = $null
 if (Test-Path -LiteralPath $ActiveReleaseFile -PathType Leaf) {
     try {
@@ -97,7 +168,7 @@ $GarnetDotnetExecutableSha256 = "ab1b71fd3dd71062e074c9fab8312081a81b7f2b3e0327c
 $GarnetDotnetRoot = Join-Path $DefaultRuntimeRoot "dotnet\$GarnetDotnetVersion"
 $GarnetDotnetExecutable = Join-Path $GarnetDotnetRoot "dotnet.exe"
 $DefaultGarnetDataRoot = Join-Path $DefaultUserDataDir "garnet-data"
-$GarnetDataRoot = if ($env:DARKWEB_GARNET_DATA_ROOT) { [System.IO.Path]::GetFullPath($env:DARKWEB_GARNET_DATA_ROOT) } else { $DefaultGarnetDataRoot }
+$GarnetDataRoot = Resolve-MigratedDataPath $env:DARKWEB_GARNET_DATA_ROOT $DefaultGarnetDataRoot
 $GarnetCheckpointDir = Join-Path $GarnetDataRoot "checkpoints"
 $GarnetCheckpointIntervalSeconds = if ($env:DARKWEB_GARNET_CHECKPOINT_INTERVAL_SECONDS) { [Math]::Max([int]$env:DARKWEB_GARNET_CHECKPOINT_INTERVAL_SECONDS, 300) } else { 21600 }
 $GarnetRuntimeManifest = Join-Path $DefaultUserDataDir "garnet-runtime.json"
@@ -108,19 +179,14 @@ $LegacyCollectorOutputRoot = Join-Path $DefaultUserDataDir "output"
 $ProjectCollectorOutputRoot = Join-Path $CollectorRoot "output"
 $ProjectCollectorOutputArchiveRoot = Join-Path $CollectorRoot "output-archive"
 $ProjectCollectorDbPath = Join-Path $CollectorRoot "data\collector.db"
-$AuthPasswordFile = if ($env:DARKWEB_AUTH_PASSWORD_FILE) {
-    [System.IO.Path]::GetFullPath($env:DARKWEB_AUTH_PASSWORD_FILE)
-}
-else {
-    Join-Path $DefaultUserDataDir "auth-password.txt"
-}
+$AuthPasswordFile = Resolve-MigratedDataPath $env:DARKWEB_AUTH_PASSWORD_FILE (Join-Path $DefaultUserDataDir "auth-password.txt")
 $NodeExePath = ""
 $NodeBinDir = ""
 $RequirementsStamp = Join-Path $VenvDir ".requirements.sha256"
 $PlaywrightStamp = Join-Path $VenvDir ".playwright.browsers.ready"
 $PackageLockStamp = Join-Path $DashboardRoot "node_modules\.package-lock.sha256"
 $RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { $ManagedGarnetRedisUrl }
-$CollectorDbPath = if ($env:DARKWEB_COLLECTOR_DB_PATH) { $env:DARKWEB_COLLECTOR_DB_PATH } else { Join-Path $DefaultUserDataDir "collector.db" }
+$CollectorDbPath = Resolve-MigratedDataPath $env:DARKWEB_COLLECTOR_DB_PATH (Join-Path $DefaultUserDataDir "collector.db")
 $ConfiguredCollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) {
     [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_SITES_FILE)
 }
@@ -135,11 +201,11 @@ $CollectorSitesFile = if ($ConfiguredCollectorSitesFile -and -not $SitesFileBelo
 else {
     Join-Path $CollectorRoot "sites.yaml"
 }
-$TorBridgeTorExecutable = if ($env:DARKWEB_TOR_EXECUTABLE) { $env:DARKWEB_TOR_EXECUTABLE } else { "" }
-$TorBridgeTransportExecutable = if ($env:DARKWEB_TOR_TRANSPORT_EXECUTABLE) { $env:DARKWEB_TOR_TRANSPORT_EXECUTABLE } else { "" }
-$TorExpertRoot = if ($env:DARKWEB_TOR_EXPERT_DIR) { [System.IO.Path]::GetFullPath($env:DARKWEB_TOR_EXPERT_DIR) } else { $DefaultTorExpertRoot }
+$TorBridgeTorExecutable = Resolve-MigratedDataPath $env:DARKWEB_TOR_EXECUTABLE ""
+$TorBridgeTransportExecutable = Resolve-MigratedDataPath $env:DARKWEB_TOR_TRANSPORT_EXECUTABLE ""
+$TorExpertRoot = Resolve-MigratedDataPath $env:DARKWEB_TOR_EXPERT_DIR $DefaultTorExpertRoot
 $TorBridgePtConfigPath = if ($env:DARKWEB_TOR_PT_CONFIG_PATH -and [System.IO.Path]::GetExtension($env:DARKWEB_TOR_PT_CONFIG_PATH) -ieq ".json") {
-    [System.IO.Path]::GetFullPath($env:DARKWEB_TOR_PT_CONFIG_PATH)
+    Resolve-MigratedDataPath $env:DARKWEB_TOR_PT_CONFIG_PATH (Join-Path $TorExpertRoot "pt_config.json")
 }
 else {
     Join-Path $TorExpertRoot "pt_config.json"
@@ -150,7 +216,7 @@ $TorBrowserBuildRepo = if ($env:TOR_BROWSER_BUILD_REPO) { $env:TOR_BROWSER_BUILD
 $BundledTorPtConfigPath = Join-Path $CollectorRoot "src\darkweb_collector\tor_bridge_control\pt_config.json"
 $script:TorReleaseInfo = $null
 $ConfiguredCollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
-    [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
+    Resolve-MigratedDataPath $env:DARKWEB_COLLECTOR_OUTPUT_ROOT ""
 }
 else {
     ""
@@ -158,23 +224,27 @@ else {
 $ConfiguredOutputParent = if ($ConfiguredCollectorOutputRoot) { Split-Path -Parent $ConfiguredCollectorOutputRoot } else { "" }
 $OutputRootBelongsToAnotherCheckout = $ConfiguredOutputParent -and (Split-Path -Leaf $ConfiguredOutputParent) -ieq "darkweb_collector" -and $ConfiguredOutputParent -ine $CollectorRoot
 $CollectorOutputRoot = if ($ConfiguredCollectorOutputRoot -and -not $OutputRootBelongsToAnotherCheckout) {
-    $configuredOutputRoot = $ConfiguredCollectorOutputRoot
-    $resolvedLegacyOutputRoot = [System.IO.Path]::GetFullPath($LegacyCollectorOutputRoot)
-    if ($configuredOutputRoot -ieq $resolvedLegacyOutputRoot) {
-        $ProjectCollectorOutputRoot
-    }
-    else {
-        $env:DARKWEB_COLLECTOR_OUTPUT_ROOT
-    }
+    $ConfiguredCollectorOutputRoot
 }
 else {
     if ($ActiveReleaseEnabled -and $ActiveRelease.output_root) {
         [System.IO.Path]::GetFullPath([string]$ActiveRelease.output_root)
     }
     else {
-        $ProjectCollectorOutputRoot
+        $LegacyCollectorOutputRoot
     }
 }
+$env:DARKWEB_ACTIVE_RELEASE_FILE = $ActiveReleaseFile
+$env:DARKWEB_COLLECTOR_DB_PATH = $CollectorDbPath
+$env:DARKWEB_COLLECTOR_OUTPUT_ROOT = $CollectorOutputRoot
+$env:DARKWEB_GARNET_DATA_ROOT = $GarnetDataRoot
+$env:DARKWEB_AUTH_PASSWORD_FILE = $AuthPasswordFile
+$env:DARKWEB_TOR_EXPERT_DIR = $TorExpertRoot
+if ($TorBridgeTorExecutable) { $env:DARKWEB_TOR_EXECUTABLE = $TorBridgeTorExecutable }
+else { Remove-Item Env:DARKWEB_TOR_EXECUTABLE -ErrorAction SilentlyContinue }
+if ($TorBridgeTransportExecutable) { $env:DARKWEB_TOR_TRANSPORT_EXECUTABLE = $TorBridgeTransportExecutable }
+else { Remove-Item Env:DARKWEB_TOR_TRANSPORT_EXECUTABLE -ErrorAction SilentlyContinue }
+$env:DARKWEB_TOR_PT_CONFIG_PATH = $TorBridgePtConfigPath
 
 function Write-Info {
     param([string]$Message)
@@ -269,6 +339,25 @@ function Ensure-Directory {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path | Out-Null
+    }
+}
+
+function Get-DataRootDriveInfo {
+    $candidate = $DefaultUserDataDir
+    while (-not (Test-Path -LiteralPath $candidate) -and $candidate -ne [System.IO.Path]::GetPathRoot($candidate)) {
+        $candidate = Split-Path -Parent $candidate
+    }
+    return [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($candidate))
+}
+
+function Assert-DataRootCapacity {
+    Ensure-Directory $DefaultUserDataDir
+    $drive = Get-DataRootDriveInfo
+    if ($drive.AvailableFreeSpace -lt 2GB -and -not $Force) {
+        Stop-WithError "Data root $DefaultUserDataDir has less than 2 GiB free. Choose another drive with configure-data-root.cmd or re-run with -Force only after confirming capacity."
+    }
+    if ($drive.AvailableFreeSpace -lt 20GB) {
+        Write-Warn "Data root has only $([Math]::Round($drive.AvailableFreeSpace / 1GB, 2)) GiB free: $DefaultUserDataDir"
     }
 }
 
@@ -431,6 +520,33 @@ function Test-PathUnderRoot {
     $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
     $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd("\")
     return $fullPath.StartsWith($fullRoot + "\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-PostgreSqlDataDirectory {
+    try {
+        $services = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'postgresql%'" -ErrorAction Stop)
+        $service = $services | Where-Object { $_.Name -match "-16$" -or [string]$_.PathName -match '(?i)\\16\\' } | Select-Object -First 1
+        if (-not $service) { $service = $services | Select-Object -First 1 }
+        if ($service -and [string]$service.PathName -match '(?i)(?:^|\s)-D\s+(?:"([^"]+)"|([^\s]+))') {
+            $servicePath = if ($matches[1]) { $matches[1] } else { $matches[2] }
+            if ($servicePath) {
+                return [System.IO.Path]::GetFullPath($servicePath)
+            }
+        }
+    }
+    catch {
+    }
+    if (Test-Path -LiteralPath $PostgreSqlTargetConfigPath -PathType Leaf) {
+        try {
+            $targetConfig = Get-Content -LiteralPath $PostgreSqlTargetConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($targetConfig.data_directory) {
+                return [System.IO.Path]::GetFullPath([string]$targetConfig.data_directory)
+            }
+        }
+        catch {
+        }
+    }
+    return ""
 }
 
 function Remove-ManagedPath {
@@ -1777,6 +1893,7 @@ function New-ServiceCommand {
 
     $quotedWorkDir = Quote-PS $WorkingDirectory
     $quotedLog = Quote-PS $LogPath
+    $postgresqlDataDirectory = Get-PostgreSqlDataDirectory
     return @"
 `$ErrorActionPreference = 'Continue'
 Set-Location -LiteralPath $quotedWorkDir
@@ -1790,6 +1907,10 @@ Set-Location -LiteralPath $quotedWorkDir
 `$env:DARKWEB_FRONTEND_URL = $(Quote-PS $FrontendUrl)
 `$env:VITE_FRONTEND_PORT = $(Quote-PS ([string]$FrontendPort))
 `$env:PYTHONPATH = $(Quote-PS (Join-Path $CollectorRoot "src"))
+`$env:DARKWEB_DATA_ROOT = $(Quote-PS $DefaultUserDataDir)
+`$env:DARKWEB_USER_DATA_ROOT = $(Quote-PS $DefaultUserDataDir)
+`$env:DARKWEB_MIGRATION_ROOT = $(Quote-PS $MigrationRoot)
+`$env:DARKWEB_POSTGRESQL_DATA_DIRECTORY = $(Quote-PS $postgresqlDataDirectory)
 `$env:DARKWEB_COLLECTOR_DB_PATH = $(Quote-PS $CollectorDbPath)
 `$env:DARKWEB_COLLECTOR_SITES_FILE = $(Quote-PS $CollectorSitesFile)
 `$env:DARKWEB_COLLECTOR_OUTPUT_ROOT = $(Quote-PS $CollectorOutputRoot)
@@ -2098,10 +2219,16 @@ if "%~1"=="" (
     Set-UserEnv -Name "DARKWEB_HOME" -Value $ProjectRoot
     Set-UserEnv -Name "DARKWEB_COLLECTOR_ROOT" -Value $CollectorRoot
     Set-UserEnv -Name "DARKWEB_DASHBOARD_ROOT" -Value $DashboardRoot
+    Set-UserEnv -Name "DARKWEB_DATA_ROOT" -Value $DefaultUserDataDir
+    Set-UserEnv -Name "DARKWEB_USER_DATA_ROOT" -Value $DefaultUserDataDir
+    Set-UserEnv -Name "DARKWEB_MIGRATION_ROOT" -Value $MigrationRoot
+    Set-UserEnv -Name "DARKWEB_ACTIVE_RELEASE_FILE" -Value $ActiveReleaseFile
     Set-UserEnv -Name "DARKWEB_COLLECTOR_DB_PATH" -Value $CollectorDbPath
     Set-UserEnv -Name "DARKWEB_COLLECTOR_SITES_FILE" -Value $CollectorSitesFile
     Set-UserEnv -Name "DARKWEB_COLLECTOR_OUTPUT_ROOT" -Value $CollectorOutputRoot
     Set-UserEnv -Name "DARKWEB_AUTH_PASSWORD_FILE" -Value $AuthPasswordFile
+    Set-UserEnv -Name "DARKWEB_GARNET_DATA_ROOT" -Value $GarnetDataRoot
+    Set-UserEnv -Name "DARKWEB_TOR_EXPERT_DIR" -Value $TorExpertRoot
     if ($script:RedisProvider -eq "garnet") {
         Set-UserEnv -Name "REDIS_URL" -Value $RedisUrl
         Set-UserEnv -Name "DARKWEB_REDIS_PROVIDER" -Value "garnet"
@@ -2414,9 +2541,9 @@ function Ensure-PostgreSqlMigrationTarget {
     }
     $powershell = Resolve-PowerShellCommand
     Write-Info "Preparing PostgreSQL 16 as the default migration target"
-    & $powershell -NoProfile -ExecutionPolicy Bypass -File $PostgreSqlSetupScript install -ProjectRoot $ProjectRoot -NoRestart -OneClick
+    & $powershell -NoProfile -ExecutionPolicy Bypass -File $PostgreSqlSetupScript install -ProjectRoot $ProjectRoot -DataRoot $DefaultUserDataDir -NoRestart -OneClick
     if ($LASTEXITCODE -ne 0) {
-        $resultPath = Join-Path $DefaultUserDataDir "postgresql-setup-result.json"
+        $resultPath = Join-Path $ControlRoot "postgresql-setup-result.json"
         $detail = ""
         if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
             try {
@@ -2441,6 +2568,7 @@ function Ensure-PostgreSqlMigrationTarget {
 }
 
 function Ensure-Environment {
+    Invoke-TimedStep "Assert-DataRootCapacity" { Assert-DataRootCapacity }
     Invoke-TimedStep "Ensure-PythonRuntime" { Ensure-PythonRuntime | Out-Null }
     Invoke-TimedStep "Ensure-NodeRuntime" { Ensure-NodeRuntime | Out-Null }
     Invoke-TimedStep "Ensure-RedisCanStart" { Ensure-RedisCanStart }
@@ -2633,8 +2761,8 @@ function Remove-DarkwebRegistration {
     param()
 
     Remove-UserPathEntry -Path $CommandBinDir -WhatIf:$WhatIfPreference -Confirm:$false
-    Remove-ManagedPath -Path $DarkwebCommandPath -ExpectedPath (Join-Path $DefaultUserDataDir "bin\darkweb.cmd") -Label "darkweb command" -WhatIf:$WhatIfPreference -Confirm:$false
-    Remove-EmptyManagedDirectory -Path $CommandBinDir -ExpectedPath (Join-Path $DefaultUserDataDir "bin") -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $DarkwebCommandPath -ExpectedPath (Join-Path $ControlRoot "bin\darkweb.cmd") -Label "darkweb command" -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-EmptyManagedDirectory -Path $CommandBinDir -ExpectedPath (Join-Path $ControlRoot "bin") -WhatIf:$WhatIfPreference -Confirm:$false
 
     $projectOwnsRedisEnvironment = Test-ProjectOwnedRedisEnvironment
     $managedVariables = @(
@@ -2642,10 +2770,16 @@ function Remove-DarkwebRegistration {
         @{ Name = "DARKWEB_HOME"; Values = @($ProjectRoot) },
         @{ Name = "DARKWEB_COLLECTOR_ROOT"; Values = @($CollectorRoot) },
         @{ Name = "DARKWEB_DASHBOARD_ROOT"; Values = @($DashboardRoot) },
+        @{ Name = "DARKWEB_DATA_ROOT"; Values = @($DefaultUserDataDir) },
+        @{ Name = "DARKWEB_USER_DATA_ROOT"; Values = @($DefaultUserDataDir) },
+        @{ Name = "DARKWEB_MIGRATION_ROOT"; Values = @($MigrationRoot, (Join-Path $DefaultUserDataDir "migrations")) },
+        @{ Name = "DARKWEB_ACTIVE_RELEASE_FILE"; Values = @($ActiveReleaseFile, (Join-Path $DefaultUserDataDir "active-release.json")) },
         @{ Name = "DARKWEB_COLLECTOR_DB_PATH"; Values = @($CollectorDbPath, (Join-Path $DefaultUserDataDir "collector.db")) },
         @{ Name = "DARKWEB_COLLECTOR_SITES_FILE"; Values = @($CollectorSitesFile, (Join-Path $CollectorRoot "sites.yaml")) },
         @{ Name = "DARKWEB_COLLECTOR_OUTPUT_ROOT"; Values = @($CollectorOutputRoot, $ProjectCollectorOutputRoot, $LegacyCollectorOutputRoot) },
         @{ Name = "DARKWEB_AUTH_PASSWORD_FILE"; Values = @($AuthPasswordFile, (Join-Path $DefaultUserDataDir "auth-password.txt")) },
+        @{ Name = "DARKWEB_GARNET_DATA_ROOT"; Values = @($GarnetDataRoot, $DefaultGarnetDataRoot) },
+        @{ Name = "DARKWEB_TOR_EXPERT_DIR"; Values = @($TorExpertRoot, $DefaultTorExpertRoot) },
         @{ Name = "DARKWEB_API_PORT"; Values = @([string]$ApiPort) },
         @{ Name = "DARKWEB_API_TARGET"; Values = @($ApiBaseUrl) },
         @{ Name = "DARKWEB_FRONTEND_PORT"; Values = @([string]$FrontendPort) },
@@ -2723,7 +2857,21 @@ function Uninstall-Darkweb {
             $dbFile = "$ProjectCollectorDbPath$suffix"
             Remove-ManagedPath -Path $dbFile -ExpectedPath ((Join-Path $CollectorRoot "data\collector.db") + $suffix) -Label "project database file" -WhatIf:$WhatIfPreference -Confirm:$false
         }
-        Remove-ManagedPath -Path $DefaultUserDataDir -ExpectedPath (Join-Path $LocalAppDataRoot "DarkWebThreatIntel") -Label "darkweb user data" -WhatIf:$WhatIfPreference -Confirm:$false
+        if (Test-Path -LiteralPath $DefaultUserDataDir -PathType Container) {
+            $postgresqlDataDirectory = Get-PostgreSqlDataDirectory
+            foreach ($item in Get-ChildItem -LiteralPath $DefaultUserDataDir -Force) {
+                $preserveForPostgreSql = $item.Name -ieq "postgresql" -or
+                    ($postgresqlDataDirectory -and
+                        ((Test-SamePath -Left $postgresqlDataDirectory -Right $item.FullName) -or
+                         (Test-PathUnderRoot -Path $postgresqlDataDirectory -Root $item.FullName)))
+                if ($preserveForPostgreSql) {
+                    Write-Warn "Preserving PostgreSQL cluster data managed by its Windows service: $($item.FullName)"
+                    continue
+                }
+                Remove-ManagedPath -Path $item.FullName -ExpectedPath $item.FullName -Label "darkweb user data item" -WhatIf:$WhatIfPreference -Confirm:$false
+            }
+            Remove-EmptyManagedDirectory -Path $DefaultUserDataDir -ExpectedPath $DefaultUserDataDir -WhatIf:$WhatIfPreference -Confirm:$false
+        }
         Write-Info "Uninstall complete: managed runtime and data were removed"
     }
     else {
@@ -2737,6 +2885,25 @@ function Uninstall-Darkweb {
 
 function Show-Status {
     Load-RuntimePorts
+    Write-Info "data-root: $DefaultUserDataDir"
+    Write-Info "migration-root: $MigrationRoot"
+    Write-Info "sqlite-database: $CollectorDbPath"
+    Write-Info "collector-output: $CollectorOutputRoot"
+    try {
+        $dataDrive = Get-DataRootDriveInfo
+        Write-Info "data-root-free: $([Math]::Round($dataDrive.AvailableFreeSpace / 1GB, 2)) GiB"
+    }
+    catch {
+        Write-Warn "Unable to read free space for $DefaultUserDataDir"
+    }
+    $postgresqlDataDirectory = Get-PostgreSqlDataDirectory
+    if ($postgresqlDataDirectory) {
+        Write-Info "postgresql-data: $postgresqlDataDirectory"
+        if (-not (Test-SamePath -Left $postgresqlDataDirectory -Right $DefaultUserDataDir) -and
+            -not (Test-PathUnderRoot -Path $postgresqlDataDirectory -Root $DefaultUserDataDir)) {
+            Write-Warn "Existing PostgreSQL data is outside the configured data root; it was not moved automatically."
+        }
+    }
     $records = @(Get-ServiceRecords)
     if ($records.Count -eq 0) {
         Write-Info "No PID file found for $SessionName"

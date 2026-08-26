@@ -13,6 +13,15 @@ Windows 首次启动时，如果尚未配置目标 PostgreSQL，启动脚本会�
 .\scripts\setup_postgresql_windows.ps1 status
 ```
 
+Windows 新环境可在首次启动前把运行数据放到非系统盘：
+
+```powershell
+.\configure-data-root.cmd plan -DataRoot D:\DarkWebThreatIntel
+.\configure-data-root.cmd apply -DataRoot D:\DarkWebThreatIntel
+```
+
+已有数据使用 `migrate` 替代 `apply`。工具会停止项目、复制数据库与迁移目录、逐文件执行 SHA-256 校验、改写已复制的活动版本路径并健康检查；失败时恢复旧配置，成功后也保留旧目录。必须完成列表、详情、镜像和新写入复测后，再运行 `.\configure-data-root.cmd cleanup`；清理器会重新核对全部哈希并只删除已复制成功的旧数据，不得手工删除整个 C 盘控制目录。全新 PostgreSQL 的集群会创建在 `<数据根目录>\postgresql\16\data`；已有 PostgreSQL 集群不会被文件复制方式迁移，避免破坏运行中的数据库服务。
+
 Debian / Ubuntu / WSL / Codespaces 使用 `scripts/setup_postgresql_linux.sh` 完成同样的首次安装和幂等检查。脚本从 PostgreSQL 官方 PGDG 仓库安装 PostgreSQL 16，校验官方签名指纹，使用本机 `postgres` 系统账号创建项目角色和数据库，并把应用口令保存到当前用户私有的 `postgresql-target.json`（权限 `600`）：
 
 当 Debian / Ubuntu 版本已从 PGDG 主仓库下线时，脚本会验证主仓库的发行版 `Release` 文件并自动切换至 `apt-archive.postgresql.org` 官方归档；显式配置的仓库不可用时不会静默回退。
@@ -94,20 +103,21 @@ SQLite 索引的列顺序、唯一性、部分索引条件以及每列 `ASC` / `
 
 激活控制器会先清除旧进程继承的 `DARKWEB_COLLECTOR_DATABASE_URL`、`DARKWEB_COLLECTOR_DATABASE_SCHEMA` 和 `DARKWEB_COLLECTOR_OUTPUT_ROOT`，再由活动版本文件重新选择数据库与镜像目录，避免文件存在但 `/collector-output` 仍指向旧目录。
 
-活动版本配置默认位于：
+活动版本配置默认位于数据根目录：
 
-- Windows：`%LOCALAPPDATA%\DarkWebThreatIntel\active-release.json`
+- Windows：`<数据根目录>\active-release.json`
 - WSL / Linux：`$HOME/.local/share/darkweb-threat-intel/active-release.json`
 
 Linux PostgreSQL 目标配置默认位于 `$HOME/.local/share/darkweb-threat-intel/postgresql-target.json`，目录权限为 `700`、文件权限为 `600`；其中包含应用数据库口令，不要复制到源码仓库、日志或工单。
 
-迁移批次、导入报告和镜像目录保存在同一用户数据根目录下的 `migrations` 目录。第一次从 SQLite 切换时，原 SQLite 文件不会删除；后续迁移时，上一活动 PostgreSQL schema 和镜像目录也会保留。
+迁移批次、导入报告和镜像目录保存在同一用户数据根目录下的 `migrations` 目录。当前活动版本仍引用的批次目录不能删除；只有确认数据库、列表、详情、镜像下载和新采集写入均正常，且该批次不再是当前或回退版本后，才可清理对应旧批次。第一次从 SQLite 切换时，原 SQLite 文件不会删除；后续迁移时，上一活动 PostgreSQL schema 和镜像目录也会保留。
 
 如果新 PostgreSQL 已产生业务写入，回退到旧 SQLite 或旧 schema 会丢失这部分新写入，不能把自动启动回退当作长期双写或数据库合并方案。
 
 ## 5. 配置项与边界
 
 - `DARKWEB_MIGRATION_AUTO_RESTART=0`：导入后只写活动配置，不自动调用启动脚本。
+- `DARKWEB_DATA_ROOT`：Windows 统一数据根目录，建议使用容量充足的非系统盘专用目录。
 - `DARKWEB_MIGRATION_MAX_BUNDLE_BYTES`：上传文件上限，默认 20 GiB。
 - `DARKWEB_MIGRATION_MAX_UNCOMPRESSED_BYTES`：解压后总量上限，默认 100 GiB。
 - `DARKWEB_MIGRATION_MAX_ENTRIES`：迁移包条目上限，默认 250,000。

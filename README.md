@@ -95,10 +95,35 @@ WSL / Linux 脚本会准备后端虚拟环境、前端依赖、Redis、Playwrigh
 
 ### Windows
 
-首次运行：
+新环境如果不希望数据落在 C 盘，先选择一个容量充足的专用目录，再启动项目：
 
 ```powershell
+.\configure-data-root.cmd plan -DataRoot D:\DarkWebThreatIntel
+.\configure-data-root.cmd apply -DataRoot D:\DarkWebThreatIntel
 .\darkweb.cmd
+```
+
+`apply` 只用于尚无旧数据的新环境。已经运行过项目时使用 `migrate`；工具会先停止项目，逐文件复制并执行 SHA-256 校验，切换失败会恢复旧配置，旧目录会保留供复核，不会自动删除：
+
+```powershell
+.\configure-data-root.cmd plan -DataRoot D:\DarkWebThreatIntel
+.\configure-data-root.cmd migrate -DataRoot D:\DarkWebThreatIntel
+```
+
+复测数据库查询、列表、详情、镜像下载和新采集写入后，再执行受控清理：
+
+```powershell
+.\configure-data-root.cmd cleanup
+```
+
+清理器会按迁移时保存的逐文件 SHA-256 清单复核旧副本，确认新目录文件仍存在后要求输入 `CLEANUP`，只删除未被改动的旧数据；不要手工删除整个 `%LOCALAPPDATA%\DarkWebThreatIntel`，其中仍包含很小的控制配置、命令入口和加密的 PostgreSQL 目标配置。
+
+已有环境中显式指定、且原本就在旧数据根目录之外的输出或数据库路径会继续保留，避免迁移时擅自改写业务数据引用；`status` 命令和前端存储卡会把这些外部路径标为“部分数据仍在其他目录”。
+
+不指定数据盘时仍兼容使用 `%LOCALAPPDATA%\DarkWebThreatIntel`。也可以仅对本次安装显式传入 `-DataRoot`：
+
+```powershell
+.\darkweb.cmd install -DataRoot D:\DarkWebThreatIntel
 ```
 
 也可以直接调用 PowerShell 脚本：
@@ -121,7 +146,9 @@ darkweb status
 darkweb stop
 ```
 
-Windows 脚本会优先复用可达的显式 `REDIS_URL`。未配置服务时，脚本自动下载并校验 Microsoft Garnet 2.1.4 与项目私有 .NET 10.0.11，监听 `127.0.0.1:6380` 并固定使用 DB 0，不再要求通过 `winget` 安装 Memurai Developer。Garnet 检查点和 AOF 位于 `%LOCALAPPDATA%\DarkWebThreatIntel\garnet-data`，默认每 6 小时执行一次后台检查点；完整第三方许可见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。
+Windows 脚本会优先复用可达的显式 `REDIS_URL`。未配置服务时，脚本自动下载并校验 Microsoft Garnet 2.1.4 与项目私有 .NET 10.0.11，监听 `127.0.0.1:6380` 并固定使用 DB 0，不再要求通过 `winget` 安装 Memurai Developer。新安装环境的 Garnet 检查点、AOF、SQLite、迁移批次、证据镜像和缓存均使用已配置的数据根目录，默认每 6 小时执行一次后台检查点；完整第三方许可见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。
+
+全新安装 PostgreSQL 时，程序文件仍由 EDB 安装到系统程序目录，但数据库集群通过官方 `--datadir` 参数创建在 `<数据根目录>\postgresql\16\data`。已经存在的 PostgreSQL 服务会被复用且不会被脚本直接复制或改写；如果其集群仍在 C 盘，`darkweb status` 和数据迁移页面会明确告警，需要另行执行 PostgreSQL 备份恢复后再释放旧集群空间。
 
 可通过 `DARKWEB_GARNET_CHECKPOINT_INTERVAL_SECONDS` 调整后台检查点间隔，最低为 300 秒；离线部署可分别用 `DARKWEB_GARNET_ARCHIVE_PATH` 和 `DARKWEB_DOTNET_RUNTIME_ARCHIVE_PATH` 指向已下载的官方压缩包，启动器仍会执行固定哈希校验。
 
@@ -152,7 +179,7 @@ darkweb uninstall purge-data
 darkweb uninstall purge-data --yes
 ```
 
-卸载只处理项目明确管理的路径。指向项目目录和默认数据目录之外的自定义数据库、输出目录或 Tor 运行时会保留并给出提示；源码目录和 Python、Node.js、外部 Redis 或 Docker 等共享系统依赖不会被删除。Windows 的 `keep-data` 会删除项目托管的 Garnet/.NET 二进制但保留检查点，`purge-data` 才删除 Garnet 数据。Windows 可用 `-WhatIf`、WSL / Linux 可用 `--dry-run` 预览操作。
+卸载只处理项目明确管理的路径。指向项目目录和默认数据目录之外的自定义数据库、输出目录或 Tor 运行时会保留并给出提示；源码目录和 Python、Node.js、外部 Redis 或 Docker 等共享系统依赖不会被删除。Windows 的 `keep-data` 会删除项目托管的 Garnet/.NET 二进制但保留检查点，`purge-data` 才删除 Garnet 数据；PostgreSQL 集群始终由其 Windows 服务管理，项目卸载不会直接删除。Windows 可用 `-WhatIf`、WSL / Linux 可用 `--dry-run` 预览操作。
 
 ## 一键更新
 
@@ -234,14 +261,17 @@ Windows 脚本会从 Tor Project 官方发布源自动安装并每天检查项�
 - `DARKWEB_TOR_TRANSPORT_EXECUTABLE`
 - `DARKWEB_TOR_PT_CONFIG_PATH`
 
-默认安装位置是 `%LOCALAPPDATA%\DarkWebThreatIntel\tor-expert`。本机 Tor Browser 仅作为自动安装失败时的兼容回退；项目不会读取其 `Browser/omni.ja`。设置 `DARKWEB_TOR_BRIDGE_AUTO_INSTALL=0` 或 `DARKWEB_TOR_BRIDGE_AUTO_UPDATE=0` 可以分别关闭运行时安装或更新检查。
+默认安装位置是 `<数据根目录>\tor-expert`。本机 Tor Browser 仅作为自动安装失败时的兼容回退；项目不会读取其 `Browser/omni.ja`。设置 `DARKWEB_TOR_BRIDGE_AUTO_INSTALL=0` 或 `DARKWEB_TOR_BRIDGE_AUTO_UPDATE=0` 可以分别关闭运行时安装或更新检查。
 
 ## 运行数据
 
-Windows 默认运行数据位于：
+Windows 运行数据统一位于 `DARKWEB_DATA_ROOT` 指定的目录；未配置时使用 `%LOCALAPPDATA%\DarkWebThreatIntel`。主要目录包括：
 
-- `%LOCALAPPDATA%\DarkWebThreatIntel\collector.db`
-- `darkweb_collector/output/`
+- `<数据根目录>\collector.db`
+- `<数据根目录>\output\`
+- `<数据根目录>\migrations\`
+- `<数据根目录>\garnet-data\`
+- `<数据根目录>\postgresql\16\data\`（全新安装 PostgreSQL 时）
 - `darkweb_collector/.runtime/windows/`
 
 WSL / Linux 默认运行数据位于：
