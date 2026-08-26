@@ -78,19 +78,30 @@ def notify_code_monitoring_hits(
     dingtalk_config: DingTalkConfig | None = None,
 ) -> dict[str, Any]:
     eligible_hits = _primary_hits(hits)
-    resolved_wechat = wechat_config or load_bot_config()
-    resolved_dingtalk = dingtalk_config or load_dingtalk_config()
+    config_errors: list[dict[str, Any]] = []
+    resolved_wechat: BotConfig | None = wechat_config
+    resolved_dingtalk: DingTalkConfig | None = dingtalk_config
+    if resolved_wechat is None:
+        try:
+            resolved_wechat = load_bot_config()
+        except Exception as exc:
+            config_errors.append({"channel": "wechat_work", "error": str(exc)})
+    if resolved_dingtalk is None:
+        try:
+            resolved_dingtalk = load_dingtalk_config()
+        except Exception as exc:
+            config_errors.append({"channel": "dingtalk", "error": str(exc)})
     channel_ready = {
-        "wechat_work": _wechat_ready(resolved_wechat),
-        "dingtalk": bool(dingtalk_config_status(resolved_dingtalk).get("configured")),
+        "wechat_work": bool(resolved_wechat and _wechat_ready(resolved_wechat)),
+        "dingtalk": bool(resolved_dingtalk and dingtalk_config_status(resolved_dingtalk).get("configured")),
     }
     result: dict[str, Any] = {
         "eligible": len(eligible_hits),
         "sent": 0,
-        "failed": 0,
+        "failed": len(config_errors),
         "skipped": 0,
         "channels": channel_ready,
-        "errors": [],
+        "errors": config_errors,
     }
     if not eligible_hits:
         return result
