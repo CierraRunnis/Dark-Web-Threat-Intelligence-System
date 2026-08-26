@@ -1326,6 +1326,7 @@ export function initializePrototype() {
       if (collectorAction.startsWith('vulnerability-')) return 'vulnerability'
       if (collectorAction.startsWith('ransomware-')) return 'ransomware'
       if (collectorAction.startsWith('bot-')) return 'bot'
+      if (collectorAction.startsWith('dingtalk-')) return 'dingtalk'
       if (['watchlist-save', 'watchlist-delete'].includes(codeAction)) return 'watchlists'
       if (['github-save', 'github-delete'].includes(codeAction)) return 'github'
       if (['changan-save', 'changan-test', 'changan-delete'].includes(codeAction)) return 'changan'
@@ -2568,12 +2569,27 @@ export function initializePrototype() {
       bindText('bot-secret-status', payload.has_secret ? '已配置' : '未配置')
     }
 
+    function renderDingTalk(payload = {}) {
+      const configured = Boolean(payload.configured)
+      setBadge('dingtalk-status', configured ? '已配置' : '待配置', configured ? 'badge-success' : '')
+      bindText('dingtalk-webhook-status', configured ? (payload.webhook_host || '已配置') : '未配置')
+      bindText('dingtalk-secret-status', payload.has_secret ? '已配置' : '未配置（可选）')
+      const webhook = $('#dingtalk-webhook', root)
+      const secret = $('#dingtalk-secret', root)
+      if (webhook) {
+        webhook.value = ''
+        webhook.placeholder = configured ? '已配置；输入新 Webhook 可替换' : '输入钉钉机器人 Webhook 或 access_token'
+      }
+      if (secret) secret.value = ''
+    }
+
     async function refreshCollector(options = {}) {
       const tasks = []
       if (root.hasAttribute('data-needs-jobs')) tasks.push(['/api/jobs', renderJobs, 'jobs'])
       if ($('#netdisk-cursor-table', root)) tasks.push(['/api/document-exposures/netdisk/source-health?source_family=netdisk_aggregator', renderNetdiskCursors, 'netdisk'])
       if (root.hasAttribute('data-needs-tor') || $('[data-bind="tor-status"]', root)) tasks.push(['/api/tor-bridge/status', renderTor, 'tor'])
       if (root.hasAttribute('data-needs-bot') || $('[data-bind="bot-status"]', root)) tasks.push(['/api/bot/status', renderBot, 'bot'])
+      if ($('[data-bind="dingtalk-status"]', root)) tasks.push(['/api/dingtalk/status', renderDingTalk, 'dingtalk'])
       if ($('[data-od-id="collector-vulnerability-sync"]', root)) {
         tasks.push(['/api/vulnerabilities/sync/status', renderVulnerabilitySync, 'vulnerability'])
         tasks.push(['/api/ransomware/sync/status', renderRansomwareSync, 'ransomware'])
@@ -2911,6 +2927,13 @@ export function initializePrototype() {
         return request('/api/bot/config', { method: 'POST', body: JSON.stringify({ provider: 'wechat_work_aibot', bot_id: botId, secret }) })
       }, 'Bot 助手配置已保存')
       if (action === 'bot-test') return void runAction(button, () => request('/api/bot/send', { method: 'POST', body: JSON.stringify({ type: 'markdown', content: `### 玄鉴威胁情报平台\n> Bot 助手测试推送：${new Date().toLocaleString('zh-CN')}` }) }), 'Bot 测试消息已发送')
+      if (action === 'dingtalk-save') return void runAction(button, async () => {
+        const webhookUrl = $('#dingtalk-webhook', root)?.value.trim()
+        const secret = $('#dingtalk-secret', root)?.value.trim() || ''
+        if (!webhookUrl) throw new Error('请输入钉钉机器人 Webhook 或 access_token')
+        renderDingTalk(await request('/api/dingtalk/config', { method: 'POST', body: JSON.stringify({ webhook_url: webhookUrl, secret }) }))
+      }, '钉钉机器人配置已保存')
+      if (action === 'dingtalk-test') return void runAction(button, () => request('/api/dingtalk/send', { method: 'POST', body: JSON.stringify({ title: '玄鉴威胁情报平台测试推送', content: `### 玄鉴威胁情报平台\n> 钉钉机器人测试推送：${new Date().toLocaleString('zh-CN')}` }) }), '钉钉测试消息已发送')
       if (button.dataset.siteRun) return void runAction(button, async () => requireDispatched(await request('/api/jobs/run-site', { method: 'POST', body: JSON.stringify({ site_name: button.dataset.siteRun, force: true }) })), `已触发 ${button.dataset.siteRun} 运行一次`)
       if (button.dataset.siteToggle) {
         const enabled = button.dataset.enabled !== 'true'
