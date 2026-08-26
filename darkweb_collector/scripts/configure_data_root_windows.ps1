@@ -816,7 +816,12 @@ try {
 
     Write-Info "Data root configured successfully: $targetRoot"
     if ($Action -eq "migrate" -and $currentRoot -ine $targetRoot) {
-        Write-Info "The source data was preserved at $currentRoot for rollback. After verification, run configure-data-root.cmd cleanup; do not delete the whole control directory manually."
+        if ($firstRunSetup) {
+            Write-Info "The source data was preserved at $currentRoot for rollback. Keep it until the new installation has been verified."
+        }
+        else {
+            Write-Info "The source data was preserved at $currentRoot for rollback. After verification, run configure-data-root.cmd cleanup; do not delete the whole control directory manually."
+        }
     }
     Show-Status $targetRoot
 }

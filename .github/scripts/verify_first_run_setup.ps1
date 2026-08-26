@@ -83,3 +83,4 @@ finally {
 }
 
 Write-Host "First-run setup tests passed."
+exit 0
