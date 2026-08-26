@@ -209,7 +209,7 @@ function Select-FirstRunDataRoot {
     if (-not $defaultDrive) { $defaultDrive = $drives[0] }
 
     Write-Host ""
-    Write-Host "First-time setup: choose where application releases and data will be stored."
+    Write-Host "First-time setup: choose where shared data and future application releases will be stored."
     foreach ($drive in $drives) {
         $driveName = $drive.Name.TrimEnd("\")
         $target = if ($driveName -ieq $controlDrive) { $ControlRoot } else { Join-Path $drive.Name "DarkWebThreatIntel" }
