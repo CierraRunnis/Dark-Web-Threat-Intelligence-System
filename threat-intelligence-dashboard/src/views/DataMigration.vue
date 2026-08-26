@@ -22,7 +22,7 @@
           <strong>数据迁移</strong>
         </div>
         <div class="header-actions">
-          <span class="app-version">版本 <strong>v20260826</strong></span>
+          <span class="app-version">版本 <strong>v20260826.1.0</strong></span>
           <button class="avatar" type="button" aria-label="个人账户"></button>
         </div>
       </header>
@@ -63,6 +63,14 @@
             <div class="migration-status-head"><span>切换策略</span><i :class="config.auto_restart ? 'is-ok' : 'is-warning'"></i></div>
             <strong>{{ config.auto_restart ? '自动重启已启用' : '需要手工重启' }}</strong>
             <p>上一活动版本会被保留，用于启动失败时受控回退。</p>
+          </article>
+          <article class="card migration-status-card">
+            <div class="migration-status-head"><span>数据存储</span><i :class="storageNeedsAttention ? 'is-warning' : 'is-ok'"></i></div>
+            <strong :title="config.storage?.data_root || ''">{{ config.storage?.custom ? '自定义数据盘' : '默认数据目录' }}</strong>
+            <p class="migration-storage-path" :title="config.storage?.data_root || ''">{{ config.storage?.data_root || '正在读取…' }}</p>
+            <p v-if="config.storage?.disk_free_bytes">
+              可用 {{ formatBytes(config.storage.disk_free_bytes) }}{{ storageNeedsAttention ? ' · 部分数据仍在其他目录' : ' · 迁移目录已跟随数据盘' }}
+            </p>
           </article>
         </section>
 
@@ -202,6 +210,18 @@ let previousBodyClassName = ''
 const activeDatabaseLabel = computed(() => {
   const active = config.value.active_release
   return active?.active && active.database_engine === 'postgresql' ? 'PostgreSQL' : 'SQLite'
+})
+
+const storageNeedsAttention = computed(() => {
+  const storage = config.value.storage || {}
+  return storage.migration_on_data_root === false
+    || storage.application_on_data_root === false
+    || Boolean(storage.active_application_root && !storage.active_application_on_data_root)
+    || storage.playwright_on_data_root === false
+    || Boolean(storage.postgresql_data_directory && !storage.postgresql_on_data_root)
+    || storage.collector_database_on_data_root === false
+    || storage.collector_output_on_data_root === false
+    || storage.garnet_on_data_root === false
 })
 
 function formatBytes(value) {
@@ -441,7 +461,7 @@ onBeforeUnmount(() => {
 
 .migration-status-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -485,6 +505,12 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 11px;
+}
+
+.migration-storage-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .migration-state-ok { color: var(--success) !important; }
@@ -774,6 +800,10 @@ onBeforeUnmount(() => {
 
 .migration-history-row strong { font-size: 12px; }
 .migration-history-row small { color: var(--muted); font-size: 10px; }
+
+@media (max-width: 1200px) {
+  .migration-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 @media (max-width: 900px) {
   .migration-main { width: 100%; }

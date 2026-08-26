@@ -29,6 +29,7 @@ from darkweb_collector.version_check import (
     current_version_payload,
     load_update_manifest,
 )
+from darkweb_collector.storage_paths import app_root, data_root, update_state_root
 
 
 ACTIVE_STATUSES = {"queued", "running"}
@@ -59,14 +60,10 @@ def _project_root() -> Path:
 
 
 def _state_dir() -> Path:
-    configured = os.environ.get("DARKWEB_UPDATE_STATE_DIR", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    if os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA", "").strip() or Path.home() / "AppData" / "Local")
-        return base / "DarkWebThreatIntel"
-    base = Path(os.environ.get("XDG_STATE_HOME", "").strip() or Path.home() / ".local" / "state")
-    return base / "darkweb-threat-intel"
+    try:
+        return update_state_root()
+    except ValueError as exc:
+        raise SelfUpdateError(str(exc)) from exc
 
 
 def _state_path() -> Path:
@@ -82,15 +79,15 @@ def _installation_path() -> Path:
 
 
 def _releases_dir() -> Path:
-    return _state_dir() / "app" / "releases"
+    return app_root() / "releases"
 
 
 def _downloads_dir() -> Path:
-    return _state_dir() / "updates"
+    return app_root() / "updates"
 
 
 def _config_dir() -> Path:
-    return _state_dir() / "config"
+    return data_root() / "config"
 
 
 def _idle_status() -> dict[str, Any]:
@@ -471,7 +468,7 @@ def _merge_sites_config(current_path: Path, packaged_path: Path, destination: Pa
 
 def _copy_shared_secrets(current_root: Path) -> None:
     source = current_root / "darkweb_collector" / "secrets"
-    target = _state_dir() / "secrets"
+    target = data_root() / "secrets"
     if not source.is_dir():
         return
     target.mkdir(parents=True, exist_ok=True)
@@ -487,11 +484,7 @@ def _copy_shared_secrets(current_root: Path) -> None:
 
 
 def _user_data_dir() -> Path:
-    configured = os.environ.get("DARKWEB_USER_DATA_ROOT", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    base = Path(os.environ.get("LOCALAPPDATA", "").strip() or Path.home() / "AppData" / "Local")
-    return (base / "DarkWebThreatIntel").resolve()
+    return data_root()
 
 
 def _uses_external_database() -> bool:
@@ -513,7 +506,7 @@ def _backup_sqlite_database(job_id: str) -> tuple[Path, Path] | None:
     source = Path(configured).expanduser().resolve() if configured else _user_data_dir() / "collector.db"
     if not source.is_file():
         return None
-    backup = _state_dir() / "update-backups" / job_id / "collector.db"
+    backup = data_root() / "update-backups" / job_id / "collector.db"
     backup.parent.mkdir(parents=True, exist_ok=True)
     source_db = None
     target_db = None
@@ -602,6 +595,9 @@ def _installation_payload(
         "current_version": current_version,
         "sites_file": str(sites_file.resolve()),
         "output_root": str(output_root.resolve()),
+        "control_root": str(_state_dir().resolve()),
+        "app_root": str(app_root().resolve()),
+        "data_root": str(data_root().resolve()),
         "previous": previous or {},
         "activated_at": _now_iso(),
     }
@@ -729,6 +725,9 @@ def apply_release_update(job_id: str, state: dict[str, Any], log: TextIO) -> dic
             "version": str(current["version"]),
             "sites_file": str(old_sites),
             "output_root": str(old_output),
+            "control_root": str(_state_dir()),
+            "app_root": str(app_root()),
+            "data_root": str(data_root()),
         }
         new_installation = _installation_payload(
             current_root=new_root,
@@ -792,7 +791,7 @@ def apply_release_update(job_id: str, state: dict[str, Any], log: TextIO) -> dic
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
         if not preserve_backup:
-            shutil.rmtree(_state_dir() / "update-backups" / job_id, ignore_errors=True)
+            shutil.rmtree(data_root() / "update-backups" / job_id, ignore_errors=True)
 
 
 def run_self_update(job_id: str, wait_seconds: float = 1.0) -> None:

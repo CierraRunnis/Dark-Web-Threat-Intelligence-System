@@ -152,7 +152,7 @@ from darkweb_collector.db import (
     reconcile_stale_crawl_jobs,
 )
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
-from darkweb_collector.runtime import output_root
+from darkweb_collector.runtime import output_root, user_data_root
 from darkweb_collector.session_cookies import (
     clear_session_cookie,
     get_session_cookie_status,
@@ -214,15 +214,7 @@ def _auth_username() -> str:
 
 
 def _default_auth_password_file() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "DarkWebThreatIntel" / "auth-password.txt"
-
-    user_profile = os.environ.get("USERPROFILE", "").strip()
-    if user_profile:
-        return Path(user_profile) / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
-
-    return Path.home() / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
+    return user_data_root() / "auth-password.txt"
 
 
 def _auth_password_file_path() -> Path:
