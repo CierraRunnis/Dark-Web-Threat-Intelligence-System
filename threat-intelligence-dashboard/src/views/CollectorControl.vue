@@ -328,13 +328,14 @@
 
     <section class="ti-card ti-reveal-up">
       <div class="ti-card-header">
-        <div class="ti-card-title">Bot 助手推送</div>
+        <div class="ti-card-title">Bot 助手推送（企业微信 / 钉钉）</div>
         <div class="health-actions">
-          <el-button plain :loading="botConfigLoading" @click="loadBotConfig">刷新配置</el-button>
-          <el-button type="success" plain :loading="botTestLoading" :disabled="!botSmartConfigured || !botHasTargets" @click="testBotMessage">测试推送</el-button>
+          <el-button plain :loading="botConfigLoading || dingtalkConfigLoading" @click="refreshBotConfigs">刷新配置</el-button>
+          <el-button type="success" plain :loading="botTestLoading" :disabled="!botSmartConfigured || !botHasTargets" @click="testBotMessage">测试企业微信</el-button>
         </div>
       </div>
       <div class="ti-card-body">
+        <h3 class="bot-provider-title">企业微信智能机器人</h3>
         <div class="status-grid status-grid--compact">
           <div class="metric-card">
             <span>智能机器人</span>
@@ -378,6 +379,59 @@
           <p class="panel-note panel-note--mono">配置文件：{{ botConfig.settings_path || '默认运行目录' }}</p>
           <p v-if="botConfig.listener?.last_error" class="panel-note panel-note--danger">监听错误：{{ botConfig.listener.last_error }}</p>
           <p v-if="botLastError" class="panel-note panel-note--danger">最近错误：{{ botLastError }}</p>
+        </div>
+
+        <div class="bot-provider-divider"></div>
+        <div class="bot-provider-heading">
+          <h3 class="bot-provider-title">钉钉自定义机器人</h3>
+          <el-button
+            type="success"
+            plain
+            :loading="dingtalkTestLoading"
+            :disabled="!dingtalkConfigured"
+            @click="testDingTalkMessage"
+          >测试钉钉</el-button>
+        </div>
+        <div class="status-grid status-grid--compact">
+          <div class="metric-card">
+            <span>Webhook</span>
+            <strong>{{ dingtalkConfigured ? '已配置' : '未配置' }}</strong>
+          </div>
+          <div class="metric-card">
+            <span>加签 Secret</span>
+            <strong>{{ dingtalkConfig.has_secret ? '已配置' : '未配置（可选）' }}</strong>
+          </div>
+          <div class="metric-card">
+            <span>连接域名</span>
+            <strong class="metric-card__value metric-card__value--small">{{ dingtalkConfig.webhook_host || '暂无' }}</strong>
+          </div>
+          <div class="metric-card">
+            <span>更新时间</span>
+            <strong class="metric-card__value metric-card__value--small">{{ dingtalkConfig.updated_at || '暂无' }}</strong>
+          </div>
+        </div>
+        <div class="credential-row">
+          <el-input
+            v-model="dingtalkWebhookInput"
+            type="password"
+            show-password
+            placeholder="钉钉自定义机器人 Webhook 或 access_token"
+            class="credential-row__input"
+          />
+          <el-input
+            v-model="dingtalkSecretInput"
+            type="password"
+            show-password
+            placeholder="加签 Secret（可选）"
+            class="credential-row__input credential-row__input--secret"
+          />
+          <el-button type="primary" :loading="dingtalkSaveLoading || dingtalkConfigLoading" @click="saveDingTalkConfig">保存钉钉配置</el-button>
+        </div>
+        <div class="panel-note-block">
+          <p class="panel-note panel-note--mono">当前 Webhook：{{ dingtalkConfig.masked_webhook_url || '未保存' }}</p>
+          <p class="panel-note">企业微信和钉钉可同时启用；代码监测仅推送新增且进入“代码泄露监测主列表”的记录，不推送已抑制列表。</p>
+          <p class="panel-note panel-note--mono">配置文件：{{ dingtalkConfig.settings_path || '默认运行目录' }}</p>
+          <p v-if="dingtalkLastError" class="panel-note panel-note--danger">最近错误：{{ dingtalkLastError }}</p>
         </div>
       </div>
     </section>
@@ -620,6 +674,7 @@ const localBrowserPoolLabel = computed(() => {
 const botSmartConfigured = computed(() => botConfig.value.provider === 'wechat_work_aibot' && botConfig.value.configured)
 const botSecretConfigured = computed(() => botConfig.value.provider === 'wechat_work_aibot' && botConfig.value.has_secret)
 const botHasTargets = computed(() => Number(botConfig.value.chat_target_count || 0) > 0 || Boolean(botConfig.value.chat_id))
+const dingtalkConfigured = computed(() => dingtalkConfig.value.configured)
 const botTargetLabel = computed(() => {
   if (botConfig.value.provider !== 'wechat_work_aibot') return '未配置'
   const count = Number(botConfig.value.chat_target_count || 0)
@@ -801,6 +856,23 @@ const botConfig = ref({
   listener: {},
   websocket_url: '',
   webhook_key: '',
+  masked_webhook_url: '',
+  webhook_host: '',
+  settings_path: '',
+  updated_at: '',
+})
+const dingtalkConfigLoading = ref(false)
+const dingtalkSaveLoading = ref(false)
+const dingtalkTestLoading = ref(false)
+const dingtalkWebhookInput = ref('')
+const dingtalkSecretInput = ref('')
+const dingtalkLastError = ref('')
+const dingtalkConfig = ref({
+  provider: 'dingtalk_webhook',
+  configured: false,
+  source: 'none',
+  has_secret: false,
+  dry_run: false,
   masked_webhook_url: '',
   webhook_host: '',
   settings_path: '',
@@ -1209,8 +1281,13 @@ async function refreshAllPanels() {
     loadRansomwareConfig(),
     loadCookieSites(),
     loadBotConfig(),
+    loadDingTalkConfig(),
     loadTorBridgeStatus(),
   ])
+}
+
+async function refreshBotConfigs() {
+  await Promise.all([loadBotConfig(), loadDingTalkConfig()])
 }
 
 async function loadBotConfig() {
@@ -1284,6 +1361,73 @@ async function testBotMessage() {
     ElMessage.error(botLastError.value)
   } finally {
     botTestLoading.value = false
+  }
+}
+
+async function loadDingTalkConfig() {
+  dingtalkConfigLoading.value = true
+  try {
+    const response = await fetch('/api/dingtalk/status')
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    dingtalkConfig.value = await response.json()
+    dingtalkLastError.value = ''
+  } catch (error) {
+    dingtalkLastError.value = error.message || '读取钉钉机器人配置失败'
+    ElMessage.error(dingtalkLastError.value)
+  } finally {
+    dingtalkConfigLoading.value = false
+  }
+}
+
+async function saveDingTalkConfig() {
+  const webhookValue = String(dingtalkWebhookInput.value || '').trim()
+  if (!webhookValue) {
+    ElMessage.error('请输入钉钉自定义机器人 Webhook 或 access_token')
+    return
+  }
+  dingtalkSaveLoading.value = true
+  try {
+    const response = await fetch('/api/dingtalk/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        webhook_url: webhookValue,
+        secret: String(dingtalkSecretInput.value || '').trim(),
+      }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    dingtalkConfig.value = await response.json()
+    dingtalkWebhookInput.value = ''
+    dingtalkSecretInput.value = ''
+    dingtalkLastError.value = ''
+    ElMessage.success('钉钉机器人配置已保存')
+  } catch (error) {
+    dingtalkLastError.value = error.message || '保存钉钉机器人配置失败'
+    ElMessage.error(dingtalkLastError.value)
+  } finally {
+    dingtalkSaveLoading.value = false
+  }
+}
+
+async function testDingTalkMessage() {
+  dingtalkTestLoading.value = true
+  try {
+    const response = await fetch('/api/dingtalk/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: '暗网情报系统测试推送',
+        content: `### 暗网情报系统\n> 钉钉机器人测试推送：${new Date().toLocaleString()}`,
+      }),
+    })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    dingtalkLastError.value = ''
+    ElMessage.success('钉钉测试推送已发送')
+  } catch (error) {
+    dingtalkLastError.value = error.message || '钉钉测试推送失败'
+    ElMessage.error(dingtalkLastError.value)
+  } finally {
+    dingtalkTestLoading.value = false
   }
 }
 
@@ -1632,6 +1776,29 @@ onBeforeUnmount(() => {
 
 .status-grid--compact {
   margin-bottom: 16px;
+}
+
+.bot-provider-title {
+  margin: 0 0 14px;
+  color: var(--ti-text-primary);
+  font-size: 16px;
+}
+
+.bot-provider-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bot-provider-heading .bot-provider-title {
+  margin-bottom: 14px;
+}
+
+.bot-provider-divider {
+  height: 1px;
+  margin: 22px 0;
+  background: rgba(148, 163, 184, 0.24);
 }
 
 .credential-row {

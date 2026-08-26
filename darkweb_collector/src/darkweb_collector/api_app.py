@@ -44,6 +44,13 @@ from darkweb_collector.bot_assistant import (
     send_intelligence_digest,
     set_bot_config,
 )
+from darkweb_collector.dingtalk_bot import (
+    DingTalkBotError,
+    dingtalk_config_status,
+    load_dingtalk_config,
+    post_dingtalk_markdown,
+    set_dingtalk_config,
+)
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
     dispatch_run_code_monitoring_once,
@@ -834,6 +841,17 @@ class BotConfigRequest(BaseModel):
     secret: str = ""
 
 
+class DingTalkConfigRequest(BaseModel):
+    webhook_url: str
+    secret: str = ""
+
+
+class DingTalkSendRequest(BaseModel):
+    content: str
+    title: str = "暗网威胁情报通知"
+    dry_run: bool = False
+
+
 class ExposureWatchTermRequest(BaseModel):
     term: str
     term_type: str
@@ -1163,6 +1181,14 @@ def monitoring_keyword_notifications() -> list[dict]:
 @app.get("/api/bot/status")
 def bot_status() -> dict:
     return bot_config_status()
+
+
+@app.get("/api/dingtalk/status")
+def dingtalk_status() -> dict:
+    try:
+        return dingtalk_config_status()
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/platform-sessions")
@@ -1701,3 +1727,22 @@ def send_bot(payload: BotSendRequest) -> dict:
     except BotAssistantError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     raise HTTPException(status_code=400, detail="type must be one of: digest, text, markdown")
+
+
+@app.post("/api/dingtalk/config")
+def save_dingtalk_config(payload: DingTalkConfigRequest) -> dict:
+    try:
+        return set_dingtalk_config(webhook_url=payload.webhook_url, secret=payload.secret)
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/dingtalk/send")
+def send_dingtalk(payload: DingTalkSendRequest) -> dict:
+    if not payload.content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+    try:
+        config = load_dingtalk_config(dry_run=payload.dry_run)
+        return post_dingtalk_markdown(payload.content, config=config, title=payload.title)
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

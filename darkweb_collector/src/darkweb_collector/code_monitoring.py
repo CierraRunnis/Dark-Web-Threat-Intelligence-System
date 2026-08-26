@@ -4636,6 +4636,30 @@ def _scan_code_watchlist_once_unlocked(
         started_at=started_at,
         finished_at=finished_at,
     )
+    push_notifications: dict[str, Any]
+    try:
+        new_primary_hits = [
+            item
+            for item in list_code_hits_payload(
+                watchlist_id=int(watchlist["id"]),
+                limit=None,
+                include_suppressed=False,
+            )
+            if _normalize_text(item.get("firstSeenAt")) == now
+        ]
+        from darkweb_collector.code_monitoring_notifications import notify_code_monitoring_hits
+
+        push_notifications = notify_code_monitoring_hits(new_primary_hits)
+    except Exception as exc:
+        logger.exception("failed to send code monitoring notifications")
+        push_notifications = {
+            "eligible": 0,
+            "sent": 0,
+            "failed": 1,
+            "skipped": 0,
+            "channels": {},
+            "errors": [{"error": str(exc)}],
+        }
     return {
         "watchlist_id": watchlist_id,
         "watchlist_name": watchlist["name"],
@@ -4652,6 +4676,7 @@ def _scan_code_watchlist_once_unlocked(
         "detail_fetch": selected_detail_fetch,
         "enabled_rule_keys": selected_rule_keys,
         "github_search": github_code_search_status_payload(),
+        "push_notifications": push_notifications,
         "started_at": started_at,
         "finished_at": finished_at,
     }

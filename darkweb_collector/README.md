@@ -180,7 +180,7 @@ python scripts/crawl.py show-runs --limit 20
 
 ## Bot 助手推送
 
-`darkweb_collector.bot_assistant` 模块可将当前威胁情报概览、漏洞预警、勒索情报、数据泄露和态势告警推送到企业微信智能机器人。推荐直接在前端“采集控制台”配置企业微信后台生成的 Bot ID 和 Secret，保存后即可通过页面测试推送或由后端接口复用该配置发送消息。
+`darkweb_collector.bot_assistant` 和 `darkweb_collector.dingtalk_bot` 支持同时配置企业微信智能机器人和钉钉自定义机器人。企业微信可接收威胁情报摘要与监测通知；代码监测完成后，两类机器人都会收到新增且进入“代码泄露监测主列表”的记录，已抑制列表不会推送。
 
 ### 前端配置
 
@@ -194,8 +194,12 @@ http://localhost:5173/collector-control
 
 - `Bot ID`：企业微信“智能机器人”API 配置中显示的 Bot ID。
 - `Secret`：企业微信“智能机器人”API 配置中显示的 Secret。
+- `钉钉 Webhook`：钉钉群自定义机器人提供的完整 Webhook，也可以只填写 `access_token`。
+- `钉钉加签 Secret`：自定义机器人启用“加签”安全设置时填写；未启用加签时可留空。
 
 企业微信后台需选择“API 配置”，连接方式选择“使用长连接”。点击“保存配置”后，配置会保存到后端运行数据目录的 `bot_assistant_settings.json`，页面只显示脱敏后的 Bot ID，不回显完整 Secret。保存后把机器人拉进目标群聊，或直接私聊机器人，后端会通过长连接收到回调并自动登记该会话；监测事件和测试推送会发送到所有已登记会话。
+
+钉钉配置独立保存到同一运行数据目录下的 `dingtalk_bot_settings.json`，页面只显示脱敏后的 Webhook。企业微信与钉钉配置互不覆盖，可同时接收代码泄露监测主列表的新命中通知。
 
 ### API 配置
 
@@ -211,6 +215,17 @@ curl http://127.0.0.1:8000/api/bot/status
 curl -X POST http://127.0.0.1:8000/api/bot/config \
   -H "Content-Type: application/json" \
   -d '{"provider":"wechat_work_aibot","bot_id":"企业微信智能机器人 Bot ID","secret":"企业微信智能机器人 Secret"}'
+```
+
+保存并测试钉钉机器人配置：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/dingtalk/config \
+  -H "Content-Type: application/json" \
+  -d '{"webhook_url":"https://oapi.dingtalk.com/robot/send?access_token=TOKEN","secret":"SEC..."}'
+curl -X POST http://127.0.0.1:8000/api/dingtalk/send \
+  -H "Content-Type: application/json" \
+  -d '{"title":"测试推送","content":"### 暗网情报系统\n> 钉钉机器人测试消息"}'
 ```
 
 触发情报摘要推送：
@@ -247,6 +262,8 @@ python scripts/crawl.py send-bot-message --type digest --bot-id "Bot ID" --secre
 export WECOM_BOT_ID="企业微信智能机器人 Bot ID"
 export WECOM_SECRET="企业微信智能机器人 Secret"
 export WECOM_HOME_CHANNEL="userid 或 chatid"
+export DINGTALK_BOT_WEBHOOK="钉钉自定义机器人 Webhook"
+export DINGTALK_BOT_SECRET="钉钉加签 Secret"
 ```
 
 群机器人 Webhook 仍作为兼容模式保留，显式设置 `BOT_PROVIDER=wechat_work_webhook` 后可使用：
