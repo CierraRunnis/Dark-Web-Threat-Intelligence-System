@@ -80,6 +80,10 @@ jobs:
             -MinimumFreeGiB 1 -EnvironmentTarget Process
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Validate one-command first-run setup
+        shell: pwsh
+        run: .github/scripts/verify_first_run_setup.ps1
+
       - name: Build dashboard
         shell: pwsh
         working-directory: threat-intelligence-dashboard

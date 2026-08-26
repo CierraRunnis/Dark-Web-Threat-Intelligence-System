@@ -95,15 +95,15 @@ WSL / Linux 脚本会准备后端虚拟环境、前端依赖、Redis、Playwrigh
 
 ### Windows
 
-新环境如果不希望数据落在 C 盘，先选择一个容量充足的专用目录，再启动项目：
+普通使用只需要双击一个入口：
 
 ```powershell
-.\configure-data-root.cmd plan -DataRoot D:\DarkWebThreatIntel
-.\configure-data-root.cmd apply -DataRoot D:\DarkWebThreatIntel
 .\darkweb.cmd
 ```
 
-`apply` 只用于尚无旧数据的新环境。已经运行过项目时使用 `migrate`；工具会先停止项目，逐文件复制并执行 SHA-256 校验，切换失败会恢复旧配置，旧目录会保留供复核，不会自动删除：
+首次运行会列出本机可用磁盘和剩余空间，输入 `C`、`D`、`E` 等盘符即可。程序版本和业务数据会自动放到所选磁盘并保存配置，随后继续安装和启动；以后仍然只需运行 `darkweb.cmd`，不会重复询问。选择系统盘时使用 `%LOCALAPPDATA%\DarkWebThreatIntel`，选择其他盘时使用 `<盘符>:\DarkWebThreatIntel`。
+
+首次配置时如果检测到已有受管理数据，脚本会自动改用安全迁移：先停止服务、逐文件复制并执行 SHA-256 校验，切换失败会恢复旧配置，旧目录保留供复核。只有以后需要再次更换数据盘时，才使用高级迁移工具预检并迁移：
 
 ```powershell
 .\configure-data-root.cmd plan -DataRoot D:\DarkWebThreatIntel
@@ -122,7 +122,7 @@ WSL / Linux 脚本会准备后端虚拟环境、前端依赖、Redis、Playwrigh
 
 应用版本目录与业务数据分离。默认 `DARKWEB_APP_ROOT=<数据根目录>\app`；迁移已有数据时不会复制正在运行的 Release，当前版本会暂留旧位置，下一次一键更新才写入新的应用根。需要把程序版本放到另一专用盘时，可在迁移或启动前显式设置 `DARKWEB_APP_ROOT`。
 
-不指定数据盘时仍兼容使用 `%LOCALAPPDATA%\DarkWebThreatIntel`。也可以仅对本次安装显式传入 `-DataRoot`：
+自动化部署也可以显式传入数据目录，跳过交互选择：
 
 ```powershell
 .\darkweb.cmd install -DataRoot D:\DarkWebThreatIntel

@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("status", "plan", "apply", "migrate", "cleanup")]
+    [ValidateSet("status", "plan", "apply", "migrate", "cleanup", "first-run")]
     [string]$Action = "status",
 
     [string]$DataRoot = "",
@@ -187,6 +187,46 @@ function Get-ExistingParent([string]$Path) {
 function Get-FreeBytes([string]$Path) {
     $parent = Get-ExistingParent $Path
     return [int64]([IO.DriveInfo]::new([IO.Path]::GetPathRoot($parent))).AvailableFreeSpace
+}
+
+function Test-DataRootConfigured {
+    if ([Environment]::GetEnvironmentVariable("DARKWEB_DATA_ROOT", $EnvironmentTarget)) { return $true }
+    if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) { return $true }
+    if ($env:DARKWEB_DATA_ROOT -or $env:DARKWEB_USER_DATA_ROOT) { return $true }
+    return $false
+}
+
+function Select-FirstRunDataRoot {
+    $drives = @(
+        [IO.DriveInfo]::GetDrives() |
+            Where-Object { $_.IsReady -and $_.DriveType -eq [IO.DriveType]::Fixed } |
+            Sort-Object Name
+    )
+    if ($drives.Count -eq 0) { throw "No ready local fixed drive was found" }
+
+    $controlDrive = [IO.Path]::GetPathRoot($ControlRoot).TrimEnd("\")
+    $defaultDrive = $drives | Where-Object { $_.Name.TrimEnd("\") -ieq $controlDrive } | Select-Object -First 1
+    if (-not $defaultDrive) { $defaultDrive = $drives[0] }
+
+    Write-Host ""
+    Write-Host "First-time setup: choose where application releases and data will be stored."
+    foreach ($drive in $drives) {
+        $driveName = $drive.Name.TrimEnd("\")
+        $target = if ($driveName -ieq $controlDrive) { $ControlRoot } else { Join-Path $drive.Name "DarkWebThreatIntel" }
+        Write-Host ("  {0}  {1:N1} GiB free  ->  {2}" -f $driveName, ($drive.AvailableFreeSpace / 1GB), $target)
+    }
+
+    $defaultName = $defaultDrive.Name.TrimEnd("\")
+    $answer = (Read-Host "Enter a drive letter [$defaultName], or Q to cancel").Trim()
+    if (-not $answer) { $answer = $defaultName }
+    if ($answer -ieq "Q") { throw "First-time setup was cancelled" }
+    if ($answer -notmatch "^[A-Za-z]:?$") { throw "Enter one of the listed drive letters" }
+
+    $selectedName = $answer.Substring(0, 1).ToUpperInvariant() + ":"
+    $selectedDrive = $drives | Where-Object { $_.Name.TrimEnd("\") -ieq $selectedName } | Select-Object -First 1
+    if (-not $selectedDrive) { throw "Drive $selectedName is not a ready local fixed drive" }
+    if ($selectedName -ieq $controlDrive) { return [IO.Path]::GetFullPath($ControlRoot).TrimEnd("\") }
+    return [IO.Path]::GetFullPath((Join-Path $selectedDrive.Name "DarkWebThreatIntel")).TrimEnd("\")
 }
 
 function Test-PathUnder([string]$Path, [string]$Root) {
@@ -661,6 +701,13 @@ function Restore-TextFile([string]$Path, $Content) {
 $exitCode = 0
 $maintenanceLock = $null
 try {
+    $firstRunSetup = $Action -eq "first-run"
+    if ($firstRunSetup -and -not $DataRoot -and (Test-DataRootConfigured)) {
+        exit 0
+    }
+    if ($firstRunSetup -and -not $DataRoot) {
+        $DataRoot = Select-FirstRunDataRoot
+    }
     $currentRoot = Read-ConfiguredDataRoot
     if ($Action -eq "status") {
         Show-Status $currentRoot
@@ -677,11 +724,16 @@ try {
         Show-Status $currentRoot
         exit 0
     }
+    $targetRoot = Resolve-SafeDataRoot $DataRoot
+    if ($firstRunSetup) {
+        $managedFileCount = @(Get-ManagedFiles $currentRoot).Count
+        $Action = if ($currentRoot -ine $targetRoot -and $managedFileCount -gt 0) { "migrate" } else { "apply" }
+        Write-Info "First-time setup selected $targetRoot ($Action)."
+    }
     if ($Action -in @("apply", "migrate") -and (Test-Path -LiteralPath $CopyManifestPath -PathType Leaf)) {
         throw "A previous data-root migration is awaiting verification and cleanup. Run status/cleanup before starting another migration"
     }
 
-    $targetRoot = Resolve-SafeDataRoot $DataRoot
     if ($currentRoot -ine $targetRoot -and
         ((Test-PathUnder $targetRoot $currentRoot) -or (Test-PathUnder $currentRoot $targetRoot))) {
         throw "Current and target data roots cannot contain one another"
