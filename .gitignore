@@ -12,6 +12,7 @@ darkweb_collector/venv.broken-*/
 # Node / frontend build outputs
 node_modules/
 dist/
+dist-update/
 threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
 

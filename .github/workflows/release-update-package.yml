@@ -1,0 +1,111 @@
+name: Release update package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out exact release ref
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable release tag
+        shell: pwsh
+        run: |
+          $tagCommit = git rev-parse --verify "refs/tags/$env:RELEASE_TAG^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw "Release tag does not exist: $env:RELEASE_TAG" }
+          $headCommit = git rev-parse HEAD
+          if ($headCommit -ne $tagCommit) { throw "Checked out commit does not match release tag" }
+
+      - name: Validate backend sources
+        shell: pwsh
+        run: python -m compileall -q darkweb_collector/src darkweb_collector/scripts scripts/build_update_package.py
+
+      - name: Build deterministic update assets
+        shell: pwsh
+        run: python scripts/build_update_package.py --repository "${{ github.repository }}" --version $env:RELEASE_TAG --output-dir dist-update
+
+      - name: Verify package with client extraction rules
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "darkweb_collector/src"
+          @'
+          import json
+          from pathlib import Path
+          from darkweb_collector.self_update import _extract_update_archive
+          from darkweb_collector.version_check import _validate_manifest_payload
+
+          root = Path("dist-update")
+          raw = json.loads((root / "latest-stable.json").read_text(encoding="utf-8"))
+          manifest = _validate_manifest_payload(
+              raw,
+              "https://github.com/${{ github.repository }}/releases/latest/download/latest-stable.json",
+          )
+          _extract_update_archive(root / manifest["package"]["name"], root / "verified", manifest["version"])
+          '@ | python -
+
+      - name: Build dashboard
+        shell: pwsh
+        working-directory: threat-intelligence-dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: update-release-${{ inputs.tag || github.ref_name }}
+          path: |
+            dist-update/*.zip
+            dist-update/latest-stable.json
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download verified release candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: update-release-${{ inputs.tag || github.ref_name }}
+          path: dist-update
+
+      - name: Publish assets through a draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $package = Get-ChildItem -LiteralPath "dist-update" -Filter "*.zip" | Select-Object -First 1
+          if (-not $package) { throw "Update package was not downloaded" }
+          gh release create $env:RELEASE_TAG $package.FullName "dist-update/latest-stable.json" --verify-tag --draft --title $env:RELEASE_TAG --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "Draft release creation failed" }
+          gh release edit $env:RELEASE_TAG --draft=false --latest

@@ -5,6 +5,7 @@ import { openPlatformRemoteLogin } from '@/prototype/dataRuntime'
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
 const UPDATE_POLL_INTERVAL_MS = 2000
 const UPDATE_TIMEOUT_MS = 30 * 60 * 1000
+const UPDATE_JOB_STORAGE_KEY = 'darkweb-update-job-id'
 
 const versionRuntime = {
   version: null,
@@ -12,6 +13,7 @@ const versionRuntime = {
   versionLoading: false,
   update: null,
   updateStartedAt: 0,
+  updateRecovered: false,
   lastCheckedAt: 0,
   lastStatusCheckedAt: 0,
   versionTimer: null,
@@ -52,13 +54,13 @@ function currentVersionLabel() {
 
 function renderVersionMenus() {
   const updating = versionIsUpdating()
-  const updateAvailable = Boolean(versionRuntime.version?.update_available)
+  const updateAvailable = Boolean(versionRuntime.version?.update_available && !versionRuntime.versionError)
   const current = currentVersionLabel()
-  const branch = versionRuntime.version?.branch || versionRuntime.version?.current?.branch || 'main'
-  const latest = versionRuntime.version?.latest?.short_commit || ''
+  const channel = versionRuntime.version?.channel || versionRuntime.version?.current?.channel || 'stable'
+  const latest = versionRuntime.version?.latest?.version || versionRuntime.version?.latest?.short_commit || ''
 
   let title = `当前 ${current}`
-  let description = latest ? `${branch} 分支已同步 · ${latest}` : `${branch} 分支已同步`
+  let description = latest ? `${channel} 通道已同步 · ${latest}` : `${channel} 通道已同步`
   let state = 'current'
   let buttonLabel = updateAvailable ? '一键更新' : '检查并更新'
 
@@ -71,17 +73,17 @@ function renderVersionMenus() {
     title = '检查中'
     description = '正在检查版本信息'
     state = 'loading'
-  } else if (versionRuntime.versionError) {
-    title = '检查失败'
-    description = versionRuntime.versionError
-    state = 'error'
   } else if (versionRuntime.update?.status === 'failed') {
     title = '更新失败'
     description = versionRuntime.update.error || versionRuntime.update.message || '自动更新失败'
     state = 'error'
+  } else if (versionRuntime.versionError) {
+    title = '检查失败'
+    description = versionRuntime.versionError
+    state = 'error'
   } else if (updateAvailable) {
     title = '发现新版本'
-    description = `本地 ${current} / ${branch} ${latest || '-'}`
+    description = `本地 ${current} / 最新 ${latest || '-'}`
     state = 'available'
   }
 
@@ -142,11 +144,11 @@ async function loadVersionStatus(force = false) {
     if (!response.ok) throw new Error(`版本检查失败：${response.status}`)
     versionRuntime.version = await response.json()
     if (versionRuntime.version.status === 'error') {
-      versionRuntime.versionError = versionRuntime.version.error || versionRuntime.version.message || '无法检查 GitHub 更新'
+      versionRuntime.versionError = versionRuntime.version.error || versionRuntime.version.message || '无法检查更新服务'
     }
     versionRuntime.lastCheckedAt = Date.now()
   } catch (error) {
-    versionRuntime.versionError = error.message || '无法检查 GitHub 更新'
+    versionRuntime.versionError = error.message || '无法检查更新服务'
   } finally {
     versionRuntime.versionLoading = false
     renderVersionMenus()
@@ -158,13 +160,15 @@ function stopUpdatePolling() {
   versionRuntime.updatePollTimer = null
 }
 
-function scheduleUpdatePoll() {
+function scheduleUpdatePoll(delay = UPDATE_POLL_INTERVAL_MS) {
   stopUpdatePolling()
-  versionRuntime.updatePollTimer = window.setTimeout(pollUpdateStatus, UPDATE_POLL_INTERVAL_MS)
+  versionRuntime.updatePollTimer = window.setTimeout(pollUpdateStatus, delay)
 }
 
-async function handleUpdateFinished(state) {
+async function handleUpdateFinished(state, { recovered = false } = {}) {
   stopUpdatePolling()
+  versionRuntime.updateRecovered = false
+  window.sessionStorage.removeItem(UPDATE_JOB_STORAGE_KEY)
   renderVersionMenus()
   if (state.status === 'failed') {
     showToast(state.error || state.message || '自动更新失败')
@@ -173,6 +177,12 @@ async function handleUpdateFinished(state) {
   if (!state.updated) {
     versionRuntime.update = null
     showToast('当前已经是最新版本')
+    await loadVersionStatus(true)
+    return
+  }
+
+  if (recovered) {
+    showToast('更新已完成')
     await loadVersionStatus(true)
     return
   }
@@ -189,10 +199,11 @@ async function pollUpdateStatus() {
   if (Date.now() - versionRuntime.updateStartedAt > UPDATE_TIMEOUT_MS) {
     versionRuntime.update = {
       ...versionRuntime.update,
-      status: 'failed',
-      error: '更新等待超时，请查看服务日志',
+      message: '更新耗时较长，仍在等待服务端结果',
     }
-    await handleUpdateFinished(versionRuntime.update)
+    versionRuntime.updateStartedAt = Date.now()
+    renderVersionMenus()
+    scheduleUpdatePoll(10_000)
     return
   }
 
@@ -204,7 +215,7 @@ async function pollUpdateStatus() {
         versionRuntime.update = state
         renderVersionMenus()
         if (!['queued', 'running'].includes(state.status)) {
-          await handleUpdateFinished(state)
+          await handleUpdateFinished(state, { recovered: versionRuntime.updateRecovered })
           return
         }
       }
@@ -224,7 +235,13 @@ async function runSystemUpdate() {
     }
     versionRuntime.update = await response.json()
     versionRuntime.updateStartedAt = Date.now()
+    versionRuntime.updateRecovered = false
+    window.sessionStorage.setItem(UPDATE_JOB_STORAGE_KEY, versionRuntime.update.job_id || '')
     renderVersionMenus()
+    if (!['queued', 'running'].includes(versionRuntime.update.status)) {
+      await handleUpdateFinished(versionRuntime.update)
+      return
+    }
     showToast('更新任务已启动，服务会自动重启')
     scheduleUpdatePoll()
   } catch (error) {
@@ -240,23 +257,31 @@ async function runSystemUpdate() {
 
 async function resumeRunningUpdate() {
   if (versionIsUpdating() || Date.now() - versionRuntime.lastStatusCheckedAt < 30_000) return
+  const trackedJobId = window.sessionStorage.getItem(UPDATE_JOB_STORAGE_KEY)
+  if (!trackedJobId) return
   versionRuntime.lastStatusCheckedAt = Date.now()
   try {
     const response = await fetch('/api/system/update/status', { cache: 'no-store' })
     if (!response.ok) return
     const state = await response.json()
+    if (state.job_id !== trackedJobId) return
+    versionRuntime.update = state
+    versionRuntime.updateRecovered = true
+    const startedAt = Date.parse(state.started_at || '')
+    versionRuntime.updateStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now()
     if (['queued', 'running'].includes(state.status)) {
-      versionRuntime.update = state
-      versionRuntime.updateStartedAt = Date.now()
       renderVersionMenus()
       scheduleUpdatePoll()
+      return
     }
+    await handleUpdateFinished(state, { recovered: true })
   } catch {
     // A status check should not block the page.
   }
 }
 
 function setupVersionUpdate() {
+  resumeRunningUpdate()
   const badges = [...document.querySelectorAll('.app-version')]
   if (!badges.length) return
 
@@ -323,7 +348,6 @@ function setupVersionUpdate() {
 
   renderVersionMenus()
   loadVersionStatus()
-  resumeRunningUpdate()
   if (!versionRuntime.versionTimer) {
     versionRuntime.versionTimer = window.setInterval(loadVersionStatus, VERSION_CHECK_INTERVAL_MS)
   }

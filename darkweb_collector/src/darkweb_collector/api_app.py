@@ -166,7 +166,7 @@ from darkweb_collector.tor_bridge_control import (
     stop_tor_bridge,
     write_torrc,
 )
-from darkweb_collector.version_check import build_version_status
+from darkweb_collector.version_check import build_version_status, current_version_payload
 from darkweb_collector.self_update import (
     SelfUpdateError,
     read_public_update_status,
@@ -187,7 +187,8 @@ class ApiGZipMiddleware:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="Darkweb Collector API", version="v20260825")
+APP_VERSION = current_version_payload()["version"]
+app = FastAPI(title="Darkweb Collector API", version=APP_VERSION)
 app.include_router(migration_router)
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
@@ -451,7 +452,7 @@ def warm_payloads_on_startup() -> None:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/api/system/version")

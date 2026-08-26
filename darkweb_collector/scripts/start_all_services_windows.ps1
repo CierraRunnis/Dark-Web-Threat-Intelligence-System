@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "status", "install", "register", "uninstall")]
+    [ValidateSet("start", "stop", "status", "install", "prepare-update", "health", "register", "uninstall")]
     [string]$Action = "start",
 
     [Parameter(Position = 1)]
@@ -60,6 +60,41 @@ $RuntimePortsFile = Join-Path $RuntimeDir "ports.json"
 $CommandBinDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel\bin"
 $DarkwebCommandPath = Join-Path $CommandBinDir "darkweb.cmd"
 $DefaultUserDataDir = Join-Path $LocalAppDataRoot "DarkWebThreatIntel"
+$UpdateStateRoot = if ($env:DARKWEB_UPDATE_STATE_DIR) { [System.IO.Path]::GetFullPath($env:DARKWEB_UPDATE_STATE_DIR) } else { $DefaultUserDataDir }
+$InstallationStatePath = Join-Path $UpdateStateRoot "installation.json"
+$ManagedInstallation = $null
+$ManagedInstallationActive = $false
+if (Test-Path -LiteralPath $InstallationStatePath -PathType Leaf) {
+    try {
+        $candidateInstallation = Get-Content -LiteralPath $InstallationStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$candidateInstallation.format -eq 1 -and $candidateInstallation.current_root) {
+            $targetProjectRoot = [System.IO.Path]::GetFullPath([string]$candidateInstallation.current_root).TrimEnd("\")
+            $currentProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd("\")
+            $targetScript = Join-Path $targetProjectRoot "darkweb_collector\scripts\start_all_services_windows.ps1"
+            if ($targetProjectRoot.Equals($currentProjectRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                $ManagedInstallation = $candidateInstallation
+                $ManagedInstallationActive = $true
+            }
+            elseif ($Action -ne "prepare-update" -and (Test-Path -LiteralPath $targetScript -PathType Leaf)) {
+                $forwardArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $targetScript, $Action)
+                if ($Action -eq "uninstall") {
+                    $forwardArguments += $UninstallMode
+                    if ($Force) {
+                        $forwardArguments += "-Force"
+                    }
+                    if ($WhatIfPreference) {
+                        $forwardArguments += "-WhatIf"
+                    }
+                }
+                & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" @forwardArguments
+                exit $LASTEXITCODE
+            }
+        }
+    }
+    catch {
+        Write-Host "[WARN] Ignoring invalid managed installation state: $($_.Exception.Message)"
+    }
+}
 $ActiveReleaseFile = if ($env:DARKWEB_ACTIVE_RELEASE_FILE) {
     [System.IO.Path]::GetFullPath($env:DARKWEB_ACTIVE_RELEASE_FILE)
 }
@@ -121,7 +156,16 @@ $PlaywrightStamp = Join-Path $VenvDir ".playwright.browsers.ready"
 $PackageLockStamp = Join-Path $DashboardRoot "node_modules\.package-lock.sha256"
 $RedisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { $ManagedGarnetRedisUrl }
 $CollectorDbPath = if ($env:DARKWEB_COLLECTOR_DB_PATH) { $env:DARKWEB_COLLECTOR_DB_PATH } else { Join-Path $DefaultUserDataDir "collector.db" }
-$ConfiguredCollectorSitesFile = if ($env:DARKWEB_COLLECTOR_SITES_FILE) {
+$ManagedCollectorSitesFile = if ($ManagedInstallationActive -and $ManagedInstallation.sites_file) {
+    [System.IO.Path]::GetFullPath([string]$ManagedInstallation.sites_file)
+}
+else {
+    ""
+}
+$ConfiguredCollectorSitesFile = if ($ManagedCollectorSitesFile) {
+    $ManagedCollectorSitesFile
+}
+elseif ($env:DARKWEB_COLLECTOR_SITES_FILE) {
     [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_SITES_FILE)
 }
 else {
@@ -129,7 +173,10 @@ else {
 }
 $ConfiguredSitesParent = if ($ConfiguredCollectorSitesFile) { Split-Path -Parent $ConfiguredCollectorSitesFile } else { "" }
 $SitesFileBelongsToAnotherCheckout = $ConfiguredSitesParent -and (Split-Path -Leaf $ConfiguredSitesParent) -ieq "darkweb_collector" -and $ConfiguredSitesParent -ine $CollectorRoot
-$CollectorSitesFile = if ($ConfiguredCollectorSitesFile -and -not $SitesFileBelongsToAnotherCheckout) {
+$CollectorSitesFile = if ($ManagedCollectorSitesFile) {
+    $ManagedCollectorSitesFile
+}
+elseif ($ConfiguredCollectorSitesFile -and -not $SitesFileBelongsToAnotherCheckout) {
     $ConfiguredCollectorSitesFile
 }
 else {
@@ -149,7 +196,16 @@ $TorDistBaseUrl = if ($env:TOR_DIST_BASE_URL) { $env:TOR_DIST_BASE_URL.TrimEnd("
 $TorBrowserBuildRepo = if ($env:TOR_BROWSER_BUILD_REPO) { $env:TOR_BROWSER_BUILD_REPO } else { "https://gitlab.torproject.org/tpo/applications/tor-browser-build.git" }
 $BundledTorPtConfigPath = Join-Path $CollectorRoot "src\darkweb_collector\tor_bridge_control\pt_config.json"
 $script:TorReleaseInfo = $null
-$ConfiguredCollectorOutputRoot = if ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
+$ManagedCollectorOutputRoot = if ($ManagedInstallationActive -and $ManagedInstallation.output_root) {
+    [System.IO.Path]::GetFullPath([string]$ManagedInstallation.output_root)
+}
+else {
+    ""
+}
+$ConfiguredCollectorOutputRoot = if ($ManagedCollectorOutputRoot) {
+    $ManagedCollectorOutputRoot
+}
+elseif ($env:DARKWEB_COLLECTOR_OUTPUT_ROOT) {
     [System.IO.Path]::GetFullPath($env:DARKWEB_COLLECTOR_OUTPUT_ROOT)
 }
 else {
@@ -157,7 +213,10 @@ else {
 }
 $ConfiguredOutputParent = if ($ConfiguredCollectorOutputRoot) { Split-Path -Parent $ConfiguredCollectorOutputRoot } else { "" }
 $OutputRootBelongsToAnotherCheckout = $ConfiguredOutputParent -and (Split-Path -Leaf $ConfiguredOutputParent) -ieq "darkweb_collector" -and $ConfiguredOutputParent -ine $CollectorRoot
-$CollectorOutputRoot = if ($ConfiguredCollectorOutputRoot -and -not $OutputRootBelongsToAnotherCheckout) {
+$CollectorOutputRoot = if ($ManagedCollectorOutputRoot) {
+    $ManagedCollectorOutputRoot
+}
+elseif ($ConfiguredCollectorOutputRoot -and -not $OutputRootBelongsToAnotherCheckout) {
     $configuredOutputRoot = $ConfiguredCollectorOutputRoot
     $resolvedLegacyOutputRoot = [System.IO.Path]::GetFullPath($LegacyCollectorOutputRoot)
     if ($configuredOutputRoot -ieq $resolvedLegacyOutputRoot) {
@@ -2102,6 +2161,9 @@ if "%~1"=="" (
     Set-UserEnv -Name "DARKWEB_COLLECTOR_SITES_FILE" -Value $CollectorSitesFile
     Set-UserEnv -Name "DARKWEB_COLLECTOR_OUTPUT_ROOT" -Value $CollectorOutputRoot
     Set-UserEnv -Name "DARKWEB_AUTH_PASSWORD_FILE" -Value $AuthPasswordFile
+    if ($env:DARKWEB_UPDATE_STATE_DIR) {
+        Set-UserEnv -Name "DARKWEB_UPDATE_STATE_DIR" -Value $UpdateStateRoot
+    }
     if ($script:RedisProvider -eq "garnet") {
         Set-UserEnv -Name "REDIS_URL" -Value $RedisUrl
         Set-UserEnv -Name "DARKWEB_REDIS_PROVIDER" -Value "garnet"
@@ -2469,6 +2531,38 @@ function Ensure-Environment {
     Invoke-TimedStep "Ensure-SiteConfigsLoad" { Ensure-SiteConfigsLoad }
 }
 
+function Prepare-UpdateEnvironment {
+    if (-not (Test-Path -LiteralPath (Join-Path $CollectorRoot "scripts\serve_api.py") -PathType Leaf)) {
+        Stop-WithError "API launcher not found under collector scripts."
+    }
+    $dashboardIndex = Join-Path $DashboardRoot "index.html"
+    if (-not (Test-Path -LiteralPath (Join-Path $DashboardRoot "package.json") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $dashboardIndex -PathType Leaf) -or
+        -not (Get-Content -LiteralPath $dashboardIndex -Raw).Contains($NewUiMarker)) {
+        Stop-WithError "Xuanjian new UI was not found under $DashboardRoot."
+    }
+
+    Ensure-Directory $RuntimeDir
+    Ensure-Directory $LogDir
+    Invoke-TimedStep "Ensure-PythonRuntime" { Ensure-PythonRuntime | Out-Null }
+    Invoke-TimedStep "Ensure-NodeRuntime" { Ensure-NodeRuntime | Out-Null }
+    Invoke-TimedStep "Ensure-RedisCanStart" { Ensure-RedisCanStart }
+    Invoke-TimedStep "Ensure-TorBridgeRuntime" { Ensure-TorBridgeRuntime }
+    Invoke-TimedStep "Ensure-CollectorVenv" { Ensure-CollectorVenv }
+    Invoke-TimedStep "Ensure-CollectorDependencies" { Ensure-CollectorDependencies }
+    Invoke-TimedStep "Ensure-PlaywrightRuntime" { Ensure-PlaywrightRuntime }
+    Invoke-TimedStep "Ensure-DashboardDependencies" { Ensure-DashboardDependencies }
+    Write-Info "Update environment is ready"
+}
+
+function Assert-DarkwebHealth {
+    Load-RuntimePorts
+    if (-not (Test-DarkwebStackReady)) {
+        Stop-WithError "Darkweb services did not pass the strict health check."
+    }
+    Write-Info "Darkweb services passed the strict health check"
+}
+
 function Start-Services {
     if (Test-DarkwebStackReady) {
         Write-Info "Services already running"
@@ -2549,6 +2643,7 @@ function Stop-Services {
     $projectPortsToClean = @(8000, 5173)
 
     $records = @(Get-ServiceRecords)
+    $ownedProcessIds = @()
     $processRows = @(Get-ProcessRows)
     $processRowMap = New-ProcessRowMap -ProcessRows $processRows
     $stopRecords = @($records | Sort-Object @{ Expression = { if ($_.name -eq "garnet") { 1 } else { 0 } } })
@@ -2556,6 +2651,9 @@ function Stop-Services {
         $pidValue = [int]$record.pid
         if (Test-ProcessRunning -ProcessId $pidValue) {
             if (Test-ServiceRecordOwnsProcess -Record $record -ProcessRows $processRows -ProcessRowMap $processRowMap) {
+                if ($record.name -ne "garnet") {
+                    $ownedProcessIds += $pidValue
+                }
                 Stop-ProcessTree -ProcessId $pidValue -ProcessRows $processRows -ProcessRowMap $processRowMap -Label $record.name
             }
             else {
@@ -2581,6 +2679,16 @@ function Stop-Services {
     }
     foreach ($port in @($projectPortsToClean | Where-Object { $_ -and [int]$_ -gt 0 } | Sort-Object -Unique)) {
         Stop-ProjectListenersOnPort -Port ([int]$port) -Reason "darkweb stop cleanup"
+    }
+
+    Start-Sleep -Milliseconds 300
+    $remainingOwned = @($ownedProcessIds | Where-Object { Test-ProcessRunning -ProcessId ([int]$_) })
+    $remainingRows = @(Get-ProcessRows)
+    $remainingRowMap = New-ProcessRowMap -ProcessRows $remainingRows
+    $remainingManaged = @(Get-ProjectManagedProcessRows -ProcessRows $remainingRows -ProcessRowMap $remainingRowMap |
+        Where-Object { [int]$_.ProcessId -ne $PID })
+    if ($remainingOwned.Count -gt 0 -or $remainingManaged.Count -gt 0) {
+        Stop-WithError "Managed project processes are still running after stop."
     }
 
     if (Test-Path -LiteralPath $PidFile) {
@@ -2684,6 +2792,7 @@ function Uninstall-Darkweb {
     }
 
     Remove-DarkwebRegistration -WhatIf:$WhatIfPreference -Confirm:$false
+    Remove-ManagedPath -Path $InstallationStatePath -ExpectedPath (Join-Path $UpdateStateRoot "installation.json") -Label "managed installation pointer" -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-ManagedPath -Path $VenvDir -ExpectedPath (Join-Path $CollectorRoot "venv") -Label "Python virtual environment" -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-ManagedPath -Path $DashboardNodeModulesDir -ExpectedPath (Join-Path $DashboardRoot "node_modules") -Label "dashboard dependencies" -WhatIf:$WhatIfPreference -Confirm:$false
     Remove-ManagedPath -Path $DashboardDistDir -ExpectedPath (Join-Path $DashboardRoot "dist") -Label "dashboard build output" -WhatIf:$WhatIfPreference -Confirm:$false
@@ -2834,6 +2943,8 @@ switch ($Action) {
             Write-Info "Environment is ready. Run 'darkweb' to start the system."
         }
     }
+    "prepare-update" { Invoke-WithProjectRuntimeLock { Prepare-UpdateEnvironment } }
+    "health" { Assert-DarkwebHealth }
     "register" { Invoke-WithProjectRuntimeLock { Register-DarkwebCommand } }
     "uninstall" { Invoke-WithProjectRuntimeLock { Uninstall-Darkweb -Mode $UninstallMode -ForceDelete:$Force -WhatIf:$WhatIfPreference -Confirm:$false } }
 }

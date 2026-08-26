@@ -9,7 +9,7 @@
 - 前端分析工作台：提供数据浏览、任务状态、采集结果和风险线索查看能力。
 - 后台任务调度：使用 Redis 协议兼容服务和 Celery 处理采集、渲染、详情解析和同步任务；Windows 一键启动默认使用项目托管的 Microsoft Garnet。
 - Tor 网桥控制：支持在系统内配置并启动 Snowflake / obfs4 等 Tor 网桥模式，为采集代理提供本地 SOCKS 入口。
-- 一键在线更新：在版本信息区域直接获取配置的 `main` 分支最新提交，并自动同步依赖和重启服务。
+- 一键在线更新：Windows 用户点击版本信息区域的更新按钮即可下载经校验的正式发布包，自动安装、重启并在失败时回滚，不要求安装 Git。
 - Windows / WSL 启动脚本：提供一键准备依赖、注册命令、启动服务和查看状态的脚本。
 
 ## 项目结构
@@ -158,12 +158,19 @@ darkweb uninstall purge-data --yes
 
 登录系统后，侧边栏的版本信息区域提供“一键更新”按钮。点击后系统会：
 
-1. 获取 GitHub `main` 分支的最新提交。
-2. 仅在工作区没有未提交修改且可以 fast-forward 时更新代码。
-3. 通过对应的 Windows 或 Linux 启动脚本同步依赖。
-4. 重启 API、前端和后台任务服务。
+1. 从稳定更新通道读取 `latest-stable.json`，比较发布版本。
+2. 在旧服务保持运行时下载发布 ZIP，并校验清单、下载大小、SHA-256；配置公钥后还会强制验证 Ed25519 签名。
+3. 安全解压到 `%LOCALAPPDATA%\DarkWebThreatIntel\app\releases` 下的独立版本目录，提前准备新版依赖。
+4. 停止旧服务，原子切换 `installation.json`，启动新版并检查 API、前端和全部托管进程。
+5. 新版健康检查失败时自动恢复旧版本；成功后页面自动跳转到登录页。
 
-更新完成后需要重新登录。在线更新要求项目通过 Git 克隆部署；源码压缩包、容器只读文件系统或存在本地未提交修改时，系统会停止更新并显示原因。默认固定跟踪 `main` 分支，也可以通过 `DARKWEB_UPDATE_BRANCH` 显式覆盖，通过 `DARKWEB_SELF_UPDATE_ENABLED=0` 禁用在线更新。
+更新完成后需要重新登录。Windows 在线更新不读取 `.git`、不执行 Git 命令，也不会覆盖数据库、采集输出、Cookie、账号配置、Tor 或 Garnet 数据。首次安装包含该更新器的过渡版本后，后续版本即可完全通过按钮更新；原安装目录的 `darkweb.cmd` 会自动转发到当前活动版本。
+
+首次从普通源码目录切换到托管版本目录时，为避免复制体量较大的历史镜像，`installation.json` 会继续引用原来的 `darkweb_collector\output`。在通过数据迁移功能把镜像转入新的共享数据位置前，不要删除或移动最初的源码目录。
+
+默认清单地址为仓库最新 GitHub Release 中的 `latest-stable.json`。可通过 `DARKWEB_UPDATE_MANIFEST_URL` 指向内部 HTTPS 更新服务，使用 `DARKWEB_UPDATE_ALLOWED_HOSTS` 限制允许的下载域名，通过 `DARKWEB_SELF_UPDATE_ENABLED=0` 禁用按钮更新。配置 `DARKWEB_UPDATE_PUBLIC_KEY_FILE` 后可校验清单中的 Ed25519 签名；生产环境可同时设置 `DARKWEB_UPDATE_REQUIRE_SIGNATURE=1` 拒绝未签名发布包。当前无 Git 发布包更新器先支持 Windows，WSL / Linux 仍使用人工发布升级流程。
+
+仓库默认 Release 流水线不接触签名私钥，因此默认发布包使用 GitHub HTTPS 来源约束和 SHA-256 完整性校验。需要强制签名时，应在受保护的独立签名环境中调用 `scripts/build_update_package.py --signing-key <私钥路径>`，并先把对应 `update-signing-public.pem` 随过渡版本交付给客户端，再启用 `DARKWEB_UPDATE_REQUIRE_SIGNATURE=1`。
 
 ## 数据库与镜像文件迁移
 
