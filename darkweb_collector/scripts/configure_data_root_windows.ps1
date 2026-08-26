@@ -722,9 +722,14 @@ try {
     $oldCopyManifest = if (Test-Path -LiteralPath $CopyManifestPath) { Get-Content -LiteralPath $CopyManifestPath -Raw -Encoding UTF8 } else { $null }
     $installationPath = $InstallationStatePath
     $oldInstallation = if (Test-Path -LiteralPath $installationPath) { Get-Content -LiteralPath $installationPath -Raw -Encoding UTF8 } else { $null }
+    $servicesStopped = $false
     try {
+        if ($currentRoot -ine $targetRoot -and $wasRunning) {
+            $servicesStopped = $true
+            & $Launcher stop
+            if ($LASTEXITCODE -ne 0) { throw "Failed to stop project services" }
+        }
         if ($Action -eq "migrate" -and $currentRoot -ine $targetRoot) {
-            if ($wasRunning) { & $Launcher stop; if ($LASTEXITCODE -ne 0) { throw "Failed to stop project services" } }
             Copy-AndVerifyData $currentRoot $targetRoot
             Update-MigrationMetadata $currentRoot $targetRoot
             Write-CopyManifest $currentRoot $targetRoot
@@ -738,6 +743,10 @@ try {
         }
     }
     catch {
+        $failure = $_
+        if ($wasRunning -and $servicesStopped) {
+            & $Launcher stop | Out-Null
+        }
         Restore-TextFile $ConfigPath $oldConfig
         Restore-TextFile $CopyManifestPath $oldCopyManifest
         Restore-TextFile $installationPath $oldInstallation
@@ -746,8 +755,11 @@ try {
             if ($null -eq $oldEnvironment[$name]) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue }
             else { Set-Item -Path "Env:$name" -Value $oldEnvironment[$name] }
         }
-        if ($wasRunning -and -not (Test-ProjectRunning)) { & $Launcher start | Out-Null }
-        throw
+        if ($wasRunning) {
+            & $Launcher start | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warn "Failed to restart the previous project environment during rollback" }
+        }
+        throw $failure
     }
 
     Write-Info "Data root configured successfully: $targetRoot"

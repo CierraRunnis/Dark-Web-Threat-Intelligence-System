@@ -3000,23 +3000,30 @@ function Uninstall-Darkweb {
             Remove-ManagedPath -Path $dbFile -ExpectedPath ((Join-Path $CollectorRoot "data\collector.db") + $suffix) -Label "project database file" -WhatIf:$WhatIfPreference -Confirm:$false
         }
         if (Test-Path -LiteralPath $DefaultUserDataDir -PathType Container) {
-            $postgresqlDataDirectory = Get-PostgreSqlDataDirectory
-            foreach ($item in Get-ChildItem -LiteralPath $DefaultUserDataDir -Force) {
-                $preserveForPostgreSql = $item.Name -ieq "postgresql" -or
-                    ($postgresqlDataDirectory -and
-                        ((Test-SamePath -Left $postgresqlDataDirectory -Right $item.FullName) -or
-                         (Test-PathUnderRoot -Path $postgresqlDataDirectory -Root $item.FullName)))
-                $preserveForApplication = (Test-SamePath -Left $AppRoot -Right $item.FullName) -or
-                    (Test-PathUnderRoot -Path $AppRoot -Root $item.FullName)
-                if ($preserveForPostgreSql) {
+            foreach ($name in @(
+                "collector.db", "collector.db-wal", "collector.db-shm", "collector.db-journal",
+                "active-release.json", "auth-password.txt", "garnet-runtime.json"
+            )) {
+                $path = Join-Path $DefaultUserDataDir $name
+                Remove-ManagedPath -Path $path -ExpectedPath (Join-Path $DefaultUserDataDir $name) -Label "managed data file" -WhatIf:$WhatIfPreference -Confirm:$false
+            }
+            foreach ($name in @(
+                "output", "migrations", "config", "secrets", "update-backups", "garnet-data",
+                "tor-expert", "tor_bridge_runtime", "tor_bridge_runtime_auto", "runtimes", "npm-cache", "playwright"
+            )) {
+                $path = Join-Path $DefaultUserDataDir $name
+                Remove-ManagedPath -Path $path -ExpectedPath (Join-Path $DefaultUserDataDir $name) -Label "managed data directory" -WhatIf:$WhatIfPreference -Confirm:$false
+            }
+            foreach ($item in Get-ChildItem -LiteralPath $DefaultUserDataDir -Force -ErrorAction Stop) {
+                if ($item.Name -ieq "postgresql") {
                     Write-Warn "Preserving PostgreSQL cluster data managed by its Windows service: $($item.FullName)"
-                    continue
                 }
-                if ($preserveForApplication) {
+                elseif ($item.Name -ieq "app") {
                     Write-Warn "Preserving managed application releases for deferred cleanup: $($item.FullName)"
-                    continue
                 }
-                Remove-ManagedPath -Path $item.FullName -ExpectedPath $item.FullName -Label "darkweb user data item" -WhatIf:$WhatIfPreference -Confirm:$false
+                else {
+                    Write-Warn "Preserving unrecognized data-root item: $($item.FullName)"
+                }
             }
             Remove-EmptyManagedDirectory -Path $DefaultUserDataDir -ExpectedPath $DefaultUserDataDir -WhatIf:$WhatIfPreference -Confirm:$false
         }
