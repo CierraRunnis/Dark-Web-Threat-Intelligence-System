@@ -26,7 +26,6 @@ from darkweb_collector.detail_i18n import (
     translate_event_title_live,
 )
 from darkweb_collector.db import (
-    get_db_connection,
     get_monitoring_keyword_notification,
     get_monitoring_keyword_notification_by_event_key,
     upsert_monitoring_keyword_notification,
@@ -601,21 +600,3 @@ def notify_keyword_matches_for_events(
             )
             connection.commit()
     return result
-
-
-def notify_current_keyword_matches(
-    *,
-    config: BotConfig | None = None,
-    dingtalk_config: DingTalkConfig | None = None,
-    channels: set[str] | None = None,
-) -> dict[str, Any]:
-    from darkweb_collector.normalized_intelligence import load_normalized_events
-
-    with get_db_connection() as connection:
-        return notify_keyword_matches_for_events(
-            connection,
-            load_normalized_events(connection),
-            config=config,
-            dingtalk_config=dingtalk_config,
-            channels=channels,
-        )

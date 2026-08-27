@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from darkweb_collector.bot_assistant import BOT_PROVIDER_WECHAT_WORK_WEBHOOK, BotConfig
 from darkweb_collector.dingtalk_bot import DingTalkConfig
 from darkweb_collector import monitoring_notifications as notifications
+from darkweb_collector.normalized_intelligence import _new_normalized_events
 
 
 class Connection:
@@ -80,17 +81,24 @@ dingtalk = DingTalkConfig(
 )
 connection = Connection()
 
-current_event_id = "first"
+current_event_id = "existing"
+existing = event(current_event_id)
+current_event_id = "first-new"
 first = event(current_event_id)
+new_events = _new_normalized_events([existing, first], {"existing"})
+assert [item["event_id"] for item in new_events] == ["first-new"]
 result = notifications.notify_keyword_matches_for_events(
     connection,
-    [first],
+    new_events,
     config=wechat,
     dingtalk_config=dingtalk,
 )
 assert result["matched"] == 1 and result["sent"] == 2 and result["failed"] == 0
 assert deliveries.count((notifications.CHANNEL_WECHAT_WORK, current_event_id)) == 1
 assert deliveries.count((notifications.CHANNEL_DINGTALK, current_event_id)) == 1
+assert deliveries.count((notifications.CHANNEL_WECHAT_WORK, "existing")) == 0
+assert deliveries.count((notifications.CHANNEL_DINGTALK, "existing")) == 0
+assert _new_normalized_events([existing, first], {"existing", "first-new"}) == []
 
 again = notifications.notify_keyword_matches_for_events(
     connection,
