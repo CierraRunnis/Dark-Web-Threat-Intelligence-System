@@ -22,7 +22,7 @@
           <strong>数据迁移</strong>
         </div>
         <div class="header-actions">
-          <span class="app-version">版本 <strong>v20260826.1.0</strong></span>
+          <span class="app-version">版本 <strong>v20260827</strong></span>
           <button class="avatar" type="button" aria-label="个人账户"></button>
         </div>
       </header>
