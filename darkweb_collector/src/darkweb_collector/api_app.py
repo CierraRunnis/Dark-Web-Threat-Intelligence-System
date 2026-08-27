@@ -44,6 +44,13 @@ from darkweb_collector.bot_assistant import (
     send_intelligence_digest,
     set_bot_config,
 )
+from darkweb_collector.dingtalk_bot import (
+    DingTalkBotError,
+    dingtalk_config_status,
+    load_dingtalk_config,
+    post_dingtalk_markdown,
+    set_dingtalk_config,
+)
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
     dispatch_run_code_monitoring_once,
@@ -145,7 +152,7 @@ from darkweb_collector.db import (
     reconcile_stale_crawl_jobs,
 )
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
-from darkweb_collector.runtime import output_root
+from darkweb_collector.runtime import output_root, user_data_root
 from darkweb_collector.session_cookies import (
     clear_session_cookie,
     get_session_cookie_status,
@@ -159,7 +166,7 @@ from darkweb_collector.tor_bridge_control import (
     stop_tor_bridge,
     write_torrc,
 )
-from darkweb_collector.version_check import build_version_status
+from darkweb_collector.version_check import build_version_status, current_version_payload
 from darkweb_collector.self_update import (
     SelfUpdateError,
     read_public_update_status,
@@ -180,7 +187,8 @@ class ApiGZipMiddleware:
         await self.app(scope, receive, send)
 
 
-app = FastAPI(title="Darkweb Collector API", version="v20260825")
+APP_VERSION = current_version_payload()["version"]
+app = FastAPI(title="Darkweb Collector API", version=APP_VERSION)
 app.include_router(migration_router)
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
@@ -206,15 +214,7 @@ def _auth_username() -> str:
 
 
 def _default_auth_password_file() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "DarkWebThreatIntel" / "auth-password.txt"
-
-    user_profile = os.environ.get("USERPROFILE", "").strip()
-    if user_profile:
-        return Path(user_profile) / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
-
-    return Path.home() / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
+    return user_data_root() / "auth-password.txt"
 
 
 def _auth_password_file_path() -> Path:
@@ -444,7 +444,7 @@ def warm_payloads_on_startup() -> None:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/api/system/version")
@@ -834,6 +834,17 @@ class BotConfigRequest(BaseModel):
     secret: str = ""
 
 
+class DingTalkConfigRequest(BaseModel):
+    webhook_url: str
+    secret: str = ""
+
+
+class DingTalkSendRequest(BaseModel):
+    content: str
+    title: str = "暗网威胁情报通知"
+    dry_run: bool = False
+
+
 class ExposureWatchTermRequest(BaseModel):
     term: str
     term_type: str
@@ -1163,6 +1174,14 @@ def monitoring_keyword_notifications() -> list[dict]:
 @app.get("/api/bot/status")
 def bot_status() -> dict:
     return bot_config_status()
+
+
+@app.get("/api/dingtalk/status")
+def dingtalk_status() -> dict:
+    try:
+        return dingtalk_config_status()
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/platform-sessions")
@@ -1701,3 +1720,22 @@ def send_bot(payload: BotSendRequest) -> dict:
     except BotAssistantError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     raise HTTPException(status_code=400, detail="type must be one of: digest, text, markdown")
+
+
+@app.post("/api/dingtalk/config")
+def save_dingtalk_config(payload: DingTalkConfigRequest) -> dict:
+    try:
+        return set_dingtalk_config(webhook_url=payload.webhook_url, secret=payload.secret)
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/dingtalk/send")
+def send_dingtalk(payload: DingTalkSendRequest) -> dict:
+    if not payload.content.strip():
+        raise HTTPException(status_code=400, detail="content is required")
+    try:
+        config = load_dingtalk_config(dry_run=payload.dry_run)
+        return post_dingtalk_markdown(payload.content, config=config, title=payload.title)
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

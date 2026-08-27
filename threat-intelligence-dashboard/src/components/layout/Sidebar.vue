@@ -82,7 +82,7 @@
         <el-button
           class="sidebar__update"
           size="small"
-          :type="versionStatus?.update_available ? 'primary' : 'default'"
+          :type="updateState?.status === 'failed' ? 'danger' : versionStatus?.update_available ? 'primary' : 'default'"
           :loading="updateRunning"
           :disabled="versionLoading || updateRunning"
           @click="runUpdate"
@@ -113,6 +113,7 @@ const shell = useShellLayout()
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
 const UPDATE_POLL_INTERVAL_MS = 2000
 const UPDATE_TIMEOUT_MS = 30 * 60 * 1000
+const UPDATE_JOB_STORAGE_KEY = 'darkweb-update-job-id'
 const versionStatus = ref(null)
 const versionLoading = ref(false)
 const versionError = ref('')
@@ -120,6 +121,7 @@ const updateState = ref(null)
 let versionTimer = null
 let updatePollTimer = null
 let updateStartedAt = 0
+let updateRecovered = false
 
 const navTree = [
   { type: 'item', path: '/', title: '总览', icon: 'DataLine' },
@@ -181,22 +183,24 @@ watch(
 
 const versionTitle = computed(() => {
   if (updateRunning.value) return '正在更新系统'
+  if (updateState.value?.status === 'failed') return '更新失败'
   if (versionLoading.value && !versionStatus.value) return '检查中'
-  if (versionError.value && !versionStatus.value) return '检查失败'
+  if (versionError.value) return '检查失败'
   if (versionStatus.value?.update_available) return '发现新版本'
   return `当前 ${currentVersionLabel.value}`
 })
 
 const versionDescription = computed(() => {
   if (updateRunning.value) return updateState.value?.message || '正在准备更新'
-  if (versionError.value && !versionStatus.value) return versionError.value
+  if (updateState.value?.status === 'failed') return updateState.value.error || updateState.value.message || '自动更新失败'
+  if (versionError.value) return versionError.value
   if (!versionStatus.value) return '正在检查版本信息'
-  const branch = versionStatus.value.branch || versionStatus.value.current?.branch || 'main'
-  const latest = versionStatus.value.latest?.short_commit || ''
+  const channel = versionStatus.value.channel || versionStatus.value.current?.channel || 'stable'
+  const latest = versionStatus.value.latest?.version || versionStatus.value.latest?.short_commit || ''
   if (versionStatus.value.update_available) {
-    return `本地 ${currentVersionLabel.value} / ${branch} ${latest || '-'}`
+    return `本地 ${currentVersionLabel.value} / 最新 ${latest || '-'}`
   }
-  return latest ? `${branch} 分支已同步 · ${latest}` : `${branch} 分支已同步`
+  return latest ? `${channel} 通道已同步 · ${latest}` : `${channel} 通道已同步`
 })
 
 const currentVersionLabel = computed(() => (
@@ -209,6 +213,7 @@ const updateRunning = computed(() => ['queued', 'running'].includes(updateState.
 
 const updateButtonLabel = computed(() => {
   if (updateRunning.value) return updateState.value?.message || '正在更新'
+  if (updateState.value?.status === 'failed') return '重试更新'
   return versionStatus.value?.update_available ? '一键更新' : '检查并更新'
 })
 
@@ -228,9 +233,14 @@ async function loadVersionStatus() {
   try {
     const response = await fetch('/api/system/version')
     if (!response.ok) throw new Error(`版本检查失败：${response.status}`)
-    versionStatus.value = await response.json()
+    const payload = await response.json()
+    versionStatus.value = payload
+    if (payload.status === 'error') {
+      throw new Error(payload.error || payload.message || '无法检查更新服务')
+    }
   } catch (error) {
-    versionError.value = error.message || '无法检查 GitHub 更新'
+    if (versionStatus.value) versionStatus.value = { ...versionStatus.value, update_available: false }
+    versionError.value = error.message || '无法检查更新服务'
   } finally {
     versionLoading.value = false
   }
@@ -241,19 +251,27 @@ function stopUpdatePolling() {
   updatePollTimer = null
 }
 
-function scheduleUpdatePoll() {
+function scheduleUpdatePoll(delay = UPDATE_POLL_INTERVAL_MS) {
   stopUpdatePolling()
-  updatePollTimer = window.setTimeout(pollUpdateStatus, UPDATE_POLL_INTERVAL_MS)
+  updatePollTimer = window.setTimeout(pollUpdateStatus, delay)
 }
 
-async function handleUpdateFinished(state) {
+async function handleUpdateFinished(state, { recovered = false } = {}) {
   stopUpdatePolling()
+  updateRecovered = false
+  window.sessionStorage.removeItem(UPDATE_JOB_STORAGE_KEY)
   if (state.status === 'failed') {
     ElMessage.error(state.error || state.message || '自动更新失败')
     return
   }
   if (!state.updated) {
     ElMessage.success('当前已经是最新版本')
+    await loadVersionStatus()
+    return
+  }
+
+  if (recovered) {
+    ElMessage.success('更新已完成')
     await loadVersionStatus()
     return
   }
@@ -268,8 +286,9 @@ async function handleUpdateFinished(state) {
 async function pollUpdateStatus() {
   if (!updateRunning.value) return
   if (Date.now() - updateStartedAt > UPDATE_TIMEOUT_MS) {
-    updateState.value = { ...updateState.value, status: 'failed', error: '更新等待超时，请查看服务日志' }
-    await handleUpdateFinished(updateState.value)
+    updateState.value = { ...updateState.value, message: '更新耗时较长，仍在等待服务端结果' }
+    updateStartedAt = Date.now()
+    scheduleUpdatePoll(10_000)
     return
   }
 
@@ -280,7 +299,7 @@ async function pollUpdateStatus() {
       if (state.job_id === updateState.value?.job_id) {
         updateState.value = state
         if (!['queued', 'running'].includes(state.status)) {
-          await handleUpdateFinished(state)
+          await handleUpdateFinished(state, { recovered: updateRecovered })
           return
         }
       }
@@ -300,6 +319,12 @@ async function runUpdate() {
     }
     updateState.value = await response.json()
     updateStartedAt = Date.now()
+    updateRecovered = false
+    window.sessionStorage.setItem(UPDATE_JOB_STORAGE_KEY, updateState.value.job_id || '')
+    if (!['queued', 'running'].includes(updateState.value.status)) {
+      await handleUpdateFinished(updateState.value)
+      return
+    }
     ElMessage.info('更新任务已启动，服务会自动重启')
     scheduleUpdatePoll()
   } catch (error) {
@@ -308,15 +333,22 @@ async function runUpdate() {
 }
 
 async function resumeRunningUpdate() {
+  const trackedJobId = window.sessionStorage.getItem(UPDATE_JOB_STORAGE_KEY)
+  if (!trackedJobId) return
   try {
     const response = await fetch('/api/system/update/status')
     if (!response.ok) return
     const state = await response.json()
+    if (state.job_id !== trackedJobId) return
+    updateState.value = state
+    updateRecovered = true
+    const startedAt = Date.parse(state.started_at || '')
+    updateStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now()
     if (['queued', 'running'].includes(state.status)) {
-      updateState.value = state
-      updateStartedAt = Date.now()
       scheduleUpdatePoll()
+      return
     }
+    await handleUpdateFinished(state, { recovered: true })
   } catch {
     // A status check should not block the rest of the sidebar.
   }

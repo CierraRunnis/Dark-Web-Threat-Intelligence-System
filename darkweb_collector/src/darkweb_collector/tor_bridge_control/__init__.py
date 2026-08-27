@@ -446,6 +446,7 @@ def _pt_config_candidates(settings: dict[str, Any]) -> list[Path]:
     explicit_path = _string(os.environ.get(PT_CONFIG_PATH_ENV))
     if explicit_path:
         candidates.append(Path(explicit_path).expanduser())
+    candidates.append(default_db_path().parent / "tor-expert" / "pt_config.json")
     local_app_data = _string(os.environ.get("LOCALAPPDATA"))
     if local_app_data:
         candidates.append(Path(local_app_data) / "DarkWebThreatIntel" / "tor-expert" / "pt_config.json")

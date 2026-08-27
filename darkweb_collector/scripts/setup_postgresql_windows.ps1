@@ -17,6 +17,7 @@ param(
     [string]$PostgreSqlMajor = "16",
 
     [string]$ProjectRoot = "",
+    [string]$DataRoot = "",
 
     [switch]$ResetApplicationPassword,
     [switch]$NoRestart,
@@ -40,10 +41,58 @@ $PackageId = "PostgreSQL.PostgreSQL.$PostgreSqlMajor"
 $PostgreSqlInstallerVersion = "16.15-1"
 $PostgreSqlInstallerUrl = "https://get.enterprisedb.com/postgresql/postgresql-16.15-1-windows-x64.exe"
 $PostgreSqlInstallerSha256 = "de926fefad00e313e212cd438c0f04bf033e200099ad56c012724efcebed79f2"
-$UserDataRoot = Join-Path $env:LOCALAPPDATA "DarkWebThreatIntel"
-$TargetConfigPath = Join-Path $UserDataRoot "postgresql-target.json"
-$SetupResultPath = Join-Path $UserDataRoot "postgresql-setup-result.json"
-$ActiveReleasePath = Join-Path $UserDataRoot "active-release.json"
+$LocalAppDataRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE "AppData\Local" } else { Join-Path $ProjectRootPath ".runtime\user" }
+$ControlRoot = [IO.Path]::GetFullPath((Join-Path $LocalAppDataRoot "DarkWebThreatIntel"))
+$DataRootConfigPath = Join-Path $ControlRoot "data-root.json"
+$configuredDataRoot = if ($DataRoot) {
+    $DataRoot
+}
+elseif ($env:DARKWEB_DATA_ROOT) {
+    $env:DARKWEB_DATA_ROOT
+}
+elseif ([Environment]::GetEnvironmentVariable("DARKWEB_DATA_ROOT", "User")) {
+    [Environment]::GetEnvironmentVariable("DARKWEB_DATA_ROOT", "User")
+}
+elseif ($env:DARKWEB_USER_DATA_ROOT) {
+    $env:DARKWEB_USER_DATA_ROOT
+}
+elseif (Test-Path -LiteralPath $DataRootConfigPath -PathType Leaf) {
+    try {
+        $dataRootConfig = Get-Content -LiteralPath $DataRootConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$dataRootConfig.format -ne 1 -or -not $dataRootConfig.data_root) {
+            throw "unsupported configuration"
+        }
+        [string]$dataRootConfig.data_root
+    }
+    catch {
+        throw "Data root configuration is invalid: $DataRootConfigPath"
+    }
+}
+else {
+    $ControlRoot
+}
+if (-not [IO.Path]::IsPathRooted($configuredDataRoot)) {
+    throw "DataRoot must be an absolute path below a drive root"
+}
+$DataRootPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredDataRoot)).TrimEnd("\")
+if ($DataRootPath.StartsWith("\\", [StringComparison]::Ordinal)) {
+    throw "DataRoot must be on a local Windows volume; network and WSL UNC paths are not supported"
+}
+if ($DataRootPath -ieq [IO.Path]::GetPathRoot($DataRootPath).TrimEnd("\")) {
+    throw "DataRoot cannot be a drive root; use a dedicated directory such as D:\DarkWebThreatIntel"
+}
+foreach ($protectedDataRoot in @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if (-not $protectedDataRoot) { continue }
+    $protectedPath = [IO.Path]::GetFullPath($protectedDataRoot).TrimEnd("\")
+    if ($DataRootPath -ieq $protectedPath -or
+        $DataRootPath.StartsWith($protectedPath + "\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "DataRoot cannot be under a protected system directory: $protectedPath"
+    }
+}
+$PostgreSqlDataDirectory = Join-Path $DataRootPath "postgresql\$PostgreSqlMajor\data"
+$TargetConfigPath = Join-Path $ControlRoot "postgresql-target.json"
+$SetupResultPath = Join-Path $ControlRoot "postgresql-setup-result.json"
+$ActiveReleasePath = if ($env:DARKWEB_ACTIVE_RELEASE_FILE) { [IO.Path]::GetFullPath($env:DARKWEB_ACTIVE_RELEASE_FILE) } else { Join-Path $DataRootPath "active-release.json" }
 $RuntimePortsPath = Join-Path $CollectorRoot ".runtime\windows\ports.json"
 $script:SensitiveValues = [System.Collections.Generic.List[string]]::new()
 $script:SkipPause = $false
@@ -56,6 +105,25 @@ function Write-Info {
 function Write-Warn {
     param([string]$Message)
     Write-Host "[WARN] $Message" -ForegroundColor Yellow
+}
+
+function Get-DataRootDriveInfo {
+    $candidate = $DataRootPath
+    while (-not (Test-Path -LiteralPath $candidate) -and $candidate -ne [IO.Path]::GetPathRoot($candidate)) {
+        $candidate = Split-Path -Parent $candidate
+    }
+    return [IO.DriveInfo]::new([IO.Path]::GetPathRoot($candidate))
+}
+
+function Assert-DataRootCapacity {
+    New-Item -ItemType Directory -Path $DataRootPath -Force | Out-Null
+    $drive = Get-DataRootDriveInfo
+    if ($drive.AvailableFreeSpace -lt 2GB) {
+        throw "Data root $DataRootPath has less than 2 GiB free"
+    }
+    if ($drive.AvailableFreeSpace -lt 20GB) {
+        Write-Warn "Data root has only $([Math]::Round($drive.AvailableFreeSpace / 1GB, 2)) GiB free: $DataRootPath"
+    }
 }
 
 function Add-SensitiveValue {
@@ -82,7 +150,7 @@ function Write-SetupResult {
         [string]$Status,
         [string]$Message
     )
-    New-Item -ItemType Directory -Path $UserDataRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     $payload = [ordered]@{
         status = $Status
         message = Hide-SensitiveValues $Message
@@ -208,9 +276,10 @@ function Save-TargetConfig {
     param(
         [string]$ApplicationPassword,
         [string]$SuperuserPassword,
-        [string]$PostgreSqlBin
+        [string]$PostgreSqlBin,
+        [string]$DataDirectory
     )
-    New-Item -ItemType Directory -Path $UserDataRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     $payload = [ordered]@{
         format = 1
         host = "127.0.0.1"
@@ -221,6 +290,7 @@ function Save-TargetConfig {
         postgres_superuser = "postgres"
         postgres_password_dpapi = Protect-Text $SuperuserPassword
         postgresql_bin = $PostgreSqlBin
+        data_directory = $DataDirectory
         package_id = $PackageId
         configured_at = [DateTimeOffset]::UtcNow.ToString("o")
     }
@@ -262,7 +332,8 @@ function Install-VerifiedPostgreSql {
         return $false
     }
 
-    $stagingRoot = Join-Path ([IO.Path]::GetTempPath()) ("darkweb-postgresql-" + [Guid]::NewGuid().ToString("N"))
+    Assert-DataRootCapacity
+    $stagingRoot = Join-Path $DataRootPath (".postgresql-setup-" + [Guid]::NewGuid().ToString("N"))
     $installerPath = Join-Path $stagingRoot "postgresql-installer.exe"
     $sourceInstallerPath = [string]$env:DARKWEB_POSTGRESQL_INSTALLER_PATH
     $previousProgressPreference = $ProgressPreference
@@ -295,6 +366,7 @@ function Install-VerifiedPostgreSql {
             "--superpassword", $BootstrapPassword,
             "--servicepassword", $BootstrapPassword,
             "--serverport", [string]$Port,
+            "--datadir", ('"' + $PostgreSqlDataDirectory + '"'),
             "--enable-components", "server,commandlinetools",
             "--disable-components", "pgAdmin,stackbuilder"
         )
@@ -342,6 +414,31 @@ function Find-PostgreSqlTools {
         return $null
     }
     return [pscustomobject]@{ Psql = $selected; PgIsReady = $ready; Bin = $bin }
+}
+
+function Get-PostgreSqlDataDirectory {
+    try {
+        $services = @(Get-CimInstance Win32_Service -Filter "Name LIKE 'postgresql%'" -ErrorAction Stop)
+        $service = $services | Where-Object {
+            $_.Name -match "-$([Regex]::Escape($PostgreSqlMajor))$" -or
+            [string]$_.PathName -match "(?i)\\$([Regex]::Escape($PostgreSqlMajor))\\"
+        } | Select-Object -First 1
+        if (-not $service) { $service = $services | Select-Object -First 1 }
+        if ($service -and [string]$service.PathName -match '(?i)(?:^|\s)-D\s+(?:"([^"]+)"|([^\s]+))') {
+            $servicePath = if ($matches[1]) { $matches[1] } else { $matches[2] }
+            if ($servicePath) {
+                return [IO.Path]::GetFullPath($servicePath)
+            }
+        }
+    }
+    catch {
+    }
+    $config = Read-TargetConfig
+    $configuredPath = [string](Get-ConfigValue $config "data_directory")
+    if ($configuredPath) {
+        return [IO.Path]::GetFullPath($configuredPath)
+    }
+    return ""
 }
 
 function Wait-PostgreSql {
@@ -448,12 +545,16 @@ function Restart-ProjectIfRunning {
 }
 
 function Show-Plan {
+    $drive = Get-DataRootDriveInfo
     Write-Host "Windows PostgreSQL one-click setup plan"
     Write-Host "  Package:  EDB PostgreSQL $PostgreSqlInstallerVersion (verified direct download when missing)"
     Write-Host "  Endpoint: 127.0.0.1:$Port"
     Write-Host "  Database: $DatabaseName"
     Write-Host "  Role:     $ApplicationUser"
     Write-Host "  Project:  $ProjectRootPath"
+    Write-Host "  Data root:$DataRootPath"
+    Write-Host "  New data: $PostgreSqlDataDirectory"
+    Write-Host "  Free:     $([Math]::Round($drive.AvailableFreeSpace / 1GB, 2)) GiB"
     Write-Host "  Config:   $TargetConfigPath"
     Write-Host "  Changes:  install service, create database/role, grant schema-create permission, configure migration target"
     Write-Host "  Tables:   created in an isolated dwti_<bundle_id> schema when a .dwti package is imported"
@@ -468,6 +569,14 @@ function Show-Status {
     }
     $version = (& $tools.Psql --version 2>$null | Out-String).Trim()
     Write-Info $version
+    $actualDataDirectory = Get-PostgreSqlDataDirectory
+    if ($actualDataDirectory) {
+        Write-Info "PostgreSQL data directory: $actualDataDirectory"
+        $dataRootPrefix = $DataRootPath.TrimEnd("\") + "\"
+        if (-not $actualDataDirectory.StartsWith($dataRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Write-Warn "Existing PostgreSQL data is outside the selected data root; this setup tool will reuse it without moving it"
+        }
+    }
     & $tools.PgIsReady -h 127.0.0.1 -p $Port -q
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "PostgreSQL is not accepting connections on 127.0.0.1:$Port"
@@ -511,6 +620,7 @@ function Invoke-ElevatedSetup {
         "-ApplicationUser", $ApplicationUser,
         "-PostgreSqlMajor", $PostgreSqlMajor,
         "-ProjectRoot", ('"' + $ProjectRootPath + '"'),
+        "-DataRoot", ('"' + $DataRootPath + '"'),
         "-OneClick"
     )
     if ($ResetApplicationPassword) { $arguments += "-ResetApplicationPassword" }
@@ -551,6 +661,16 @@ function Install-PostgreSqlTarget {
         return $serviceExitCode
     }
     Wait-PostgreSql $tools
+    $actualDataDirectory = Get-PostgreSqlDataDirectory
+    if (-not $actualDataDirectory -and $installedNow) {
+        $actualDataDirectory = $PostgreSqlDataDirectory
+    }
+    if ($actualDataDirectory) {
+        $dataRootPrefix = $DataRootPath.TrimEnd("\") + "\"
+        if (-not $actualDataDirectory.StartsWith($dataRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            Write-Warn "Reusing existing PostgreSQL data outside the selected data root: $actualDataDirectory"
+        }
+    }
     $config = Read-TargetConfig
     $matchingConfig = $config -and
         ([string](Get-ConfigValue $config "host") -eq "127.0.0.1") -and
@@ -615,7 +735,11 @@ function Install-PostgreSqlTarget {
         Write-Info "Rotated the temporary installer database password"
     }
 
-    Save-TargetConfig $applicationPassword $superuserPassword $tools.Bin
+    $reportedDataDirectory = @(Invoke-Psql $tools "postgres" $superuserPassword "postgres" "SHOW data_directory;")
+    if ($reportedDataDirectory.Count -gt 0 -and [string]$reportedDataDirectory[-1]) {
+        $actualDataDirectory = [IO.Path]::GetFullPath(([string]$reportedDataDirectory[-1]).Trim())
+    }
+    Save-TargetConfig $applicationPassword $superuserPassword $tools.Bin $actualDataDirectory
     $encodedPassword = [Uri]::EscapeDataString($applicationPassword)
     $targetUrl = "postgresql://${ApplicationUser}:${encodedPassword}@127.0.0.1:${Port}/${DatabaseName}"
     [Environment]::SetEnvironmentVariable("DARKWEB_MIGRATION_TARGET_DATABASE_URL", $targetUrl, "User")

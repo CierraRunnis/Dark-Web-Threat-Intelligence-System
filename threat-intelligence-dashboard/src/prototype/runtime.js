@@ -5,6 +5,7 @@ import { openPlatformRemoteLogin } from '@/prototype/dataRuntime'
 const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000
 const UPDATE_POLL_INTERVAL_MS = 2000
 const UPDATE_TIMEOUT_MS = 30 * 60 * 1000
+const UPDATE_JOB_STORAGE_KEY = 'darkweb-update-job-id'
 
 const versionRuntime = {
   version: null,
@@ -12,6 +13,7 @@ const versionRuntime = {
   versionLoading: false,
   update: null,
   updateStartedAt: 0,
+  updateRecovered: false,
   lastCheckedAt: 0,
   lastStatusCheckedAt: 0,
   versionTimer: null,
@@ -52,13 +54,13 @@ function currentVersionLabel() {
 
 function renderVersionMenus() {
   const updating = versionIsUpdating()
-  const updateAvailable = Boolean(versionRuntime.version?.update_available)
+  const updateAvailable = Boolean(versionRuntime.version?.update_available && !versionRuntime.versionError)
   const current = currentVersionLabel()
-  const branch = versionRuntime.version?.branch || versionRuntime.version?.current?.branch || 'main'
-  const latest = versionRuntime.version?.latest?.short_commit || ''
+  const channel = versionRuntime.version?.channel || versionRuntime.version?.current?.channel || 'stable'
+  const latest = versionRuntime.version?.latest?.version || versionRuntime.version?.latest?.short_commit || ''
 
   let title = `当前 ${current}`
-  let description = latest ? `${branch} 分支已同步 · ${latest}` : `${branch} 分支已同步`
+  let description = latest ? `${channel} 通道已同步 · ${latest}` : `${channel} 通道已同步`
   let state = 'current'
   let buttonLabel = updateAvailable ? '一键更新' : '检查并更新'
 
@@ -71,17 +73,17 @@ function renderVersionMenus() {
     title = '检查中'
     description = '正在检查版本信息'
     state = 'loading'
-  } else if (versionRuntime.versionError) {
-    title = '检查失败'
-    description = versionRuntime.versionError
-    state = 'error'
   } else if (versionRuntime.update?.status === 'failed') {
     title = '更新失败'
     description = versionRuntime.update.error || versionRuntime.update.message || '自动更新失败'
     state = 'error'
+  } else if (versionRuntime.versionError) {
+    title = '检查失败'
+    description = versionRuntime.versionError
+    state = 'error'
   } else if (updateAvailable) {
     title = '发现新版本'
-    description = `本地 ${current} / ${branch} ${latest || '-'}`
+    description = `本地 ${current} / 最新 ${latest || '-'}`
     state = 'available'
   }
 
@@ -142,11 +144,11 @@ async function loadVersionStatus(force = false) {
     if (!response.ok) throw new Error(`版本检查失败：${response.status}`)
     versionRuntime.version = await response.json()
     if (versionRuntime.version.status === 'error') {
-      versionRuntime.versionError = versionRuntime.version.error || versionRuntime.version.message || '无法检查 GitHub 更新'
+      versionRuntime.versionError = versionRuntime.version.error || versionRuntime.version.message || '无法检查更新服务'
     }
     versionRuntime.lastCheckedAt = Date.now()
   } catch (error) {
-    versionRuntime.versionError = error.message || '无法检查 GitHub 更新'
+    versionRuntime.versionError = error.message || '无法检查更新服务'
   } finally {
     versionRuntime.versionLoading = false
     renderVersionMenus()
@@ -158,13 +160,15 @@ function stopUpdatePolling() {
   versionRuntime.updatePollTimer = null
 }
 
-function scheduleUpdatePoll() {
+function scheduleUpdatePoll(delay = UPDATE_POLL_INTERVAL_MS) {
   stopUpdatePolling()
-  versionRuntime.updatePollTimer = window.setTimeout(pollUpdateStatus, UPDATE_POLL_INTERVAL_MS)
+  versionRuntime.updatePollTimer = window.setTimeout(pollUpdateStatus, delay)
 }
 
-async function handleUpdateFinished(state) {
+async function handleUpdateFinished(state, { recovered = false } = {}) {
   stopUpdatePolling()
+  versionRuntime.updateRecovered = false
+  window.sessionStorage.removeItem(UPDATE_JOB_STORAGE_KEY)
   renderVersionMenus()
   if (state.status === 'failed') {
     showToast(state.error || state.message || '自动更新失败')
@@ -173,6 +177,12 @@ async function handleUpdateFinished(state) {
   if (!state.updated) {
     versionRuntime.update = null
     showToast('当前已经是最新版本')
+    await loadVersionStatus(true)
+    return
+  }
+
+  if (recovered) {
+    showToast('更新已完成')
     await loadVersionStatus(true)
     return
   }
@@ -189,10 +199,11 @@ async function pollUpdateStatus() {
   if (Date.now() - versionRuntime.updateStartedAt > UPDATE_TIMEOUT_MS) {
     versionRuntime.update = {
       ...versionRuntime.update,
-      status: 'failed',
-      error: '更新等待超时，请查看服务日志',
+      message: '更新耗时较长，仍在等待服务端结果',
     }
-    await handleUpdateFinished(versionRuntime.update)
+    versionRuntime.updateStartedAt = Date.now()
+    renderVersionMenus()
+    scheduleUpdatePoll(10_000)
     return
   }
 
@@ -204,7 +215,7 @@ async function pollUpdateStatus() {
         versionRuntime.update = state
         renderVersionMenus()
         if (!['queued', 'running'].includes(state.status)) {
-          await handleUpdateFinished(state)
+          await handleUpdateFinished(state, { recovered: versionRuntime.updateRecovered })
           return
         }
       }
@@ -224,7 +235,13 @@ async function runSystemUpdate() {
     }
     versionRuntime.update = await response.json()
     versionRuntime.updateStartedAt = Date.now()
+    versionRuntime.updateRecovered = false
+    window.sessionStorage.setItem(UPDATE_JOB_STORAGE_KEY, versionRuntime.update.job_id || '')
     renderVersionMenus()
+    if (!['queued', 'running'].includes(versionRuntime.update.status)) {
+      await handleUpdateFinished(versionRuntime.update)
+      return
+    }
     showToast('更新任务已启动，服务会自动重启')
     scheduleUpdatePoll()
   } catch (error) {
@@ -240,23 +257,31 @@ async function runSystemUpdate() {
 
 async function resumeRunningUpdate() {
   if (versionIsUpdating() || Date.now() - versionRuntime.lastStatusCheckedAt < 30_000) return
+  const trackedJobId = window.sessionStorage.getItem(UPDATE_JOB_STORAGE_KEY)
+  if (!trackedJobId) return
   versionRuntime.lastStatusCheckedAt = Date.now()
   try {
     const response = await fetch('/api/system/update/status', { cache: 'no-store' })
     if (!response.ok) return
     const state = await response.json()
+    if (state.job_id !== trackedJobId) return
+    versionRuntime.update = state
+    versionRuntime.updateRecovered = true
+    const startedAt = Date.parse(state.started_at || '')
+    versionRuntime.updateStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now()
     if (['queued', 'running'].includes(state.status)) {
-      versionRuntime.update = state
-      versionRuntime.updateStartedAt = Date.now()
       renderVersionMenus()
       scheduleUpdatePoll()
+      return
     }
+    await handleUpdateFinished(state, { recovered: true })
   } catch {
     // A status check should not block the page.
   }
 }
 
 function setupVersionUpdate() {
+  resumeRunningUpdate()
   const badges = [...document.querySelectorAll('.app-version')]
   if (!badges.length) return
 
@@ -323,7 +348,6 @@ function setupVersionUpdate() {
 
   renderVersionMenus()
   loadVersionStatus()
-  resumeRunningUpdate()
   if (!versionRuntime.versionTimer) {
     versionRuntime.versionTimer = window.setInterval(loadVersionStatus, VERSION_CHECK_INTERVAL_MS)
   }
@@ -1326,6 +1350,7 @@ export function initializePrototype() {
       if (collectorAction.startsWith('vulnerability-')) return 'vulnerability'
       if (collectorAction.startsWith('ransomware-')) return 'ransomware'
       if (collectorAction.startsWith('bot-')) return 'bot'
+      if (collectorAction.startsWith('dingtalk-')) return 'dingtalk'
       if (['watchlist-save', 'watchlist-delete'].includes(codeAction)) return 'watchlists'
       if (['github-save', 'github-delete'].includes(codeAction)) return 'github'
       if (['changan-save', 'changan-test', 'changan-delete'].includes(codeAction)) return 'changan'
@@ -2568,12 +2593,27 @@ export function initializePrototype() {
       bindText('bot-secret-status', payload.has_secret ? '已配置' : '未配置')
     }
 
+    function renderDingTalk(payload = {}) {
+      const configured = Boolean(payload.configured)
+      setBadge('dingtalk-status', configured ? '已配置' : '待配置', configured ? 'badge-success' : '')
+      bindText('dingtalk-webhook-status', configured ? (payload.webhook_host || '已配置') : '未配置')
+      bindText('dingtalk-secret-status', payload.has_secret ? '已配置' : '未配置（可选）')
+      const webhook = $('#dingtalk-webhook', root)
+      const secret = $('#dingtalk-secret', root)
+      if (webhook) {
+        webhook.value = ''
+        webhook.placeholder = configured ? '已配置；输入新 Webhook 可替换' : '输入钉钉机器人 Webhook 或 access_token'
+      }
+      if (secret) secret.value = ''
+    }
+
     async function refreshCollector(options = {}) {
       const tasks = []
       if (root.hasAttribute('data-needs-jobs')) tasks.push(['/api/jobs', renderJobs, 'jobs'])
       if ($('#netdisk-cursor-table', root)) tasks.push(['/api/document-exposures/netdisk/source-health?source_family=netdisk_aggregator', renderNetdiskCursors, 'netdisk'])
       if (root.hasAttribute('data-needs-tor') || $('[data-bind="tor-status"]', root)) tasks.push(['/api/tor-bridge/status', renderTor, 'tor'])
       if (root.hasAttribute('data-needs-bot') || $('[data-bind="bot-status"]', root)) tasks.push(['/api/bot/status', renderBot, 'bot'])
+      if ($('[data-bind="dingtalk-status"]', root)) tasks.push(['/api/dingtalk/status', renderDingTalk, 'dingtalk'])
       if ($('[data-od-id="collector-vulnerability-sync"]', root)) {
         tasks.push(['/api/vulnerabilities/sync/status', renderVulnerabilitySync, 'vulnerability'])
         tasks.push(['/api/ransomware/sync/status', renderRansomwareSync, 'ransomware'])
@@ -2911,6 +2951,13 @@ export function initializePrototype() {
         return request('/api/bot/config', { method: 'POST', body: JSON.stringify({ provider: 'wechat_work_aibot', bot_id: botId, secret }) })
       }, 'Bot 助手配置已保存')
       if (action === 'bot-test') return void runAction(button, () => request('/api/bot/send', { method: 'POST', body: JSON.stringify({ type: 'markdown', content: `### 玄鉴威胁情报平台\n> Bot 助手测试推送：${new Date().toLocaleString('zh-CN')}` }) }), 'Bot 测试消息已发送')
+      if (action === 'dingtalk-save') return void runAction(button, async () => {
+        const webhookUrl = $('#dingtalk-webhook', root)?.value.trim()
+        const secret = $('#dingtalk-secret', root)?.value.trim() || ''
+        if (!webhookUrl) throw new Error('请输入钉钉机器人 Webhook 或 access_token')
+        renderDingTalk(await request('/api/dingtalk/config', { method: 'POST', body: JSON.stringify({ webhook_url: webhookUrl, secret }) }))
+      }, '钉钉机器人配置已保存')
+      if (action === 'dingtalk-test') return void runAction(button, () => request('/api/dingtalk/send', { method: 'POST', body: JSON.stringify({ title: '玄鉴威胁情报平台测试推送', content: `### 玄鉴威胁情报平台\n> 钉钉机器人测试推送：${new Date().toLocaleString('zh-CN')}` }) }), '钉钉测试消息已发送')
       if (button.dataset.siteRun) return void runAction(button, async () => requireDispatched(await request('/api/jobs/run-site', { method: 'POST', body: JSON.stringify({ site_name: button.dataset.siteRun, force: true }) })), `已触发 ${button.dataset.siteRun} 运行一次`)
       if (button.dataset.siteToggle) {
         const enabled = button.dataset.enabled !== 'true'

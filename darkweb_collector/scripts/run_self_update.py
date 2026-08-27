@@ -15,12 +15,14 @@ from darkweb_collector.self_update import run_self_update
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Apply a safe in-place project update")
+    parser = argparse.ArgumentParser(description="Install a verified release package and restart services")
     parser.add_argument("--job-id", required=True)
-    parser.add_argument("--branch", required=True)
-    parser.add_argument("--remote", default="origin")
+    # Accepted for one transition release so an already queued legacy command
+    # does not fail argument parsing after the source files are updated.
+    parser.add_argument("--branch", default="")
+    parser.add_argument("--remote", default="")
     args = parser.parse_args()
-    run_self_update(args.job_id, args.branch, args.remote)
+    run_self_update(args.job_id)
 
 
 if __name__ == "__main__":

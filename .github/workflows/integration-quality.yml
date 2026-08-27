@@ -1,0 +1,119 @@
+name: Integration quality gate
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate versions and Python sources
+        shell: pwsh
+        run: |
+          @'
+          import json
+          from pathlib import Path
+
+          version = json.loads(Path("version.json").read_text(encoding="utf-8"))["version"]
+          dashboard = json.loads(Path("threat-intelligence-dashboard/package.json").read_text(encoding="utf-8"))["version"]
+          lock = json.loads(Path("threat-intelligence-dashboard/package-lock.json").read_text(encoding="utf-8"))
+          expected = version.removeprefix("v")
+          assert dashboard == expected, (dashboard, expected)
+          assert lock["version"] == expected
+          assert lock["packages"][""]["version"] == expected
+          '@ | python -
+          python -m compileall -q darkweb_collector/src darkweb_collector/scripts scripts
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $paths = @(
+            "darkweb_collector/scripts/start_all_services_windows.ps1",
+            "darkweb_collector/scripts/configure_data_root_windows.ps1",
+            "darkweb_collector/scripts/setup_postgresql_windows.ps1"
+          )
+          $errors = @()
+          foreach ($path in $paths) {
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$null, [ref]$errors) | Out-Null
+          }
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+          & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -Command @'
+          $paths = @(
+            "darkweb_collector/scripts/start_all_services_windows.ps1",
+            "darkweb_collector/scripts/configure_data_root_windows.ps1",
+            "darkweb_collector/scripts/setup_postgresql_windows.ps1"
+          )
+          $errors = @()
+          foreach ($path in $paths) {
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$null, [ref]$errors) | Out-Null
+          }
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+          '@
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate empty data-root plan
+        shell: pwsh
+        run: |
+          $sandbox = Join-Path $env:RUNNER_TEMP "data-root-plan"
+          $env:LOCALAPPDATA = Join-Path $sandbox "local"
+          $env:DARKWEB_UPDATE_STATE_DIR = Join-Path $env:LOCALAPPDATA "DarkWebThreatIntel"
+          & "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" `
+            -NoProfile -ExecutionPolicy Bypass `
+            -File "darkweb_collector/scripts/configure_data_root_windows.ps1" `
+            plan -DataRoot (Join-Path $sandbox "target") `
+            -MinimumFreeGiB 1 -EnvironmentTarget Process
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate one-command first-run setup
+        shell: pwsh
+        run: .github/scripts/verify_first_run_setup.ps1
+
+      - name: Build dashboard
+        shell: pwsh
+        working-directory: threat-intelligence-dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build and verify update package
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath "version.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
+          $output = Join-Path $env:RUNNER_TEMP "update-candidate"
+          python scripts/build_update_package.py `
+            --repository "${{ github.repository }}" `
+            --version $version `
+            --output-dir $output
+          $env:PYTHONPATH = "darkweb_collector/src"
+          $env:UPDATE_CANDIDATE = $output
+          @'
+          import json
+          import os
+          from pathlib import Path
+          from darkweb_collector.self_update import _extract_update_archive
+          from darkweb_collector.version_check import _validate_manifest_payload
+
+          root = Path(os.environ["UPDATE_CANDIDATE"])
+          raw = json.loads((root / "latest-stable.json").read_text(encoding="utf-8"))
+          manifest = _validate_manifest_payload(
+              raw,
+              "https://github.com/${{ github.repository }}/releases/latest/download/latest-stable.json",
+          )
+          _extract_update_archive(root / manifest["package"]["name"], root / "verified", manifest["version"])
+          '@ | python -

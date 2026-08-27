@@ -19,7 +19,7 @@ from typing import Any
 
 from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.models import SiteConfig
-from darkweb_collector.runtime import project_root
+from darkweb_collector.runtime import user_data_root
 
 
 COOKIE_SOURCE_ENV = "env"
@@ -43,7 +43,7 @@ def _resolve_cookie_file_path(config: SiteConfig) -> Path | None:
         return None
     path = Path(str(raw)).expanduser()
     if not path.is_absolute():
-        path = (project_root() / path).resolve()
+        path = (user_data_root() / path).resolve()
     return path
 
 
