@@ -113,6 +113,7 @@ if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
     throw "Get-FileHash is unavailable in the current PowerShell environment."
 }
 '@
+    $utilityBlock = $utilityBlock.Replace("`r`n", "`n")
     $content = $content.Replace($anchor, $anchor + $utilityBlock + "`n")
 }
 
@@ -134,6 +135,8 @@ if (-not $content.Contains($preserveMarker)) {
         Stop-ProcessTree -ProcessId ([int]$child.ProcessId) -ProcessRows $ProcessRows -ProcessRowMap $ProcessRowMap -Label "child process"
     }
 '@
+    $oldLoop = $oldLoop.Replace("`r`n", "`n")
+    $newLoop = $newLoop.Replace("`r`n", "`n")
     if (-not $content.Contains($oldLoop)) { throw "Could not locate the process-tree stop block" }
     $content = $content.Replace($oldLoop, $newLoop)
 }
@@ -159,6 +162,8 @@ if (-not $content.Contains($portsMarker)) {
     } | ConvertTo-Json -Depth 3
     [IO.File]::WriteAllText($RuntimePortsFile, $payload + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 '@
+    $oldPorts = $oldPorts.Replace("`r`n", "`n")
+    $newPorts = $newPorts.Replace("`r`n", "`n")
     if (-not $content.Contains($oldPorts)) { throw "Could not locate the runtime ports writer" }
     $content = $content.Replace($oldPorts, $newPorts)
 }

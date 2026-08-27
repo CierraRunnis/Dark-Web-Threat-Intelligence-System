@@ -34,7 +34,10 @@ try {
     }
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 
-    $repair = Join-Path $repositoryRoot "scripts\repair_v20260827_update.ps1"
+    $repairSource = Join-Path $repositoryRoot "scripts\repair_v20260827_update.ps1"
+    $repair = Join-Path $sandbox "repair-v20260827-update.ps1"
+    $repairContent = [IO.File]::ReadAllText($repairSource).Replace("`r`n", "`n").Replace("`n", "`r`n")
+    [IO.File]::WriteAllText($repair, $repairContent, [Text.UTF8Encoding]::new($false))
     & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
         -NoProfile -ExecutionPolicy Bypass -File $repair `
         -ProjectRoot $projectRoot -ControlRoot $controlRoot
