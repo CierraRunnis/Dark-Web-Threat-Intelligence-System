@@ -164,12 +164,18 @@ def _process_running(pid: object) -> bool:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
         handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
         if not handle:
             return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
+        try:
+            exit_code = wintypes.DWORD()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
     try:
         os.kill(process_id, 0)
     except OSError:
@@ -253,9 +259,15 @@ def _run_logged(command: list[str], project_root: Path, log: TextIO, timeout: in
     log.write(f"\n[{_now_iso()}] $ {' '.join(command)}\n")
     log.flush()
     try:
+        environment = os.environ.copy()
+        if os.name == "nt" and Path(command[0]).name.casefold() == "powershell.exe":
+            for name in list(environment):
+                if name.casefold() == "psmodulepath":
+                    environment.pop(name, None)
         result = subprocess.run(
             command,
             cwd=project_root,
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -606,7 +618,7 @@ def _installation_payload(
 def _health_version(project_root: Path, expected_version: str) -> None:
     ports_path = project_root / "darkweb_collector" / ".runtime" / "windows" / "ports.json"
     try:
-        ports = json.loads(ports_path.read_text(encoding="utf-8"))
+        ports = json.loads(ports_path.read_text(encoding="utf-8-sig"))
         api_base = str(ports.get("api_base_url") or "").rstrip("/")
         frontend_url = str(ports.get("frontend_url") or "")
         with urllib.request.urlopen(f"{api_base}/api/health", timeout=10) as response:
