@@ -30,7 +30,7 @@
             </svg>
           </button>
           <div class="header-actions">
-            <span class="app-version">版本 <strong>v20260827.1.0</strong></span>
+            <span class="app-version">版本 <strong>v20260827.2.0</strong></span>
             <span class="avatar">个人</span>
           </div>
         </header>

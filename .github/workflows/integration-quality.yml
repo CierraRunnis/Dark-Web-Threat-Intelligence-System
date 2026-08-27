@@ -49,7 +49,8 @@ jobs:
           $paths = @(
             "darkweb_collector/scripts/start_all_services_windows.ps1",
             "darkweb_collector/scripts/configure_data_root_windows.ps1",
-            "darkweb_collector/scripts/setup_postgresql_windows.ps1"
+            "darkweb_collector/scripts/setup_postgresql_windows.ps1",
+            "scripts/repair_v20260827_update.ps1"
           )
           $errors = @()
           foreach ($path in $paths) {
@@ -60,7 +61,8 @@ jobs:
           $paths = @(
             "darkweb_collector/scripts/start_all_services_windows.ps1",
             "darkweb_collector/scripts/configure_data_root_windows.ps1",
-            "darkweb_collector/scripts/setup_postgresql_windows.ps1"
+            "darkweb_collector/scripts/setup_postgresql_windows.ps1",
+            "scripts/repair_v20260827_update.ps1"
           )
           $errors = @()
           foreach ($path in $paths) {
@@ -86,6 +88,16 @@ jobs:
       - name: Validate one-command first-run setup
         shell: pwsh
         run: .github/scripts/verify_first_run_setup.ps1
+
+      - name: Validate Windows updater runtime
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "darkweb_collector/src"
+          python .github/scripts/verify_windows_update_runtime.py
+
+      - name: Validate Windows transition repair
+        shell: pwsh
+        run: .github/scripts/verify_repair_update_bootstrap.ps1
 
       - name: Validate independent Bot configuration deletion
         shell: pwsh

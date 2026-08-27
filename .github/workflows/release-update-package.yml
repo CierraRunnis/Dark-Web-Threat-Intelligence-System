@@ -43,9 +43,22 @@ jobs:
         shell: pwsh
         run: python -m compileall -q darkweb_collector/src darkweb_collector/scripts scripts/build_update_package.py
 
+      - name: Validate transition repair script
+        shell: pwsh
+        run: |
+          $errors = @()
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/repair_v20260827_update.ps1"),
+            [ref]$null,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count) { $errors | Format-List; exit 1 }
+
       - name: Build deterministic update assets
         shell: pwsh
-        run: python scripts/build_update_package.py --repository "${{ github.repository }}" --version $env:RELEASE_TAG --output-dir dist-update
+        run: |
+          python scripts/build_update_package.py --repository "${{ github.repository }}" --version $env:RELEASE_TAG --output-dir dist-update
+          Copy-Item -LiteralPath "scripts/repair_v20260827_update.ps1" -Destination "dist-update/repair-v20260827-update.ps1"
 
       - name: Verify package with client extraction rules
         shell: pwsh
@@ -80,6 +93,7 @@ jobs:
           path: |
             dist-update/*.zip
             dist-update/latest-stable.json
+            dist-update/repair-v20260827-update.ps1
           if-no-files-found: error
           retention-days: 3
 
@@ -106,6 +120,8 @@ jobs:
         run: |
           $package = Get-ChildItem -LiteralPath "dist-update" -Filter "*.zip" | Select-Object -First 1
           if (-not $package) { throw "Update package was not downloaded" }
-          gh release create $env:RELEASE_TAG $package.FullName "dist-update/latest-stable.json" --verify-tag --draft --title $env:RELEASE_TAG --generate-notes
+          $repair = "dist-update/repair-v20260827-update.ps1"
+          if (-not (Test-Path -LiteralPath $repair -PathType Leaf)) { throw "Transition repair script was not downloaded" }
+          gh release create $env:RELEASE_TAG $package.FullName "dist-update/latest-stable.json" $repair --verify-tag --draft --title $env:RELEASE_TAG --generate-notes
           if ($LASTEXITCODE -ne 0) { throw "Draft release creation failed" }
           gh release edit $env:RELEASE_TAG --draft=false --latest

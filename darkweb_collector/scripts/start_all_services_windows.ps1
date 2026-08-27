@@ -15,6 +15,21 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    $utilityModules = @(
+        (Join-Path $PSHOME "Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1"),
+        (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1")
+    )
+    foreach ($module in $utilityModules) {
+        if (Test-Path -LiteralPath $module -PathType Leaf) {
+            Import-Module -Name $module -ErrorAction SilentlyContinue
+        }
+        if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) { break }
+    }
+}
+if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    throw "Get-FileHash is unavailable in the current PowerShell environment."
+}
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
@@ -1446,13 +1461,14 @@ function Set-FrontendPort {
 
 function Save-RuntimePorts {
     Ensure-Directory $RuntimeDir
-    [pscustomobject]@{
+    $payload = [pscustomobject]@{
         api_port = $ApiPort
         api_base_url = $ApiBaseUrl
         frontend_port = $FrontendPort
         frontend_url = $FrontendUrl
         updated_at = (Get-Date).ToString("s")
-    } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $RuntimePortsFile -Encoding UTF8
+    } | ConvertTo-Json -Depth 3
+    [IO.File]::WriteAllText($RuntimePortsFile, $payload + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 }
 
 function Load-RuntimePorts {
@@ -1849,6 +1865,10 @@ function Stop-ProcessTree {
 
     $children = @($ProcessRows | Where-Object { [int]$_.ParentProcessId -eq $ProcessId })
     foreach ($child in $children) {
+        if ($child.CommandLine -like "*run_self_update.py*") {
+            Write-Info "Preserving active update controller pid $($child.ProcessId)"
+            continue
+        }
         Stop-ProcessTree -ProcessId ([int]$child.ProcessId) -ProcessRows $ProcessRows -ProcessRowMap $ProcessRowMap -Label "child process"
     }
 
