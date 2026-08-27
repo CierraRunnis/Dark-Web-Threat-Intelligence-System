@@ -1734,12 +1734,121 @@ async function hydrateDocumentMonitoring(root, state, source) {
   }
 }
 
+const CODE_CONTINUOUS_INTERVAL_SECONDS = 3600
+
+function renderCodeContinuousStatus(root, status = {}, errorMessage = '') {
+  const stateNode = query(root, '[data-code-scan-state]')
+  const toggle = query(root, '[data-code-scan-toggle]')
+  const lastSuccess = query(root, '[data-code-scan-last-success]')
+  const result = query(root, '[data-code-scan-result]')
+  const error = query(root, '[data-code-scan-error]')
+  const enabled = Boolean(status.enabled)
+  const running = Boolean(status.running)
+  const configurationMissing = Boolean(status.configuration_missing)
+
+  if (stateNode) {
+    stateNode.textContent = configurationMissing ? '待配置' : errorMessage ? '状态异常' : running ? '扫描中' : enabled ? '运行中' : '未启动'
+    stateNode.className = `badge ${configurationMissing ? 'badge-info' : errorMessage ? 'badge-high' : enabled ? 'badge-success' : 'badge-info'}`
+  }
+  if (lastSuccess) lastSuccess.textContent = status.last_success_at ? formatDate(status.last_success_at) : '暂无'
+  if (result) result.textContent = `敏感 ${number(status.sensitive_hit_count)} / 线索 ${number(status.clue_hit_count)}`
+  if (toggle) {
+    toggle.dataset.enabled = enabled ? '1' : '0'
+    toggle.textContent = configurationMissing ? '请先配置' : enabled ? '停止扫描' : '开始扫描'
+    toggle.classList.toggle('btn-primary', !enabled)
+    toggle.classList.toggle('btn-danger', enabled)
+  }
+  if (error) {
+    const message = errorMessage || status.last_error || ''
+    error.textContent = message
+    error.hidden = !message
+  }
+}
+
+async function setupCodeContinuousScan(root, watchlists = []) {
+  const panel = query(root, '[data-code-scan-panel]')
+  const select = query(root, '[data-code-scan-watchlist]')
+  const toggle = query(root, '[data-code-scan-toggle]')
+  if (!panel || !select || !toggle) return
+  window.clearInterval(root.__codeContinuousStatusTimer)
+  root.__codeContinuousStatusTimer = null
+
+  const enabledWatchlists = watchlists.filter((item) => item.enabled !== false)
+  select.replaceChildren(...enabledWatchlists.map((item) => new Option(item.name || `监测对象 ${item.id}`, String(item.id))))
+  if (!enabledWatchlists.length) {
+    select.replaceChildren(new Option('请先配置监测对象', ''))
+    toggle.disabled = true
+    renderCodeContinuousStatus(root, { configuration_missing: true }, '请先在设置中心创建并启用代码监测对象。')
+    return
+  }
+
+  let loading = false
+  const refreshStatus = async (preferredStatus = null) => {
+    const watchlistId = Number(select.value || 0)
+    if (!watchlistId || loading) return
+    try {
+      const status = preferredStatus || await requestJson(`/api/code-monitoring/continuous-status?watchlist_id=${encodeURIComponent(watchlistId)}`)
+      renderCodeContinuousStatus(root, status)
+    } catch (error) {
+      renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
+    } finally {
+      toggle.disabled = false
+    }
+  }
+
+  try {
+    const activeStatus = await requestJson('/api/code-monitoring/continuous-status')
+    const activeId = Number(activeStatus.target_watchlist_id || 0)
+    if (activeId && enabledWatchlists.some((item) => Number(item.id) === activeId)) select.value = String(activeId)
+    await refreshStatus(activeId === Number(select.value) ? activeStatus : null)
+  } catch (error) {
+    renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
+    toggle.disabled = false
+  }
+
+  select.addEventListener('change', () => { refreshStatus() })
+  toggle.addEventListener('click', async () => {
+    const watchlistId = Number(select.value || 0)
+    if (!watchlistId || loading) return
+    loading = true
+    toggle.disabled = true
+    toggle.textContent = toggle.dataset.enabled === '1' ? '正在停止…' : '正在启动…'
+    try {
+      const enabled = toggle.dataset.enabled === '1'
+      const endpoint = enabled ? '/api/code-monitoring/continuous/stop' : '/api/code-monitoring/continuous/start'
+      const status = await requestJson(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(enabled
+          ? { watchlist_id: watchlistId }
+          : { watchlist_id: watchlistId, interval_seconds: CODE_CONTINUOUS_INTERVAL_SECONDS }),
+      })
+      renderCodeContinuousStatus(root, status)
+      showToast(status.message || (enabled ? '长期扫描已停止' : '长期扫描已启动'))
+    } catch (error) {
+      renderCodeContinuousStatus(root, { enabled: toggle.dataset.enabled === '1' }, error.message || '长期扫描操作失败')
+    } finally {
+      loading = false
+      toggle.disabled = false
+    }
+  })
+
+  root.__codeContinuousStatusTimer = window.setInterval(() => {
+    if (!query(root, '[data-code-scan-panel]')) {
+      window.clearInterval(root.__codeContinuousStatusTimer)
+      root.__codeContinuousStatusTimer = null
+      return
+    }
+    refreshStatus()
+  }, 15_000)
+}
+
 async function hydrateCodeMonitoring(root, state) {
   const table = clearTable(root, '#code-table')
   const suppressedTable = clearTable(root, '.suppressed-code-table')
-  const [summary, hits] = await Promise.all([
+  const [summary, hits, watchlists] = await Promise.all([
     requestJson('/api/code-monitoring/summary'),
     requestJson('/api/code-monitoring/hits?include_suppressed=true&limit=500'),
+    requestJson('/api/code-monitoring/watchlists'),
   ])
   const primary = hits.filter((item) => item.displayBucket !== 'suppressed' && !item.suppressed)
   const suppressed = hits.filter((item) => item.displayBucket === 'suppressed' || item.suppressed)
@@ -1817,6 +1926,7 @@ async function hydrateCodeMonitoring(root, state) {
   })
   queryAll(root, '.table-pager button').forEach((button) => { button.disabled = true })
   markExports(root, state, ['#code-table'])
+  await setupCodeContinuousScan(root, Array.isArray(watchlists) ? watchlists : (watchlists.items || watchlists.watchlists || []))
 }
 
 function replaceRecordContainer(container, lines) {

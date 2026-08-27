@@ -111,6 +111,10 @@ jobs:
           $env:PYTHONPATH = "darkweb_collector/src"
           python .github/scripts/verify_keyword_notification_channels.py
 
+      - name: Validate continuous code monitoring UI
+        shell: pwsh
+        run: python .github/scripts/verify_code_continuous_ui.py
+
       - name: Build dashboard
         shell: pwsh
         working-directory: threat-intelligence-dashboard
