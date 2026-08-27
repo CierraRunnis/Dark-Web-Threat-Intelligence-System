@@ -2795,7 +2795,7 @@ export function initializePrototype() {
           showToast('当前对象尚未保存，无需删除')
           return
         }
-        if (!window.confirm('删除后将同时移除代码监测与文件暴露配置、检索词、命中结果和扫描历史。确认删除此监测对象？')) return
+        if (!window.confirm('删除后将同时移除代码监测与文件暴露配置、检索词、命中结果和扫描历史，但不会影响企业微信或钉钉机器人配置。确认删除此监测对象？')) return
         return void runAction(button, async () => {
           const documentWatchlist = documentWatchlistFor(
             codeConfigState.watchlists.find((item) => String(item.id) === String(codeConfigState.selectedWatchlistId)),
@@ -2950,6 +2950,16 @@ export function initializePrototype() {
         if (!botId || !secret) throw new Error('请输入 Bot ID 和 Secret')
         return request('/api/bot/config', { method: 'POST', body: JSON.stringify({ provider: 'wechat_work_aibot', bot_id: botId, secret }) })
       }, 'Bot 助手配置已保存')
+      if (action === 'bot-delete') {
+        if (!window.confirm('仅删除企业微信机器人保存配置和已登记会话，不会删除监测对象、企业画像或历史数据。确认删除？')) return
+        return void runAction(button, async () => {
+          renderBot(await request('/api/bot/config', { method: 'DELETE' }))
+          const botId = $('#bot-id', root)
+          const secret = $('#bot-secret', root)
+          if (botId) botId.value = ''
+          if (secret) secret.value = ''
+        }, '企业微信机器人保存配置已删除')
+      }
       if (action === 'bot-test') return void runAction(button, () => request('/api/bot/send', { method: 'POST', body: JSON.stringify({ type: 'markdown', content: `### 玄鉴威胁情报平台\n> Bot 助手测试推送：${new Date().toLocaleString('zh-CN')}` }) }), 'Bot 测试消息已发送')
       if (action === 'dingtalk-save') return void runAction(button, async () => {
         const webhookUrl = $('#dingtalk-webhook', root)?.value.trim()
@@ -2957,6 +2967,12 @@ export function initializePrototype() {
         if (!webhookUrl) throw new Error('请输入钉钉机器人 Webhook 或 access_token')
         renderDingTalk(await request('/api/dingtalk/config', { method: 'POST', body: JSON.stringify({ webhook_url: webhookUrl, secret }) }))
       }, '钉钉机器人配置已保存')
+      if (action === 'dingtalk-delete') {
+        if (!window.confirm('仅删除钉钉机器人保存配置，不会删除监测对象、企业画像或历史数据。确认删除？')) return
+        return void runAction(button, async () => {
+          renderDingTalk(await request('/api/dingtalk/config', { method: 'DELETE' }))
+        }, '钉钉机器人保存配置已删除')
+      }
       if (action === 'dingtalk-test') return void runAction(button, () => request('/api/dingtalk/send', { method: 'POST', body: JSON.stringify({ title: '玄鉴威胁情报平台测试推送', content: `### 玄鉴威胁情报平台\n> 钉钉机器人测试推送：${new Date().toLocaleString('zh-CN')}` }) }), '钉钉测试消息已发送')
       if (button.dataset.siteRun) return void runAction(button, async () => requireDispatched(await request('/api/jobs/run-site', { method: 'POST', body: JSON.stringify({ site_name: button.dataset.siteRun, force: true }) })), `已触发 ${button.dataset.siteRun} 运行一次`)
       if (button.dataset.siteToggle) {

@@ -38,6 +38,7 @@ from darkweb_collector.bot_assistant import (
     bot_config_status,
     build_markdown_payload,
     build_text_payload,
+    delete_bot_config,
     ensure_wecom_aibot_listener,
     load_bot_config,
     post_bot_payload,
@@ -46,6 +47,7 @@ from darkweb_collector.bot_assistant import (
 )
 from darkweb_collector.dingtalk_bot import (
     DingTalkBotError,
+    delete_dingtalk_config,
     dingtalk_config_status,
     load_dingtalk_config,
     post_dingtalk_markdown,
@@ -1693,6 +1695,14 @@ def save_bot_config(payload: BotConfigRequest) -> dict:
     return status
 
 
+@app.delete("/api/bot/config")
+def remove_bot_config() -> dict:
+    try:
+        return delete_bot_config()
+    except BotAssistantError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/bot/send")
 def send_bot(payload: BotSendRequest) -> dict:
     config = load_bot_config(
@@ -1726,6 +1736,14 @@ def send_bot(payload: BotSendRequest) -> dict:
 def save_dingtalk_config(payload: DingTalkConfigRequest) -> dict:
     try:
         return set_dingtalk_config(webhook_url=payload.webhook_url, secret=payload.secret)
+    except DingTalkBotError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/dingtalk/config")
+def remove_dingtalk_config() -> dict:
+    try:
+        return delete_dingtalk_config()
     except DingTalkBotError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

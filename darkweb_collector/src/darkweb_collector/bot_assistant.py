@@ -568,6 +568,12 @@ class _WeComAibotListener:
                 pass
         return True
 
+    def stop(self) -> None:
+        with self._lock:
+            if self._stop_event:
+                self._stop_event.set()
+            self._signature = ""
+
     def status(self, config: BotConfig | None = None) -> dict[str, Any]:
         self.ensure_started(config)
         resolved = config or load_bot_config()
@@ -693,6 +699,21 @@ def ensure_wecom_aibot_listener(config: BotConfig | None = None) -> None:
 
 def wecom_aibot_listener_status(config: BotConfig | None = None) -> dict[str, Any]:
     return _WECOM_AIBOT_LISTENER.status(config)
+
+
+def delete_bot_config() -> dict[str, Any]:
+    path = _settings_path()
+    _WECOM_AIBOT_LISTENER.stop()
+    with _SETTINGS_LOCK:
+        deleted = path.is_file()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise BotAssistantError(f"Unable to delete Bot settings: {exc}") from exc
+    return {
+        **bot_config_status(load_bot_config()),
+        "saved_config_deleted": deleted,
+    }
 
 
 def _signed_webhook_url(config: BotConfig) -> str:

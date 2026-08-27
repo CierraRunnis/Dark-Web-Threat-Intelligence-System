@@ -851,7 +851,7 @@ async function deleteWatchlist() {
   const current = watchlists.value.find((item) => item.id === selectedWatchlistId.value)
   try {
     await ElMessageBox.confirm(
-      `删除监测对象“${current?.name || '当前对象'}”后，企业画像、检索词、命中结果和扫描历史将一并删除。`,
+      `删除监测对象“${current?.name || '当前对象'}”后，企业画像、检索词、命中结果和扫描历史将一并删除，但不会影响企业微信或钉钉机器人配置。`,
       '删除确认',
       {
         type: 'warning',
