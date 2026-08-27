@@ -34,10 +34,13 @@ jobs:
           dashboard = json.loads(Path("threat-intelligence-dashboard/package.json").read_text(encoding="utf-8"))["version"]
           lock = json.loads(Path("threat-intelligence-dashboard/package-lock.json").read_text(encoding="utf-8"))
           expected = version.removeprefix("v")
+          if expected.isdigit():
+              expected = f"{expected}.0.0"
           assert dashboard == expected, (dashboard, expected)
           assert lock["version"] == expected
           assert lock["packages"][""]["version"] == expected
           '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m compileall -q darkweb_collector/src darkweb_collector/scripts scripts
 
       - name: Parse PowerShell scripts
@@ -83,6 +86,12 @@ jobs:
       - name: Validate one-command first-run setup
         shell: pwsh
         run: .github/scripts/verify_first_run_setup.ps1
+
+      - name: Validate independent Bot configuration deletion
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "darkweb_collector/src"
+          python .github/scripts/verify_bot_config_delete.py
 
       - name: Build dashboard
         shell: pwsh

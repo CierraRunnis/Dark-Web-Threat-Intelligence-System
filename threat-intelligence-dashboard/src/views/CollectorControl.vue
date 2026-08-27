@@ -332,6 +332,7 @@
         <div class="health-actions">
           <el-button plain :loading="botConfigLoading || dingtalkConfigLoading" @click="refreshBotConfigs">刷新配置</el-button>
           <el-button type="success" plain :loading="botTestLoading" :disabled="!botSmartConfigured || !botHasTargets" @click="testBotMessage">测试企业微信</el-button>
+          <el-button type="danger" plain :loading="botDeleteLoading" :disabled="!botConfig.configured" @click="deleteBotConfig">删除企业微信配置</el-button>
         </div>
       </div>
       <div class="ti-card-body">
@@ -384,13 +385,22 @@
         <div class="bot-provider-divider"></div>
         <div class="bot-provider-heading">
           <h3 class="bot-provider-title">钉钉自定义机器人</h3>
-          <el-button
-            type="success"
-            plain
-            :loading="dingtalkTestLoading"
-            :disabled="!dingtalkConfigured"
-            @click="testDingTalkMessage"
-          >测试钉钉</el-button>
+          <div class="health-actions">
+            <el-button
+              type="success"
+              plain
+              :loading="dingtalkTestLoading"
+              :disabled="!dingtalkConfigured"
+              @click="testDingTalkMessage"
+            >测试钉钉</el-button>
+            <el-button
+              type="danger"
+              plain
+              :loading="dingtalkDeleteLoading"
+              :disabled="!dingtalkConfigured"
+              @click="deleteDingTalkConfig"
+            >删除钉钉配置</el-button>
+          </div>
         </div>
         <div class="status-grid status-grid--compact">
           <div class="metric-card">
@@ -618,7 +628,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import { useIntelligenceData } from '@/composables/useIntelligenceData'
@@ -840,6 +850,7 @@ const ransomwareConfig = ref({
 const botConfigLoading = ref(false)
 const botSaveLoading = ref(false)
 const botTestLoading = ref(false)
+const botDeleteLoading = ref(false)
 const botIdInput = ref('')
 const botSecretInput = ref('')
 const botLastError = ref('')
@@ -864,6 +875,7 @@ const botConfig = ref({
 const dingtalkConfigLoading = ref(false)
 const dingtalkSaveLoading = ref(false)
 const dingtalkTestLoading = ref(false)
+const dingtalkDeleteLoading = ref(false)
 const dingtalkWebhookInput = ref('')
 const dingtalkSecretInput = ref('')
 const dingtalkLastError = ref('')
@@ -1338,6 +1350,41 @@ async function saveBotConfig() {
   }
 }
 
+async function deleteBotConfig() {
+  try {
+    await ElMessageBox.confirm(
+      '仅删除企业微信机器人保存配置和已登记会话，不会删除监测对象、企业画像或历史数据。',
+      '删除企业微信配置',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  botDeleteLoading.value = true
+  try {
+    const response = await fetch('/api/bot/config', { method: 'DELETE' })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    botConfig.value = await response.json()
+    botIdInput.value = ''
+    botSecretInput.value = ''
+    botLastError.value = ''
+    if (botConfig.value.configured) {
+      ElMessage.warning('页面保存配置已删除，但环境变量中的企业微信配置仍在生效')
+    } else {
+      ElMessage.success('企业微信机器人配置已删除')
+    }
+  } catch (error) {
+    botLastError.value = error.message || '删除企业微信机器人配置失败'
+    ElMessage.error(botLastError.value)
+  } finally {
+    botDeleteLoading.value = false
+  }
+}
+
 async function testBotMessage() {
   if (!botHasTargets.value) {
     ElMessage.error('请先把机器人拉进目标群聊或私聊机器人完成会话登记')
@@ -1406,6 +1453,41 @@ async function saveDingTalkConfig() {
     ElMessage.error(dingtalkLastError.value)
   } finally {
     dingtalkSaveLoading.value = false
+  }
+}
+
+async function deleteDingTalkConfig() {
+  try {
+    await ElMessageBox.confirm(
+      '仅删除钉钉机器人保存配置，不会删除监测对象、企业画像或历史数据。',
+      '删除钉钉配置',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  dingtalkDeleteLoading.value = true
+  try {
+    const response = await fetch('/api/dingtalk/config', { method: 'DELETE' })
+    if (!response.ok) throw new Error(await readApiError(response, `请求失败: ${response.status}`))
+    dingtalkConfig.value = await response.json()
+    dingtalkWebhookInput.value = ''
+    dingtalkSecretInput.value = ''
+    dingtalkLastError.value = ''
+    if (dingtalkConfig.value.configured) {
+      ElMessage.warning('页面保存配置已删除，但环境变量中的钉钉配置仍在生效')
+    } else {
+      ElMessage.success('钉钉机器人配置已删除')
+    }
+  } catch (error) {
+    dingtalkLastError.value = error.message || '删除钉钉机器人配置失败'
+    ElMessage.error(dingtalkLastError.value)
+  } finally {
+    dingtalkDeleteLoading.value = false
   }
 }
 

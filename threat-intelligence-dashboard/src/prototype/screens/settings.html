@@ -188,7 +188,7 @@ java</textarea></label>
               <div class="settings-bot-channel">
                 <div class="bot-status-strip"><span>登记会话<strong class="num" data-bind="bot-target-count">0</strong></span><span>Secret<strong data-bind="bot-secret-status">未配置</strong></span></div>
                 <div class="settings-bot-form"><label class="field"><span>Bot ID</span><input class="input" id="bot-id" placeholder="输入企业微信 Bot ID" autocomplete="off"></label><label class="field"><span>Secret</span><input class="input" id="bot-secret" type="password" placeholder="输入 Bot Secret" autocomplete="new-password"></label></div>
-                <div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="bot-save">保存配置</button><button class="btn btn-primary" data-collector-action="bot-test">发送测试</button></div>
+                <div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="bot-save">保存配置</button><button class="btn btn-primary" data-collector-action="bot-test">发送测试</button><button class="btn btn-danger" data-collector-action="bot-delete">删除配置</button></div>
               </div>
               <p>企业微信负责事件与代码泄露主列表新命中推送；持久配置集中保存在此处。</p>
             </article>
@@ -198,7 +198,7 @@ java</textarea></label>
               <div class="settings-bot-channel">
                 <div class="bot-status-strip"><span>Webhook<strong data-bind="dingtalk-webhook-status">未配置</strong></span><span>加签 Secret<strong data-bind="dingtalk-secret-status">未配置（可选）</strong></span></div>
                 <div class="settings-bot-form"><label class="field"><span>Webhook / access_token</span><input class="input" id="dingtalk-webhook" type="password" placeholder="输入钉钉机器人 Webhook 或 access_token" autocomplete="new-password"></label><label class="field"><span>加签 Secret</span><input class="input" id="dingtalk-secret" type="password" placeholder="启用加签时填写 Secret" autocomplete="new-password"></label></div>
-                <div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="dingtalk-save">保存配置</button><button class="btn btn-primary" data-collector-action="dingtalk-test">发送测试</button></div>
+                <div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="dingtalk-save">保存配置</button><button class="btn btn-primary" data-collector-action="dingtalk-test">发送测试</button><button class="btn btn-danger" data-collector-action="dingtalk-delete">删除配置</button></div>
               </div>
               <p>只推送新增且进入“代码泄露监测主列表”的记录；已抑制列表和代码片段不会推送。</p>
             </article>

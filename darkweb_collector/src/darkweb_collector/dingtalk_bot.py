@@ -178,6 +178,20 @@ def set_dingtalk_config(*, webhook_url: str, secret: str = "") -> dict[str, Any]
     return dingtalk_config_status(load_dingtalk_config())
 
 
+def delete_dingtalk_config() -> dict[str, Any]:
+    path = _settings_path()
+    with _SETTINGS_LOCK:
+        deleted = path.is_file()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise DingTalkBotError(f"Unable to delete DingTalk settings: {exc}") from exc
+    return {
+        **dingtalk_config_status(load_dingtalk_config()),
+        "saved_config_deleted": deleted,
+    }
+
+
 def dingtalk_config_status(config: DingTalkConfig | None = None) -> dict[str, Any]:
     resolved = config or load_dingtalk_config()
     parsed = urlparse(resolved.webhook_url)
