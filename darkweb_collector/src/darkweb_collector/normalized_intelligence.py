@@ -3001,6 +3001,18 @@ def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -
     return merged
 
 
+def _new_normalized_events(
+    events: list[dict[str, Any]],
+    previous_event_ids: set[str],
+) -> list[dict[str, Any]]:
+    return [
+        event
+        for event in events
+        if (event_id := str(event.get("event_id") or ""))
+        and event_id not in previous_event_ids
+    ]
+
+
 def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None = None) -> list[dict[str, Any]]:
     previous_resources = {
         str(row.get("event_id") or ""): {
@@ -3115,7 +3127,9 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
     try:
         from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_events
 
-        notify_keyword_matches_for_events(connection, refreshed_events)
+        new_events = _new_normalized_events(refreshed_events, set(previous_resources))
+        if new_events:
+            notify_keyword_matches_for_events(connection, new_events)
     except Exception:
         logger.exception("failed to send monitoring keyword notifications after normalized intelligence refresh")
     return refreshed_events

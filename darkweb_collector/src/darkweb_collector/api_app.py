@@ -1684,14 +1684,6 @@ def save_bot_config(payload: BotConfigRequest) -> dict:
         )
     except BotAssistantError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    try:
-        from darkweb_collector.monitoring_notifications import notify_current_keyword_matches
-
-        config = load_bot_config()
-        if config.chat_ids or payload.provider != "wechat_work_aibot":
-            status["keyword_notification_scan"] = notify_current_keyword_matches(config=config)
-    except Exception:
-        logger.exception("failed to scan monitoring keyword notifications after bot config update")
     return status
 
 
@@ -1735,9 +1727,10 @@ def send_bot(payload: BotSendRequest) -> dict:
 @app.post("/api/dingtalk/config")
 def save_dingtalk_config(payload: DingTalkConfigRequest) -> dict:
     try:
-        return set_dingtalk_config(webhook_url=payload.webhook_url, secret=payload.secret)
+        status = set_dingtalk_config(webhook_url=payload.webhook_url, secret=payload.secret)
     except DingTalkBotError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return status
 
 
 @app.delete("/api/dingtalk/config")

@@ -133,6 +133,20 @@
             <article class="card code-source-card" data-od-id="code-source-distribution"><div class="panel-header"><h2>来源平台分布</h2><a class="code-config-link" href="settings.html?tab=objects" data-code-config-status data-od-id="code-config-status-link"><i aria-hidden="true"></i><span>配置状态：待检查</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m7.5 5 5 5-5 5"/></svg></a></div><div class="code-source-grid"><div><span class="source-logo logo-github"><svg><use href="#mark-github"/></svg></span><span><strong>GitHub</strong><small><b>411</b> · 100%</small></span></div><div><span class="source-logo logo-gitee"><svg><use href="#mark-gitee"/></svg></span><span><strong>Gitee</strong><small><b>0</b> · 0%</small></span></div><div><span class="source-logo logo-gitlab"><svg><use href="#mark-gitlab"/></svg></span><span><strong>GitLab</strong><small><b>0</b> · 0%</small></span></div></div></article>
           </div>
 
+          <article class="card code-scan-panel" data-code-scan-panel data-od-id="code-continuous-scan">
+            <div class="code-scan-heading">
+              <span class="code-scan-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M6 4.5v15M18 4.5v15M6 8h12M6 16h12"/><path d="m10 10 4 2-4 2v-4Z"/></svg></span>
+              <div><div class="code-scan-title"><h2>长期代码扫描</h2><span class="badge" data-code-scan-state>状态检查中</span></div><p>启动后立即执行首轮扫描，后续默认每 1 小时自动扫描；企微与钉钉只推送新增主列表命中。</p></div>
+            </div>
+            <div class="code-scan-controls">
+              <label><span>监测对象</span><select class="select" data-code-scan-watchlist><option value="">加载中</option></select></label>
+              <div class="code-scan-metric"><span>最近完成</span><strong data-code-scan-last-success>暂无</strong></div>
+              <div class="code-scan-metric"><span>最近结果</span><strong data-code-scan-result>敏感 0 / 线索 0</strong></div>
+              <button class="btn btn-primary" type="button" data-code-scan-toggle disabled>加载状态</button>
+            </div>
+            <p class="code-scan-error" data-code-scan-error hidden></p>
+          </article>
+
           <div class="code-intel-grid">
             <article class="card code-trend-card" data-od-id="code-leak-trend"><div class="panel-header"><h2>新增代码泄露趋势（近 7 天）</h2><span class="meta">按扫描命中统计</span></div><svg class="code-trend-chart" viewBox="0 0 700 230" preserveAspectRatio="none" role="img" aria-label="近七天新增代码泄露趋势"><g class="chart-gridlines"><path d="M42 36H680M42 84H680M42 132H680M42 180H680"/></g><path class="code-line" d="M42 180 148 180 254 174 360 180 466 180 572 180 678 180"/><g class="code-dots"><circle cx="42" cy="180" r="3"/><circle cx="148" cy="180" r="3"/><circle cx="254" cy="174" r="3"/><circle cx="360" cy="180" r="3"/><circle cx="466" cy="180" r="3"/><circle cx="572" cy="180" r="3"/><circle cx="678" cy="180" r="3"/></g><g class="code-chart-values"><text x="42" y="166">0</text><text x="148" y="166">0</text><text x="254" y="160">2</text><text x="360" y="166">0</text><text x="466" y="166">0</text><text x="572" y="166">0</text><text x="678" y="166">0</text></g><g class="code-chart-dates"><text x="42" y="208">07-08</text><text x="148" y="208">07-09</text><text x="254" y="208">07-10</text><text x="360" y="208">07-11</text><text x="466" y="208">07-12</text><text x="572" y="208">07-13</text><text x="678" y="208">07-14</text></g></svg></article>
             <article class="card code-risk-card" data-od-id="code-risk-distribution"><div class="panel-header"><h2>仓库风险等级分布</h2><span class="meta">总仓库 411</span></div><div class="code-risk-layout"><div class="code-risk-donut"><span><strong>411</strong><small>总数</small></span></div><div class="code-risk-legend"><div><i class="critical"></i><span>高危</span><b>2.7%</b></div><div><i class="medium"></i><span>中危</span><b>1.2%</b></div><div><i class="low"></i><span>低危</span><b>96.1%</b></div></div></div></article>

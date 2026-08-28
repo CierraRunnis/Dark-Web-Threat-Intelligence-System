@@ -8,19 +8,24 @@ from typing import Any
 
 import darkweb_collector.monitoring_rules as monitoring_rules
 from darkweb_collector.bot_assistant import (
-    BotAssistantError,
+    BOT_PROVIDER_WECHAT_WORK_AIBOT,
     BotConfig,
     bot_config_status,
     build_markdown_payload,
     load_bot_config,
     post_bot_payload,
 )
+from darkweb_collector.dingtalk_bot import (
+    DingTalkConfig,
+    dingtalk_config_status,
+    load_dingtalk_config,
+    post_dingtalk_markdown,
+)
 from darkweb_collector.detail_i18n import (
     translate_event_detail_text_live,
     translate_event_title_live,
 )
 from darkweb_collector.db import (
-    get_db_connection,
     get_monitoring_keyword_notification,
     get_monitoring_keyword_notification_by_event_key,
     upsert_monitoring_keyword_notification,
@@ -29,6 +34,8 @@ from darkweb_collector.db import (
 
 NOTIFICATION_ENABLED_ENV = "DARKWEB_MONITORING_KEYWORD_BOT_ENABLED"
 NOTIFICATION_LOOKBACK_DAYS = 7
+CHANNEL_WECHAT_WORK = "wechat_work"
+CHANNEL_DINGTALK = "dingtalk"
 
 
 def _now_utc_iso() -> str:
@@ -162,14 +169,39 @@ def _backfill_notification_event_keys(connection, events: list[dict[str, Any]]) 
     )
 
 
-def _notification_already_sent(connection, event: dict[str, Any], event_id: str, match_signature: str) -> bool:
-    row = get_monitoring_keyword_notification(connection, event_id, match_signature)
+def _channel_match_signature(match_signature: str, channel: str) -> str:
+    return f"{match_signature}:{channel}"
+
+
+def _channel_event_key(event: dict[str, Any], channel: str) -> str:
+    return f"{_notification_event_key(event)}|channel:{channel}"
+
+
+def _notification_already_sent(
+    connection,
+    event: dict[str, Any],
+    event_id: str,
+    match_signature: str,
+    channel: str,
+) -> bool:
+    row = get_monitoring_keyword_notification(
+        connection,
+        event_id,
+        _channel_match_signature(match_signature, channel),
+    )
     if row is not None and row.get("status") == "sent" and not bool(row.get("dry_run")):
         return True
-    event_key = _notification_event_key(event)
+    event_key = _channel_event_key(event, channel)
     if not event_key:
         return False
-    return get_monitoring_keyword_notification_by_event_key(connection, event_key) is not None
+    if get_monitoring_keyword_notification_by_event_key(connection, event_key) is not None:
+        return True
+    if channel != CHANNEL_WECHAT_WORK:
+        return False
+    legacy = get_monitoring_keyword_notification(connection, event_id, match_signature)
+    if legacy is not None and legacy.get("status") == "sent" and not bool(legacy.get("dry_run")):
+        return True
+    return get_monitoring_keyword_notification_by_event_key(connection, _notification_event_key(event)) is not None
 
 
 def _display_value(value: Any, default: str = "未知") -> str:
@@ -397,6 +429,7 @@ def _record_notification_result(
     *,
     event: dict[str, Any],
     match_signature: str,
+    channel: str,
     matches: list[dict[str, Any]],
     status: str,
     dry_run: bool,
@@ -408,12 +441,12 @@ def _record_notification_result(
         connection,
         {
             "event_id": _normalize_text(event.get("event_id")),
-            "event_key": _notification_event_key(event),
-            "match_signature": match_signature,
+            "event_key": _channel_event_key(event, channel),
+            "match_signature": _channel_match_signature(match_signature, channel),
             "match_keywords_json": _json_dumps(matches),
             "status": status,
             "dry_run": dry_run,
-            "response_json": _json_dumps(response or {}),
+            "response_json": _json_dumps({"channel": channel, "result": response or {}}),
             "error_message": error_message,
             "sent_at": now if status in {"sent", "dry_run"} else None,
             "created_at": now,
@@ -427,6 +460,8 @@ def notify_keyword_matches_for_events(
     normalized_events: list[dict[str, Any]],
     *,
     config: BotConfig | None = None,
+    dingtalk_config: DingTalkConfig | None = None,
+    channels: set[str] | None = None,
 ) -> dict[str, Any]:
     if not _notifications_enabled():
         return {
@@ -439,19 +474,51 @@ def notify_keyword_matches_for_events(
             "outside_window": 0,
         }
 
-    resolved_config = config or load_bot_config()
-    status = bot_config_status(resolved_config)
-    if not status.get("configured") and not resolved_config.dry_run:
+    requested_channels = channels or {CHANNEL_WECHAT_WORK, CHANNEL_DINGTALK}
+    config_errors: list[dict[str, Any]] = []
+    resolved_wechat: BotConfig | None = config
+    resolved_dingtalk: DingTalkConfig | None = dingtalk_config
+    if CHANNEL_WECHAT_WORK in requested_channels and resolved_wechat is None:
+        try:
+            resolved_wechat = load_bot_config()
+        except Exception as exc:
+            config_errors.append({"channel": CHANNEL_WECHAT_WORK, "error": str(exc)})
+    if CHANNEL_DINGTALK in requested_channels and resolved_dingtalk is None:
+        try:
+            resolved_dingtalk = load_dingtalk_config()
+        except Exception as exc:
+            config_errors.append({"channel": CHANNEL_DINGTALK, "error": str(exc)})
+
+    wechat_status = bot_config_status(resolved_wechat) if resolved_wechat else {"configured": False}
+    dingtalk_status = dingtalk_config_status(resolved_dingtalk) if resolved_dingtalk else {"configured": False}
+    wechat_ready = bool(
+        resolved_wechat
+        and (wechat_status.get("configured") or resolved_wechat.dry_run)
+        and (
+            resolved_wechat.provider != BOT_PROVIDER_WECHAT_WORK_AIBOT
+            or resolved_wechat.dry_run
+            or resolved_wechat.chat_ids
+            or resolved_wechat.chat_id
+        )
+    )
+    dingtalk_ready = bool(resolved_dingtalk and (dingtalk_status.get("configured") or resolved_dingtalk.dry_run))
+    channel_ready = {
+        CHANNEL_WECHAT_WORK: wechat_ready and CHANNEL_WECHAT_WORK in requested_channels,
+        CHANNEL_DINGTALK: dingtalk_ready and CHANNEL_DINGTALK in requested_channels,
+    }
+    if not any(channel_ready.values()):
         return {
             "enabled": True,
             "configured": False,
             "matched": 0,
             "sent": 0,
-            "failed": 0,
+            "failed": len(config_errors),
             "skipped": 0,
             "dry_run": 0,
             "outside_window": 0,
             "reason": "bot_not_configured",
+            "channels": channel_ready,
+            "errors": config_errors,
         }
 
     enriched_events = monitoring_rules.enrich_events(connection, normalized_events)
@@ -459,13 +526,15 @@ def notify_keyword_matches_for_events(
     connection.commit()
     result = {
         "enabled": True,
-        "configured": bool(status.get("configured")),
+        "configured": any(channel_ready.values()),
         "matched": 0,
         "sent": 0,
-        "failed": 0,
+        "failed": len(config_errors),
         "skipped": 0,
         "dry_run": 0,
         "outside_window": 0,
+        "channels": channel_ready,
+        "errors": config_errors,
     }
     for event in enriched_events:
         matches = _match_entries(event.get("monitoring_matches") or [])
@@ -481,47 +550,53 @@ def notify_keyword_matches_for_events(
             result["skipped"] += 1
             continue
         match_signature = keyword_match_signature(matches)
-        if _notification_already_sent(connection, event, event_id, match_signature):
-            result["skipped"] += 1
-            continue
+        content = build_keyword_match_markdown(event)
+        deliveries = (
+            (CHANNEL_WECHAT_WORK, resolved_wechat),
+            (CHANNEL_DINGTALK, resolved_dingtalk),
+        )
+        for channel, channel_config in deliveries:
+            if not channel_ready[channel] or channel_config is None:
+                continue
+            if _notification_already_sent(connection, event, event_id, match_signature, channel):
+                result["skipped"] += 1
+                continue
+            try:
+                if channel == CHANNEL_WECHAT_WORK:
+                    response = post_bot_payload(build_markdown_payload(content), channel_config)
+                else:
+                    response = post_dingtalk_markdown(content, channel_config, title="监控关键词命中通知")
+            except Exception as exc:
+                result["failed"] += 1
+                result["errors"].append({"channel": channel, "event_id": event_id, "error": str(exc)})
+                _record_notification_result(
+                    connection,
+                    event=event,
+                    match_signature=match_signature,
+                    channel=channel,
+                    matches=matches,
+                    status="failed",
+                    dry_run=False,
+                    error_message=str(exc),
+                )
+                connection.commit()
+                continue
 
-        try:
-            response = post_bot_payload(build_markdown_payload(build_keyword_match_markdown(event)), resolved_config)
-        except (BotAssistantError, Exception) as exc:
-            result["failed"] += 1
+            if bool(response.get("dry_run")):
+                result["dry_run"] += 1
+                stored_status = "dry_run"
+            else:
+                result["sent"] += 1
+                stored_status = "sent"
             _record_notification_result(
                 connection,
                 event=event,
                 match_signature=match_signature,
+                channel=channel,
                 matches=matches,
-                status="failed",
-                dry_run=False,
-                error_message=str(exc),
+                status=stored_status,
+                dry_run=bool(response.get("dry_run")),
+                response=response,
             )
             connection.commit()
-            continue
-
-        if bool(response.get("dry_run")):
-            result["dry_run"] += 1
-            stored_status = "dry_run"
-        else:
-            result["sent"] += 1
-            stored_status = "sent"
-        _record_notification_result(
-            connection,
-            event=event,
-            match_signature=match_signature,
-            matches=matches,
-            status=stored_status,
-            dry_run=bool(response.get("dry_run")),
-            response=response,
-        )
-        connection.commit()
     return result
-
-
-def notify_current_keyword_matches(*, config: BotConfig | None = None) -> dict[str, Any]:
-    from darkweb_collector.normalized_intelligence import load_normalized_events
-
-    with get_db_connection() as connection:
-        return notify_keyword_matches_for_events(connection, load_normalized_events(connection), config=config)

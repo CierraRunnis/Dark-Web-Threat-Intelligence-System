@@ -113,14 +113,7 @@ def save_monitoring_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         replace_monitoring_keywords(connection, normalized_rows)
         connection.commit()
         _invalidate_monitoring_cache()
-        saved_keywords = list_monitoring_keywords(connection)
-        try:
-            from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_events
-
-            notify_keyword_matches_for_events(connection, load_normalized_events(connection))
-        except Exception:
-            logger.exception("failed to send monitoring keyword notifications after keyword update")
-        return saved_keywords
+        return list_monitoring_keywords(connection)
 
 
 def _invalidate_monitoring_cache() -> None:
