@@ -75,7 +75,11 @@
       "dedupe_window_minutes": 180,
       "display_name": "Cracked",
       "render_wait_seconds": 8,
-      "fetch_timeout_seconds": 90
+      "fetch_timeout_seconds": 90,
+      "session_cookie_env": "CRACKED_SESSION_COOKIE",
+      "session_cookie_file": "secrets/cracked_cookies.txt",
+      "session_cookie_engine": "MyBB",
+      "session_cookie_example": "mybbuser=...; sid=..."
     },
     {
       "site_name": "pwnfrm",

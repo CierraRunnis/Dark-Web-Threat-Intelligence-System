@@ -34,6 +34,8 @@ def _primary_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(item, dict)
         and not bool(item.get("suppressed"))
         and _normalize_text(item.get("displayBucket") or "primary") == "primary"
+        and _normalize_text(item.get("resultLayer")).lower() == "sensitive"
+        and _normalize_text(item.get("sensitiveType")).lower() != "clue"
     ]
 
 

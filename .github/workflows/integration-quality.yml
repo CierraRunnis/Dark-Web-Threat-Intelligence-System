@@ -115,6 +115,18 @@ jobs:
         shell: pwsh
         run: python .github/scripts/verify_code_continuous_ui.py
 
+      - name: Validate strict code monitoring quality
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "darkweb_collector/src"
+          python .github/scripts/verify_code_monitoring_quality.py
+
+      - name: Validate Cracked fetch resilience
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "darkweb_collector/src"
+          python .github/scripts/verify_cracked_fetch_resilience.py
+
       - name: Build dashboard
         shell: pwsh
         working-directory: threat-intelligence-dashboard

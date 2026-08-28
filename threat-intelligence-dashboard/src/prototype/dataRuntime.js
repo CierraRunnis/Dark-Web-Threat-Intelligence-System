@@ -723,7 +723,7 @@ function fillNamedRows(container, items) {
     if (!item) return
     const labels = queryAll(row, 'span')
     const name = labels.find((node) => !node.classList.contains('source-logo')) || query(row, 'strong')
-    const value = query(row, 'b, strong:last-child')
+    const value = query(row, ':scope > strong:last-child, :scope > b:last-child') || query(row, 'strong:last-child')
     if (name) name.textContent = item.name
     if (value && value !== name) value.textContent = number(item.value)
     const bar = query(row, 'i, .bar-fill-v2')
@@ -1735,12 +1735,14 @@ async function hydrateDocumentMonitoring(root, state, source) {
 }
 
 const CODE_CONTINUOUS_INTERVAL_SECONDS = 3600
+const CODE_HIT_PAGE_SIZE = 20
 
 function renderCodeContinuousStatus(root, status = {}, errorMessage = '') {
   const stateNode = query(root, '[data-code-scan-state]')
   const toggle = query(root, '[data-code-scan-toggle]')
   const lastSuccess = query(root, '[data-code-scan-last-success]')
   const result = query(root, '[data-code-scan-result]')
+  const evidence = query(root, '[data-code-scan-evidence]')
   const error = query(root, '[data-code-scan-error]')
   const enabled = Boolean(status.enabled)
   const running = Boolean(status.running)
@@ -1751,7 +1753,8 @@ function renderCodeContinuousStatus(root, status = {}, errorMessage = '') {
     stateNode.className = `badge ${configurationMissing ? 'badge-info' : errorMessage ? 'badge-high' : enabled ? 'badge-success' : 'badge-info'}`
   }
   if (lastSuccess) lastSuccess.textContent = status.last_success_at ? formatDate(status.last_success_at) : '暂无'
-  if (result) result.textContent = `敏感 ${number(status.sensitive_hit_count)} / 线索 ${number(status.clue_hit_count)}`
+  if (result) result.textContent = `主表 ${number(status.new_primary_hit_count)} / 压制 ${number(status.new_suppressed_hit_count)} / 更新 ${number(status.updated_hit_count)}`
+  if (evidence) evidence.textContent = `敏感 ${number(status.new_sensitive_hit_count)} / 线索 ${number(status.new_clue_hit_count)}`
   if (toggle) {
     toggle.dataset.enabled = enabled ? '1' : '0'
     toggle.textContent = configurationMissing ? '请先配置' : enabled ? '停止扫描' : '开始扫描'
@@ -1765,7 +1768,7 @@ function renderCodeContinuousStatus(root, status = {}, errorMessage = '') {
   }
 }
 
-async function setupCodeContinuousScan(root, watchlists = []) {
+async function setupCodeContinuousScan(root, watchlists = [], onScanCompleted = null) {
   const panel = query(root, '[data-code-scan-panel]')
   const select = query(root, '[data-code-scan-watchlist]')
   const toggle = query(root, '[data-code-scan-toggle]')
@@ -1783,12 +1786,20 @@ async function setupCodeContinuousScan(root, watchlists = []) {
   }
 
   let loading = false
+  const lastSuccessByWatchlist = new Map()
   const refreshStatus = async (preferredStatus = null) => {
     const watchlistId = Number(select.value || 0)
     if (!watchlistId || loading) return
     try {
       const status = preferredStatus || await requestJson(`/api/code-monitoring/continuous-status?watchlist_id=${encodeURIComponent(watchlistId)}`)
       renderCodeContinuousStatus(root, status)
+      const currentSuccess = String(status.last_success_at || '')
+      const hadBaseline = lastSuccessByWatchlist.has(watchlistId)
+      const previousSuccess = lastSuccessByWatchlist.get(watchlistId) || ''
+      lastSuccessByWatchlist.set(watchlistId, currentSuccess)
+      if (hadBaseline && currentSuccess && previousSuccess !== currentSuccess && onScanCompleted) {
+        await onScanCompleted()
+      }
     } catch (error) {
       renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
     } finally {
@@ -1842,24 +1853,33 @@ async function setupCodeContinuousScan(root, watchlists = []) {
   }, 15_000)
 }
 
-async function hydrateCodeMonitoring(root, state) {
-  const table = clearTable(root, '#code-table')
-  const suppressedTable = clearTable(root, '.suppressed-code-table')
-  const [summary, hits, watchlists] = await Promise.all([
-    requestJson('/api/code-monitoring/summary'),
-    requestJson('/api/code-monitoring/hits?include_suppressed=true&limit=500'),
-    requestJson('/api/code-monitoring/watchlists'),
-  ])
-  const primary = hits.filter((item) => item.displayBucket !== 'suppressed' && !item.suppressed)
-  const suppressed = hits.filter((item) => item.displayBucket === 'suppressed' || item.suppressed)
-  const repositoryKeys = (items) => new Set(items.map((item) => item.repositoryFullName || item.repositoryUrl || item.repositoryName).filter(Boolean))
-  const publicRepositoryCount = repositoryKeys(hits.filter((item) => String(item.visibility || 'public').toLowerCase() === 'public')).size
-  const highRiskRepositoryCount = repositoryKeys(hits.filter((item) => ['critical', 'high'].includes(severityOf(item)))).size
-  replaceFilterOptions(root, '[data-filter-target="code-table"][data-filter-key="target"]', '监测对象', hits.map((item) => item.watchlistName || item.organizationName).filter(Boolean))
-  replaceFilterOptions(root, '[data-filter-target="code-table"][data-filter-key="platform"]', '来源平台', primary.map((item) => ({ value: item.platform, label: item.platformLabel || item.platform })))
-  replaceFilterOptions(root, '[data-filter-target="code-table"][data-filter-key="hit"]', '命中层级', primary.map((item) => ({ value: item.resultLayer, label: item.resultLayerLabel || item.resultLayer })))
-  setCounts(query(root, '.code-kpi-layout'), [publicRepositoryCount, summary.sensitiveSnippetCount, summary.clueHitCount, highRiskRepositoryCount])
-  replaceRows(table, primary, (row, item) => {
+function codeHitPageUrl(root, codeState, bucket) {
+  const params = new URLSearchParams({
+    bucket,
+    offset: String((codeState.pages[bucket] - 1) * CODE_HIT_PAGE_SIZE),
+    limit: String(CODE_HIT_PAGE_SIZE),
+  })
+  queryAll(root, '[data-code-hit-filter]').forEach((control) => {
+    const value = String(control.value || '').trim()
+    if (value) params.set(control.dataset.codeHitFilter, value)
+  })
+  return `/api/code-monitoring/hits/page?${params.toString()}`
+}
+
+function setCodeServerPage(table, payload) {
+  if (!table) return
+  const total = Math.max(0, Number(payload.total || 0))
+  const limit = Math.max(1, Number(payload.limit || CODE_HIT_PAGE_SIZE))
+  const offset = Math.max(0, Number(payload.offset || 0))
+  table.dataset.serverPagination = 'true'
+  table.dataset.serverTotal = String(total)
+  table.dataset.serverPageSize = String(limit)
+  table.dataset.serverPage = String(Math.floor(offset / limit) + 1)
+  table.dataset.serverPageCount = String(Math.max(1, Math.ceil(total / limit)))
+}
+
+function fillPrimaryCodeRows(table, items) {
+  replaceRows(table, items, (row, item) => {
     const cells = queryAll(row, 'td')
     const severity = severityOf(item)
     row.dataset.target = item.watchlistName || item.organizationName || ''
@@ -1867,7 +1887,7 @@ async function hydrateCodeMonitoring(root, state) {
     row.dataset.severity = severity === 'critical' ? 'high' : severity
     row.dataset.hit = item.resultLayer
     row.dataset.type = item.sensitiveType
-    row.dataset.discoveredAt = item.lastSeenAt || item.firstSeenAt || ''
+    row.dataset.discoveredAt = item.firstSeenAt || ''
     setCell(cells[0], item.repositoryFullName || item.repositoryName)
     setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
     setCell(cells[2], item.filePath)
@@ -1876,15 +1896,19 @@ async function hydrateCodeMonitoring(root, state) {
     setCell(cells[4], item.matchedTerm)
     setClassTextCell(cells[5], item.resultLayerLabel, `hit-level ${item.resultLayer || ''}`)
     setBadgeCell(cells[6], severityLabel(severity), severity)
-    setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
+    setCell(cells[7], formatDate(item.firstSeenAt))
     setCell(cells[8], reviewStatusLabel(item.reviewStatus))
     setActionCell(cells[9], '详情', `/document-exposure/code-monitoring/detail/${encodeURIComponent(item.id)}`)
   })
-  if (suppressedTable) replaceRows(suppressedTable, suppressed, (row, item) => {
+}
+
+function fillSuppressedCodeRows(table, items) {
+  if (!table) return
+  replaceRows(table, items, (row, item) => {
     const cells = queryAll(row, 'td')
     row.dataset.target = item.watchlistName || item.organizationName || ''
     setCell(cells[0], item.repositoryFullName || item.repositoryName)
-    row.dataset.discoveredAt = item.lastSeenAt || item.firstSeenAt || ''
+    row.dataset.discoveredAt = item.firstSeenAt || ''
     setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
     setCell(cells[2], item.filePath)
     if (cells[2]) cells[2].title = item.filePath || ''
@@ -1894,39 +1918,77 @@ async function hydrateCodeMonitoring(root, state) {
     setCell(cells[5], suppressionReason)
     if (cells[5]) cells[5].title = suppressionReason
     setBadgeCell(cells[6], severityLabel(severityOf(item)), severityOf(item))
-    setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
+    setCell(cells[7], formatDate(item.firstSeenAt))
     setCell(cells[8], reviewStatusLabel(item.reviewStatus))
     setActionCell(cells[9], '详情', `/document-exposure/code-monitoring/detail/${encodeURIComponent(item.id)}`)
   })
-  fillSourceDistribution(query(root, '.code-source-grid'), summary.platformDistribution || [], summary.totalHits)
-  const severityRank = { low: 1, medium: 2, high: 3, critical: 4 }
-  const repositories = new Map()
-  hits.forEach((item) => {
-    const key = item.repositoryFullName || item.repositoryUrl || item.repositoryName
-    if (!key) return
-    const severity = severityOf(item)
-    const current = repositories.get(key)
-    if (!current || severityRank[severity] > severityRank[current]) repositories.set(key, severity)
+}
+
+async function reloadCodeMonitoringData(root, state, codeState, resetPages = false) {
+  if (codeState.loading) return
+  if (resetPages) codeState.pages = { primary: 1, suppressed: 1 }
+  codeState.loading = true
+  try {
+    const [summary, primaryPage, suppressedPage] = await Promise.all([
+      requestJson('/api/code-monitoring/summary'),
+      requestJson(codeHitPageUrl(root, codeState, 'primary')),
+      requestJson(codeHitPageUrl(root, codeState, 'suppressed')),
+    ])
+    const table = clearTable(root, '#code-table')
+    const suppressedTable = clearTable(root, '#suppressed-code-table')
+    setCodeServerPage(table, primaryPage)
+    setCodeServerPage(suppressedTable, suppressedPage)
+    fillPrimaryCodeRows(table, primaryPage.items || [])
+    fillSuppressedCodeRows(suppressedTable, suppressedPage.items || [])
+    const primaryCount = query(root, '[data-table-count="code-table"]')
+    const suppressedCount = query(root, '[data-table-count="suppressed-code-table"]')
+    if (primaryCount) primaryCount.textContent = number(primaryPage.total)
+    if (suppressedCount) suppressedCount.textContent = number(suppressedPage.total)
+    setCounts(query(root, '.code-kpi-layout'), [summary.publicRepositoryCount, summary.sensitiveSnippetCount, summary.clueHitCount, summary.highRiskRepositoryCount])
+    fillSourceDistribution(query(root, '.code-source-grid'), summary.platformDistribution || [], summary.totalHits)
+    const repositoryRisk = summary.repositoryRiskDistribution || []
+    const repositoryCount = Number(summary.repositoryCount || 0)
+    setText(root, '.code-risk-donut strong', number(repositoryCount))
+    setText(root, '.code-risk-card .meta', `总仓库 ${number(repositoryCount)}`)
+    fillDistribution(query(root, '.code-risk-legend'), repositoryRisk, repositoryCount, true)
+    setConicChart(query(root, '.code-risk-donut'), repositoryRisk.map((item) => item.value), ['var(--danger)', 'var(--warning)', 'var(--secondary)'])
+    fillNamedRows(query(root, '.code-secret-rank'), summary.sensitiveTypeTop || [])
+    renderCodeTrend(root, summary.trend || [])
+    markExports(root, state, ['#code-table'])
+  } finally {
+    codeState.loading = false
+  }
+}
+
+function setupCodeHitFilters(root, codeState, reload) {
+  let searchTimer = null
+  queryAll(root, '[data-code-hit-filter]').forEach((control) => {
+    const eventName = control.dataset.codeHitFilter === 'query' ? 'input' : 'change'
+    control.addEventListener(eventName, () => {
+      window.clearTimeout(searchTimer)
+      searchTimer = window.setTimeout(() => { reload(true) }, eventName === 'input' ? 300 : 0)
+    })
   })
-  const repositoryRisk = [
-    { name: '高危', value: [...repositories.values()].filter((value) => ['critical', 'high'].includes(value)).length },
-    { name: '中危', value: [...repositories.values()].filter((value) => value === 'medium').length },
-    { name: '低危', value: [...repositories.values()].filter((value) => value === 'low').length },
-  ]
-  const repositoryCount = repositories.size
-  setText(root, '.code-risk-donut strong', number(repositoryCount))
-  setText(root, '.code-risk-card .meta', `总仓库 ${number(repositoryCount)}`)
-  fillDistribution(query(root, '.code-risk-legend'), repositoryRisk, repositoryCount, true)
-  setConicChart(query(root, '.code-risk-donut'), repositoryRisk.map((item) => item.value), ['var(--danger)', 'var(--warning)', 'var(--secondary)'])
-  fillNamedRows(query(root, '.code-secret-rank'), summary.sensitiveTypeTop || [])
-  renderCodeTrend(root, summary.trend || [])
-  queryAll(root, '.table-pager > span').forEach((node) => {
-    const related = node.closest('article')?.querySelector('tbody')
-    node.textContent = `当前显示 ${number(related?.children.length || 0)} 条`
-  })
-  queryAll(root, '.table-pager button').forEach((button) => { button.disabled = true })
-  markExports(root, state, ['#code-table'])
-  await setupCodeContinuousScan(root, Array.isArray(watchlists) ? watchlists : (watchlists.items || watchlists.watchlists || []))
+  for (const [bucket, selector] of [['primary', '#code-table'], ['suppressed', '#suppressed-code-table']]) {
+    query(root, selector)?.addEventListener('prototype:server-page', (event) => {
+      codeState.pages[bucket] = Math.max(1, Number(event.detail?.page || 1))
+      reload(false)
+    })
+  }
+}
+
+async function hydrateCodeMonitoring(root, state) {
+  const watchlistsPayload = await requestJson('/api/code-monitoring/watchlists')
+  const watchlists = Array.isArray(watchlistsPayload) ? watchlistsPayload : (watchlistsPayload.items || watchlistsPayload.watchlists || [])
+  const watchlistFilter = query(root, '[data-code-hit-filter="watchlist_id"]')
+  if (watchlistFilter) {
+    watchlistFilter.replaceChildren(new Option('全部监测对象', ''), ...watchlists.map((item) => new Option(item.name || `监测对象 ${item.id}`, String(item.id))))
+  }
+  const codeState = { pages: { primary: 1, suppressed: 1 }, loading: false }
+  const reload = (resetPages = false) => reloadCodeMonitoringData(root, state, codeState, resetPages)
+  setupCodeHitFilters(root, codeState, reload)
+  await reload(false)
+  await setupCodeContinuousScan(root, watchlists, () => reload(true))
 }
 
 function replaceRecordContainer(container, lines) {

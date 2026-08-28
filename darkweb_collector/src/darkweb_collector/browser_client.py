@@ -5,6 +5,7 @@ from threading import Lock, current_thread
 import traceback
 import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,29 @@ _CAPTURE_READY_SCRIPT = r"""
     return document.readyState !== 'loading' && !hasVisibleLoadingState && !hasPendingImage;
 }
 """
+
+
+def _cookie_rows(cookie_header: str | None, url: str) -> list[dict[str, object]]:
+    if not cookie_header:
+        return []
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return []
+    rows: list[dict[str, object]] = []
+    for item in str(cookie_header).split(";"):
+        name, separator, value = item.strip().partition("=")
+        if not separator or not name:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": parsed.hostname,
+                "path": "/",
+                "secure": parsed.scheme.lower() == "https",
+            }
+        )
+    return rows
 
 
 class BrowserClient:
@@ -79,6 +103,7 @@ class BrowserClient:
         screenshot_styles: str = "",
         storage_state_path: str | None = None,
         capture_ready_script: str = "",
+        cookie_header: str | None = None,
     ) -> tuple[str, bytes]:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -94,6 +119,9 @@ class BrowserClient:
         if storage_state_path:
             context_kwargs["storage_state"] = storage_state_path
         context = self._browser.new_context(**context_kwargs)
+        cookie_rows = _cookie_rows(cookie_header, url)
+        if cookie_rows:
+            context.add_cookies(cookie_rows)
         page = context.new_page()
         selector_timeout_ms = min(timeout_seconds * 1000, 10_000)
         try:
@@ -425,6 +453,7 @@ def fetch_html_with_browser(
     wait_seconds: int,
     timeout_seconds: int,
     proxy_server: str | None = None,
+    cookie_header: str | None = None,
 ) -> str:
     requested_proxy = BrowserProxyConfig(server=proxy_server)
     client = _get_or_create_client(requested_proxy)
@@ -434,6 +463,7 @@ def fetch_html_with_browser(
             wait_seconds=wait_seconds,
             timeout_seconds=timeout_seconds,
             capture_screenshot=False,
+            cookie_header=cookie_header,
         )
         return html
     except Exception:
@@ -452,6 +482,7 @@ def fetch_page_artifacts_with_browser(
     screenshot_styles: str = "",
     storage_state_path: str | None = None,
     capture_ready_script: str = "",
+    cookie_header: str | None = None,
 ) -> tuple[str, bytes]:
     requested_proxy = BrowserProxyConfig(server=proxy_server)
     client = _get_or_create_client(requested_proxy)
@@ -466,6 +497,7 @@ def fetch_page_artifacts_with_browser(
             screenshot_styles=screenshot_styles,
             storage_state_path=storage_state_path,
             capture_ready_script=capture_ready_script,
+            cookie_header=cookie_header,
         )
     except Exception:
         close_browser_client()

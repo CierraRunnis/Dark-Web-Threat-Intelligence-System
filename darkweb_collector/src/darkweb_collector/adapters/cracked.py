@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import time
+from typing import Callable
 from urllib.parse import urlparse
 
 from darkweb_collector.adapters.base import SiteAdapter
-from darkweb_collector.browser_client import close_browser_client
+from darkweb_collector.browser_client import (
+    close_browser_client,
+    fetch_html_with_browser,
+    fetch_page_artifacts_with_browser,
+    screenshot_html_with_browser,
+)
 from darkweb_collector.db import (
     get_db_connection,
     get_forum_detail_snapshot,
@@ -13,8 +20,9 @@ from darkweb_collector.db import (
     upsert_forum_topic,
 )
 from darkweb_collector.models import DetailResult, DetailTask, RunContext, SeedResult, SiteConfig
+from darkweb_collector.session_cookies import resolve_session_cookie
 from darkweb_collector.sites.cracked import parse_cracked_detail, parse_cracked_list
-from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url
+from darkweb_collector.tor_fetch import fetch_via_http_proxy, get_http_proxy_settings
 from darkweb_collector.utils import dump_json, dump_text, safe_stem, utc_now_iso
 
 
@@ -45,14 +53,100 @@ def _detail_artifacts_exist(output_dir, section_name: str, topic_url: str) -> bo
 class CrackedAdapter(SiteAdapter):
     site_name = "cracked"
 
+    @staticmethod
+    def _is_valid_seed_html(html: str) -> bool:
+        lowered = str(html or "").lower()
+        challenge_markers = ("checking your browser", "cf-browser-verification", "verify you are human")
+        if not lowered or any(marker in lowered for marker in challenge_markers):
+            return False
+        return "forum-" in lowered and ("thread-" in lowered or "subject_new" in lowered)
+
+    def _fetch_with_fallback(
+        self,
+        url: str,
+        config: SiteConfig,
+        *,
+        validator: Callable[[str], bool],
+        capture_screenshot: bool,
+    ) -> tuple[str, bytes | None]:
+        cookie_header = resolve_session_cookie(config)
+        proxy_host, proxy_port = get_http_proxy_settings()
+        routes: list[tuple[str, Callable[[], tuple[str, bytes | None]]]] = []
+
+        def curl_route(*, bypass_proxy: bool, host: str | None = None, port: int | None = None):
+            html = fetch_via_http_proxy(
+                url,
+                proxy_host=host,
+                proxy_port=port,
+                timeout=config.fetch_timeout_seconds,
+                retries=0,
+                bypass_proxy=bypass_proxy,
+            )
+            screenshot = None
+            if capture_screenshot:
+                try:
+                    screenshot = screenshot_html_with_browser(
+                        html,
+                        url,
+                        wait_seconds=config.render_wait_seconds,
+                        timeout_seconds=config.fetch_timeout_seconds,
+                    )
+                except Exception:
+                    screenshot = None
+            return html, screenshot
+
+        def browser_route(cookie: str | None = None):
+            if not capture_screenshot:
+                return (
+                    fetch_html_with_browser(
+                        url,
+                        wait_seconds=config.render_wait_seconds,
+                        timeout_seconds=config.fetch_timeout_seconds,
+                        proxy_server=None,
+                        cookie_header=cookie,
+                    ),
+                    None,
+                )
+            html, screenshot = fetch_page_artifacts_with_browser(
+                url,
+                wait_seconds=config.render_wait_seconds,
+                timeout_seconds=config.fetch_timeout_seconds,
+                proxy_server=None,
+                screenshot_selectors=("#posts", ".post_body") if capture_screenshot else (),
+                hide_selectors=("header", "#panel", "#quick-search", ".footer", "footer", ".signature"),
+                cookie_header=cookie,
+            )
+            return html, screenshot or None
+
+        routes.append(("direct", lambda: curl_route(bypass_proxy=True)))
+        if proxy_host and proxy_port:
+            routes.append(("proxy", lambda: curl_route(bypass_proxy=False, host=proxy_host, port=proxy_port)))
+        routes.append(("browser", lambda: browser_route()))
+        if cookie_header:
+            routes.append(("browser_cookie", lambda: browser_route(cookie_header)))
+
+        failures: list[str] = []
+        for index, (route_name, fetcher) in enumerate(routes):
+            try:
+                html, screenshot = fetcher()
+                if validator(html):
+                    return html, screenshot
+                failures.append(f"{route_name}:invalid_html")
+            except Exception as exc:
+                failures.append(f"{route_name}:{type(exc).__name__}:{str(exc)[:160]}")
+            close_browser_client()
+            if index + 1 < len(routes):
+                time.sleep(1)
+        raise RuntimeError(f"Cracked fetch failed after bounded fallback: {'; '.join(failures)}")
+
     def _fetch_html(self, url: str, config: SiteConfig, mode: str) -> str:
-        return fetch_url(
-            url=url,
-            mode=mode,
-            timeout_seconds=config.fetch_timeout_seconds,
-            render_wait_seconds=config.render_wait_seconds,
-            retries=1,
-        )
+        del mode
+        return self._fetch_with_fallback(
+            url,
+            config,
+            validator=self._is_valid_seed_html,
+            capture_screenshot=False,
+        )[0]
 
     @staticmethod
     def _is_valid_detail_html(html: str) -> bool:
@@ -161,46 +255,24 @@ class CrackedAdapter(SiteAdapter):
     def collect_detail(
         self, detail_task: DetailTask, config: SiteConfig, run_ctx: RunContext
     ) -> DetailResult | None:
-        html = ""
-        screenshot_png = None
-        for attempt in range(3):
-            html, screenshot_png = fetch_page_artifacts(
-                url=detail_task.target_url,
-                mode=config.detail_fetch_mode,
-                timeout_seconds=config.fetch_timeout_seconds,
-                render_wait_seconds=config.render_wait_seconds,
-                screenshot_selectors=(
-                    "#posts",
-                    ".post_body",
-                ),
-                hide_selectors=(
-                    "header",
-                    "#panel",
-                    "#quick-search",
-                    ".footer",
-                    "footer",
-                    ".signature",
-                ),
-                render_html_for_screenshot=True,
-            )
-            if self._is_valid_detail_html(html):
-                detail = parse_cracked_detail(detail_task.target_url, html)
-                if self._is_valid_detail_payload(detail):
-                    return DetailResult(
-                        site_name=self.site_name,
-                        target_url=detail_task.target_url,
-                        payload=detail,
-                        raw_html=html,
-                        screenshot_png=screenshot_png,
-                        metadata=detail_task.metadata,
-                    )
-            print(
-                f"[cracked] invalid detail html on attempt {attempt + 1} for "
-                f"{detail_task.target_url}; retrying"
-            )
-            close_browser_client()
-        print(f"[cracked] skipping invalid detail persist for {detail_task.target_url}")
-        return None
+        html, screenshot_png = self._fetch_with_fallback(
+            detail_task.target_url,
+            config,
+            validator=self._is_valid_detail_html,
+            capture_screenshot=True,
+        )
+        detail = parse_cracked_detail(detail_task.target_url, html)
+        if not self._is_valid_detail_payload(detail):
+            print(f"[cracked] skipping invalid detail persist for {detail_task.target_url}")
+            return None
+        return DetailResult(
+            site_name=self.site_name,
+            target_url=detail_task.target_url,
+            payload=detail,
+            raw_html=html,
+            screenshot_png=screenshot_png,
+            metadata=detail_task.metadata,
+        )
 
     def persist(
         self,
