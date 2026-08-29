@@ -5,6 +5,7 @@ import subprocess
 import traceback
 import time
 import os
+import tempfile
 from urllib.parse import urlparse
 
 
@@ -352,6 +353,7 @@ def fetch_via_http_proxy(
     retries: int = 3,
     backoff_seconds: float = 3.0,
     cookie_header: str | None = None,
+    bypass_proxy: bool = False,
 ) -> str:
     """
     Fetch URL using HTTP/HTTPS proxy (e.g., Clash, Shadowsocks, etc.)
@@ -371,9 +373,13 @@ def fetch_via_http_proxy(
     import random
     
     # Get proxy settings from environment (no defaults - must be explicitly set)
-    proxy_host = proxy_host or os.environ.get("PROXY_HOST")
-    proxy_port_str = os.environ.get("PROXY_PORT")
-    proxy_port = proxy_port or (int(proxy_port_str) if proxy_port_str else None)
+    if bypass_proxy:
+        proxy_host = None
+        proxy_port = None
+    else:
+        proxy_host = proxy_host or os.environ.get("PROXY_HOST")
+        proxy_port_str = os.environ.get("PROXY_PORT")
+        proxy_port = proxy_port or (int(proxy_port_str) if proxy_port_str else None)
     
     # Use different user agents
     user_agents = [
@@ -406,7 +412,8 @@ def fetch_via_http_proxy(
     last_error = "unknown curl error"
     
     # Create temp directory for cookies and output
-    temp_dir = os.environ.get("TEMP", "/tmp")
+    temp_scope = tempfile.TemporaryDirectory(prefix="dwti-http-fetch-")
+    temp_dir = temp_scope.name
     cookie_file = os.path.join(temp_dir, "cookies.txt")
     output_file = os.path.join(temp_dir, "temp.html")
     
@@ -444,7 +451,9 @@ def fetch_via_http_proxy(
         ]
         
         # Add proxy if configured
-        if proxy_host and proxy_port:
+        if bypass_proxy:
+            command.extend(["--noproxy", "*"])
+        elif proxy_host and proxy_port:
             command.extend(["--proxy", f"http://{proxy_host}:{proxy_port}"])
 
         if cookie_header:

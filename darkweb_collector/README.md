@@ -33,7 +33,8 @@
 
 - `http://abc.onion/...` 走 Tor
 - `https://abc.onion/...` 也走 Tor
-- `https://darkforums.ru/...` 走普通代理或直连
+- `https://darkforums.as/...` 优先直连，失败时回退浏览器抓取
+- `https://cracked.st/...` 由浏览器队列执行，仍优先直连；403 时回退 Chromium，并在数据目录保存隔离的匿名站点状态
 
 `sites.yaml` 中的：
 

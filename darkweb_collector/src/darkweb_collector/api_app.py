@@ -116,6 +116,7 @@ from darkweb_collector.code_monitoring import (
     list_code_hits_payload,
     list_code_scan_runs_payload,
     list_code_watchlists_payload,
+    search_code_hits_page,
     save_code_watchlist_payload,
     scan_code_watchlist_once,
 )
@@ -1647,6 +1648,38 @@ def code_monitoring_hits(
         include_suppressed=include_suppressed,
         limit=limit,
     )
+
+
+@app.get("/api/code-monitoring/hits/page")
+def code_monitoring_hits_page(
+    query: str = "",
+    watchlist_id: int | None = None,
+    platform: str = "",
+    severity: str = "",
+    result_layer: str = "",
+    bucket: str = "all",
+    seen_after: str = "",
+    seen_before: str = "",
+    recent_hours: int | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict:
+    try:
+        return search_code_hits_page(
+            query=query,
+            watchlist_id=watchlist_id,
+            platform=platform,
+            severity=severity,
+            result_layer=result_layer,
+            bucket=bucket,
+            seen_after=seen_after,
+            seen_before=seen_before,
+            recent_hours=recent_hours,
+            offset=offset,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/code-monitoring/hits/{hit_id}")

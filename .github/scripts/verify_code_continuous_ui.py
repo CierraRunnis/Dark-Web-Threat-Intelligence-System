@@ -25,9 +25,14 @@ for marker in (
     '/api/code-monitoring/continuous/start',
     '/api/code-monitoring/continuous/stop',
     'CODE_CONTINUOUS_INTERVAL_SECONDS = 3600',
+    '/api/code-monitoring/hits/page',
+    'last_success_at',
 ):
     assert marker in runtime, f"missing continuous-scan runtime binding: {marker}"
 
 assert '.code-scan-panel' in styles
+assert screen.count('data-server-pagination="true"') >= 2
+for field in ("watchlist_id", "platform", "severity", "result_layer", "recent_hours", "query"):
+    assert f'data-code-hit-filter="{field}"' in screen
 
 print("New UI continuous code monitoring controls are wired.")

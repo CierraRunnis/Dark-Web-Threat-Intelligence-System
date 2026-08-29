@@ -37,15 +37,6 @@ def classify_error(message: str | None) -> str:
     if "timeout" in lowered or "timed out" in lowered or "time-out" in lowered:
         return "timeout"
     if (
-        "proxy" in lowered
-        or "socks" in lowered
-        or "curl fetch failed" in lowered
-        or "connection refused" in lowered
-        or "could not resolve" in lowered
-        or "network is unreachable" in lowered
-    ):
-        return "proxy"
-    if (
         "checking your browser" in lowered
         or "verify you are human" in lowered
         or "cloudflare" in lowered
@@ -54,6 +45,15 @@ def classify_error(message: str | None) -> str:
         or "403" in lowered
     ):
         return "site_blocked"
+    if (
+        "proxy" in lowered
+        or "socks" in lowered
+        or "curl fetch failed" in lowered
+        or "connection refused" in lowered
+        or "could not resolve" in lowered
+        or "network is unreachable" in lowered
+    ):
+        return "proxy"
     if (
         "parse" in lowered
         or "parser" in lowered

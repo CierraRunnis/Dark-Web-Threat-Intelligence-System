@@ -2870,7 +2870,7 @@ def list_code_hits(
     return [dict(row) for row in cursor.fetchall()]
 
 
-def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
+def upsert_code_hit_with_state(connection: sqlite3.Connection, payload: dict) -> tuple[int, bool]:
     signature = (
         int(payload.get("watchlist_id") or 0),
         str(payload.get("platform") or "").strip(),
@@ -2918,7 +2918,7 @@ def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
             """,
             (*values, int(row["id"])),
         )
-        return int(row["id"])
+        return int(row["id"]), False
     cursor = connection.execute(
         """
         INSERT INTO code_hits (
@@ -2952,7 +2952,11 @@ def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
             values[15],
         ),
     )
-    return int(cursor.lastrowid)
+    return int(cursor.lastrowid), True
+
+
+def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
+    return upsert_code_hit_with_state(connection, payload)[0]
 
 
 def insert_code_hit_snapshot(connection: sqlite3.Connection, payload: dict) -> int:

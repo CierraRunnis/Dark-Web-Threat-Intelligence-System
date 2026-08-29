@@ -44,9 +44,9 @@
       "site_name": "darkforums",
       "enabled": true,
       "seed_urls": [
-        "https://darkforums.ru/Forum-Databases",
-        "https://darkforums.ru/Forum-Other-Leaks",
-        "https://darkforums.ru/Forum-Sellers-Place"
+        "https://darkforums.as/Forum-Databases",
+        "https://darkforums.as/Forum-Other-Leaks",
+        "https://darkforums.as/Forum-Sellers-Place"
       ],
       "seed_fetch_mode": "browser",
       "detail_fetch_mode": "browser",
@@ -65,8 +65,8 @@
         "https://cracked.st/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
         "https://cracked.st/Forum-Combolists--297?sortby=started&order=desc&datecut=9999&prefix=0"
       ],
-      "seed_fetch_mode": "tor_http",
-      "detail_fetch_mode": "tor_http",
+      "seed_fetch_mode": "browser",
+      "detail_fetch_mode": "browser",
       "profile": "warm",
       "max_topics_per_run": 10,
       "max_detail_pages_per_run": 6,
@@ -75,7 +75,9 @@
       "dedupe_window_minutes": 180,
       "display_name": "Cracked",
       "render_wait_seconds": 8,
-      "fetch_timeout_seconds": 90
+      "fetch_timeout_seconds": 90,
+      "browser_engine": "chromium",
+      "browser_storage_state_file": "browser-state/cracked/storage-state.json"
     },
     {
       "site_name": "pwnfrm",

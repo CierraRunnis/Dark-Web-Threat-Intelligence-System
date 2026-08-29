@@ -882,6 +882,7 @@ export function initializePrototype() {
     $$('[data-filter-target]').forEach((select) => {
       const table = document.getElementById(select.dataset.filterTarget)
       if (!table) return
+      if (table.dataset.serverPagination === 'true') return
       select.addEventListener('change', () => {
         const linkedTables = String(select.dataset.filterLinkedTarget || '')
           .split(/\s+/)
@@ -897,6 +898,7 @@ export function initializePrototype() {
     $$('[data-date-filter-target]').forEach((select) => {
       const table = document.getElementById(select.dataset.dateFilterTarget)
       if (!table) return
+      if (table.dataset.serverPagination === 'true') return
       select.addEventListener('change', () => {
         table.dataset.page = '1'
         refreshTable(table)

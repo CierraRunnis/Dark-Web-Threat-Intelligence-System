@@ -943,6 +943,11 @@ def _code_monitoring_task_snapshot(
     hit_count: int = 0,
     clue_hit_count: int = 0,
     sensitive_hit_count: int = 0,
+    new_primary_hit_count: int = 0,
+    new_suppressed_hit_count: int = 0,
+    updated_hit_count: int = 0,
+    new_sensitive_hit_count: int = 0,
+    new_clue_hit_count: int = 0,
     stop_event: Event | None = None,
     thread: Thread | None = None,
 ) -> dict[str, Any]:
@@ -959,6 +964,11 @@ def _code_monitoring_task_snapshot(
         "hit_count": int(hit_count or 0),
         "clue_hit_count": int(clue_hit_count or 0),
         "sensitive_hit_count": int(sensitive_hit_count or 0),
+        "new_primary_hit_count": int(new_primary_hit_count or 0),
+        "new_suppressed_hit_count": int(new_suppressed_hit_count or 0),
+        "updated_hit_count": int(updated_hit_count or 0),
+        "new_sensitive_hit_count": int(new_sensitive_hit_count or 0),
+        "new_clue_hit_count": int(new_clue_hit_count or 0),
         "target_watchlist_id": int(watchlist_id or 0),
         "target_watchlist_name": watchlist_name,
         "stop_event": stop_event,
@@ -993,6 +1003,11 @@ def _code_monitoring_task_status_payload(watchlist_id: int, task: dict[str, Any]
         "hit_count": int(task.get("hit_count") or 0),
         "clue_hit_count": int(task.get("clue_hit_count") or 0),
         "sensitive_hit_count": int(task.get("sensitive_hit_count") or 0),
+        "new_primary_hit_count": int(task.get("new_primary_hit_count") or 0),
+        "new_suppressed_hit_count": int(task.get("new_suppressed_hit_count") or 0),
+        "updated_hit_count": int(task.get("updated_hit_count") or 0),
+        "new_sensitive_hit_count": int(task.get("new_sensitive_hit_count") or 0),
+        "new_clue_hit_count": int(task.get("new_clue_hit_count") or 0),
         "target_watchlist_id": int(task.get("target_watchlist_id") or 0),
         "target_watchlist_name": str(task.get("target_watchlist_name") or ""),
         "active_watchlist_count": _active_code_monitoring_task_count(),
@@ -1059,6 +1074,11 @@ def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[st
             "hit_count": 0,
             "clue_hit_count": 0,
             "sensitive_hit_count": 0,
+            "new_primary_hit_count": 0,
+            "new_suppressed_hit_count": 0,
+            "updated_hit_count": 0,
+            "new_sensitive_hit_count": 0,
+            "new_clue_hit_count": 0,
             "errors": [],
             "results": [],
         }
@@ -1079,6 +1099,11 @@ def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[st
                 aggregate["hit_count"] += int(result.get("hits") or 0)
                 aggregate["clue_hit_count"] += int(result.get("clue_hits") or 0)
                 aggregate["sensitive_hit_count"] += int(result.get("sensitive_hits") or 0)
+                aggregate["new_primary_hit_count"] += int(result.get("new_primary_hit_count") or 0)
+                aggregate["new_suppressed_hit_count"] += int(result.get("new_suppressed_hit_count") or 0)
+                aggregate["updated_hit_count"] += int(result.get("updated_hit_count") or 0)
+                aggregate["new_sensitive_hit_count"] += int(result.get("new_sensitive_hit_count") or 0)
+                aggregate["new_clue_hit_count"] += int(result.get("new_clue_hit_count") or 0)
                 aggregate["errors"].extend(result.get("errors") or [])
                 aggregate["results"].append(result)
             except Exception as exc:
@@ -1100,6 +1125,11 @@ def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[st
                     "hit_count": aggregate["hit_count"],
                     "clue_hit_count": aggregate["clue_hit_count"],
                     "sensitive_hit_count": aggregate["sensitive_hit_count"],
+                    "new_primary_hit_count": aggregate["new_primary_hit_count"],
+                    "new_suppressed_hit_count": aggregate["new_suppressed_hit_count"],
+                    "updated_hit_count": aggregate["updated_hit_count"],
+                    "new_sensitive_hit_count": aggregate["new_sensitive_hit_count"],
+                    "new_clue_hit_count": aggregate["new_clue_hit_count"],
                 }
             else:
                 _code_monitoring_last_success_at = utc_now_iso()
