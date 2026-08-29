@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -23,6 +24,7 @@ from darkweb_collector.models import DetailResult, DetailTask, RunContext, SeedR
 from darkweb_collector.session_cookies import resolve_session_cookie
 from darkweb_collector.sites.cracked import parse_cracked_detail, parse_cracked_list
 from darkweb_collector.tor_fetch import fetch_via_http_proxy, get_http_proxy_settings
+from darkweb_collector.runtime import user_data_root
 from darkweb_collector.utils import dump_json, dump_text, safe_stem, utc_now_iso
 
 
@@ -50,6 +52,16 @@ def _detail_artifacts_exist(output_dir, section_name: str, topic_url: str) -> bo
     return all(path.exists() for path in required)
 
 
+def _browser_storage_state_path(config: SiteConfig) -> str | None:
+    raw_path = str(config.extras.get("browser_storage_state_file") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = user_data_root() / path
+    return str(path.resolve())
+
+
 class CrackedAdapter(SiteAdapter):
     site_name = "cracked"
 
@@ -71,6 +83,8 @@ class CrackedAdapter(SiteAdapter):
     ) -> tuple[str, bytes | None]:
         cookie_header = resolve_session_cookie(config)
         proxy_host, proxy_port = get_http_proxy_settings()
+        browser_engine = str(config.extras.get("browser_engine") or "chromium").strip().lower()
+        storage_state_path = _browser_storage_state_path(config)
         routes: list[tuple[str, Callable[[], tuple[str, bytes | None]]]] = []
 
         def curl_route(*, bypass_proxy: bool, host: str | None = None, port: int | None = None):
@@ -90,12 +104,14 @@ class CrackedAdapter(SiteAdapter):
                         url,
                         wait_seconds=config.render_wait_seconds,
                         timeout_seconds=config.fetch_timeout_seconds,
+                        browser_engine=browser_engine,
                     )
                 except Exception:
                     screenshot = None
             return html, screenshot
 
         def browser_route(cookie: str | None = None):
+            route_storage_state = storage_state_path if not cookie else None
             if not capture_screenshot:
                 return (
                     fetch_html_with_browser(
@@ -103,6 +119,9 @@ class CrackedAdapter(SiteAdapter):
                         wait_seconds=config.render_wait_seconds,
                         timeout_seconds=config.fetch_timeout_seconds,
                         proxy_server=None,
+                        browser_engine=browser_engine,
+                        storage_state_path=route_storage_state,
+                        persist_storage_state=bool(route_storage_state),
                         cookie_header=cookie,
                     ),
                     None,
@@ -112,8 +131,11 @@ class CrackedAdapter(SiteAdapter):
                 wait_seconds=config.render_wait_seconds,
                 timeout_seconds=config.fetch_timeout_seconds,
                 proxy_server=None,
+                browser_engine=browser_engine,
                 screenshot_selectors=("#posts", ".post_body") if capture_screenshot else (),
                 hide_selectors=("header", "#panel", "#quick-search", ".footer", "footer", ".signature"),
+                storage_state_path=route_storage_state,
+                persist_storage_state=bool(route_storage_state),
                 cookie_header=cookie,
             )
             return html, screenshot or None

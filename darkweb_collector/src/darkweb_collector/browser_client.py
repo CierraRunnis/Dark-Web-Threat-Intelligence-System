@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import atexit
+import json
+import os
+from pathlib import Path
 from threading import Lock, current_thread
 import traceback
 import time
@@ -11,6 +14,7 @@ from urllib.parse import urlparse
 @dataclass(frozen=True)
 class BrowserProxyConfig:
     server: str | None = None
+    engine: str = "firefox"
 
 
 _CAPTURE_READY_SCRIPT = r"""
@@ -69,13 +73,18 @@ class BrowserClient:
     def _open(self) -> None:
         from playwright.sync_api import sync_playwright
 
+        if self._proxy.engine not in {"chromium", "firefox"}:
+            raise ValueError(f"unsupported browser engine: {self._proxy.engine}")
         self._playwright = sync_playwright().start()
         launch_kwargs = {
             "headless": True,
         }
+        if self._proxy.engine == "chromium":
+            launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled"]
         if self._proxy.server:
             launch_kwargs["proxy"] = {"server": self._proxy.server}
-        self._browser = self._playwright.firefox.launch(**launch_kwargs)
+        browser_type = getattr(self._playwright, self._proxy.engine)
+        self._browser = browser_type.launch(**launch_kwargs)
         self._created_monotonic = time.monotonic()
         self._task_count = 0
 
@@ -102,6 +111,7 @@ class BrowserClient:
         hide_selectors: tuple[str, ...] = (),
         screenshot_styles: str = "",
         storage_state_path: str | None = None,
+        persist_storage_state: bool = False,
         capture_ready_script: str = "",
         cookie_header: str | None = None,
     ) -> tuple[str, bytes]:
@@ -109,16 +119,36 @@ class BrowserClient:
 
         self._ensure_browser()
         assert self._browser is not None
-        context_kwargs = {
-            "user_agent": (
+        storage_path = Path(storage_state_path).expanduser().resolve() if storage_state_path else None
+        if self._proxy.engine == "chromium":
+            browser_version = str(getattr(self._browser, "version", "122.0.0.0"))
+            user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                f"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{browser_version} Safari/537.36"
+            )
+        else:
+            user_agent = (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) "
                 "Gecko/20100101 Firefox/123.0"
-            ),
+            )
+        context_kwargs = {
+            "user_agent": user_agent,
             "viewport": {"width": 1440, "height": 960},
+            "locale": "en-US",
         }
-        if storage_state_path:
-            context_kwargs["storage_state"] = storage_state_path
-        context = self._browser.new_context(**context_kwargs)
+        if storage_path is not None and storage_path.exists():
+            context_kwargs["storage_state"] = str(storage_path)
+        try:
+            context = self._browser.new_context(**context_kwargs)
+        except Exception:
+            if "storage_state" not in context_kwargs:
+                raise
+            context_kwargs.pop("storage_state", None)
+            context = self._browser.new_context(**context_kwargs)
+        if self._proxy.engine == "chromium":
+            context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
         cookie_rows = _cookie_rows(cookie_header, url)
         if cookie_rows:
             context.add_cookies(cookie_rows)
@@ -205,6 +235,11 @@ class BrowserClient:
             self._task_count += 1
             return html, screenshot_png
         finally:
+            if storage_path is not None and persist_storage_state:
+                try:
+                    _persist_browser_storage_state(context, storage_path)
+                except Exception:
+                    pass
             context.close()
 
     def screenshot_html_content(
@@ -322,6 +357,20 @@ _BROWSER_CHECK_MARKERS = (
     "please move your mouse or press a key",
     "please wait while we verify",
 )
+
+
+def _persist_browser_storage_state(context, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{current_thread().ident or 0}.tmp"
+    )
+    try:
+        state = context.storage_state()
+        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _read_page_content(page, *, attempts: int = 6, wait_ms: int = 250) -> str:
@@ -453,9 +502,12 @@ def fetch_html_with_browser(
     wait_seconds: int,
     timeout_seconds: int,
     proxy_server: str | None = None,
+    browser_engine: str = "firefox",
+    storage_state_path: str | None = None,
+    persist_storage_state: bool = False,
     cookie_header: str | None = None,
 ) -> str:
-    requested_proxy = BrowserProxyConfig(server=proxy_server)
+    requested_proxy = BrowserProxyConfig(server=proxy_server, engine=browser_engine)
     client = _get_or_create_client(requested_proxy)
     try:
         html, _ = client.fetch_page_artifacts(
@@ -463,6 +515,8 @@ def fetch_html_with_browser(
             wait_seconds=wait_seconds,
             timeout_seconds=timeout_seconds,
             capture_screenshot=False,
+            storage_state_path=storage_state_path,
+            persist_storage_state=persist_storage_state,
             cookie_header=cookie_header,
         )
         return html
@@ -476,15 +530,17 @@ def fetch_page_artifacts_with_browser(
     wait_seconds: int,
     timeout_seconds: int,
     proxy_server: str | None = None,
+    browser_engine: str = "firefox",
     screenshot_selector: str | None = None,
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
     screenshot_styles: str = "",
     storage_state_path: str | None = None,
+    persist_storage_state: bool = False,
     capture_ready_script: str = "",
     cookie_header: str | None = None,
 ) -> tuple[str, bytes]:
-    requested_proxy = BrowserProxyConfig(server=proxy_server)
+    requested_proxy = BrowserProxyConfig(server=proxy_server, engine=browser_engine)
     client = _get_or_create_client(requested_proxy)
     try:
         return client.fetch_page_artifacts(
@@ -496,6 +552,7 @@ def fetch_page_artifacts_with_browser(
             hide_selectors=hide_selectors,
             screenshot_styles=screenshot_styles,
             storage_state_path=storage_state_path,
+            persist_storage_state=persist_storage_state,
             capture_ready_script=capture_ready_script,
             cookie_header=cookie_header,
         )
@@ -510,12 +567,13 @@ def screenshot_html_with_browser(
     wait_seconds: int,
     timeout_seconds: int,
     proxy_server: str | None = None,
+    browser_engine: str = "firefox",
     screenshot_selector: str | None = None,
     screenshot_selectors: tuple[str, ...] = (),
     hide_selectors: tuple[str, ...] = (),
     screenshot_styles: str = "",
 ) -> bytes:
-    requested_proxy = BrowserProxyConfig(server=proxy_server)
+    requested_proxy = BrowserProxyConfig(server=proxy_server, engine=browser_engine)
     client = _get_or_create_client(requested_proxy)
     try:
         return client.screenshot_html_content(
