@@ -33,7 +33,7 @@
 
 - `http://abc.onion/...` 走 Tor
 - `https://abc.onion/...` 也走 Tor
-- `https://darkforums.ru/...` 走普通代理或直连
+- `https://darkforums.as/...` 优先直连，失败时回退浏览器抓取
 
 `sites.yaml` 中的：
 

@@ -44,9 +44,9 @@
       "site_name": "darkforums",
       "enabled": true,
       "seed_urls": [
-        "https://darkforums.ru/Forum-Databases",
-        "https://darkforums.ru/Forum-Other-Leaks",
-        "https://darkforums.ru/Forum-Sellers-Place"
+        "https://darkforums.as/Forum-Databases",
+        "https://darkforums.as/Forum-Other-Leaks",
+        "https://darkforums.as/Forum-Sellers-Place"
       ],
       "seed_fetch_mode": "browser",
       "detail_fetch_mode": "browser",

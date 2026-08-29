@@ -14,6 +14,7 @@ from darkweb_collector.db import (
     get_db_connection,
     insert_code_hit_snapshot,
     insert_code_scan_run,
+    list_code_watchlists,
     replace_code_watch_terms,
     update_code_hit_last_snapshot,
     upsert_code_hit_with_state,
@@ -47,6 +48,10 @@ def classification(path: str, text: str, repository: str) -> dict:
 
 with get_db_connection() as connection:
     assert getattr(connection, "backend_name", "") == "postgresql"
+    for existing in list_code_watchlists(connection):
+        if existing.get("name") == "CATL Quality Preview":
+            delete_code_watchlist(connection, int(existing["id"]))
+    connection.commit()
     watchlist_id = upsert_code_watchlist(
         connection,
         {
