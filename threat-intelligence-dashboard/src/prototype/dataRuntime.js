@@ -1571,7 +1571,7 @@ function fillDistribution(container, items, total, percentage = false) {
 function renderMonitorTrend(surface, trendItems) {
   const trend = (trendItems || []).map((item) => ({ date: String(item.date || ''), value: Number(item.value || 0) }))
   const values = trend.map((item) => item.value)
-  const points = chartPoints(values, { xStart: 42, xEnd: 740, yTop: 30, yBottom: 184 })
+  const points = chartPoints(values, { xStart: 42, xEnd: 718, yTop: 30, yBottom: 184 })
   query(surface, '.monitor-line')?.setAttribute('d', linePath(points))
   query(surface, '.monitor-area')?.setAttribute('d', areaPath(points, 184))
   setChartMarkers(query(surface, '.monitor-points'), 'circle', points, (circle, point) => {
@@ -1601,7 +1601,7 @@ function renderMonitorTrend(surface, trendItems) {
     node.setAttribute('x', Math.min(718, Math.max(42, point.x)).toFixed(1))
   })
   const peakValue = values.length ? Math.max(...values) : 0
-  const peakIndex = values.indexOf(peakValue)
+  const peakIndex = peakValue > 0 ? values.indexOf(peakValue) : -1
   const peakPoint = points[peakIndex]
   const peak = query(surface, '.monitor-peak-ring')
   if (peak) {
