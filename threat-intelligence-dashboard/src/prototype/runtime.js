@@ -1353,6 +1353,7 @@ export function initializePrototype() {
       if (collectorAction.startsWith('ransomware-')) return 'ransomware'
       if (collectorAction.startsWith('bot-')) return 'bot'
       if (collectorAction.startsWith('dingtalk-')) return 'dingtalk'
+      if (['monitoring-keyword-add', 'monitoring-keyword-save', 'monitoring-keyword-remove'].includes(codeAction)) return 'monitoring-keywords'
       if (['watchlist-save', 'watchlist-delete'].includes(codeAction)) return 'watchlists'
       if (['github-save', 'github-delete'].includes(codeAction)) return 'github'
       if (['changan-save', 'changan-test', 'changan-delete'].includes(codeAction)) return 'changan'
@@ -1761,6 +1762,117 @@ export function initializePrototype() {
       const table = $('#code-term-table', root)
       if (table) refreshTable(table)
       refreshObjectReadiness()
+    }
+
+    function updateMonitoringKeywordSummary() {
+      const rows = $$('.monitoring-keyword-table tbody tr', root)
+      bindText('monitoring-keyword-total', rows.length)
+      bindText('monitoring-keyword-enabled', rows.filter((row) => $('[data-monitoring-keyword-field="enabled"]', row)?.checked).length)
+      const empty = $('[data-monitoring-keyword-empty]', root)
+      if (empty) {
+        empty.hidden = rows.length > 0
+        empty.textContent = rows.length ? '' : '暂无规则，请新增第一条情报监控关键词。'
+      }
+    }
+
+    function renderMonitoringKeywords(payload = []) {
+      const body = $('[data-monitoring-keyword-list]', root)
+      if (!body) return
+      const rows = listPayload(payload, 'keywords', 'items')
+      const categoryLabels = {
+        geo_keywords: '地域关键词',
+        org_keywords: '组织关键词',
+        custom_keywords: '自定义关键词'
+      }
+      const modeLabels = {
+        contains: '包含匹配',
+        word_boundary: '英文单词边界'
+      }
+      body.replaceChildren()
+      rows.forEach((item) => {
+        const row = document.createElement('tr')
+
+        const keywordCell = document.createElement('td')
+        const keyword = document.createElement('input')
+        keyword.className = 'input'
+        keyword.dataset.monitoringKeywordField = 'keyword'
+        keyword.value = item.keyword || ''
+        keyword.placeholder = '输入企业、行业或地域关键词'
+        keywordCell.appendChild(keyword)
+
+        const categoryCell = document.createElement('td')
+        const category = document.createElement('select')
+        category.className = 'select'
+        category.dataset.monitoringKeywordField = 'category'
+        const selectedCategory = item.category || 'custom_keywords'
+        if (!categoryLabels[selectedCategory]) categoryLabels[selectedCategory] = selectedCategory
+        Object.entries(categoryLabels).forEach(([value, label]) => {
+          const option = document.createElement('option')
+          option.value = value
+          option.textContent = label
+          option.selected = value === selectedCategory
+          category.appendChild(option)
+        })
+        categoryCell.appendChild(category)
+
+        const weightCell = document.createElement('td')
+        const weight = document.createElement('input')
+        weight.className = 'input num'
+        weight.type = 'number'
+        weight.min = '0'
+        weight.max = '100'
+        weight.dataset.monitoringKeywordField = 'weight'
+        weight.value = String(Number(item.weight ?? 5))
+        weightCell.appendChild(weight)
+
+        const modeCell = document.createElement('td')
+        const mode = document.createElement('select')
+        mode.className = 'select'
+        mode.dataset.monitoringKeywordField = 'match_mode'
+        const selectedMode = item.match_mode || 'contains'
+        Object.entries(modeLabels).forEach(([value, label]) => {
+          const option = document.createElement('option')
+          option.value = value
+          option.textContent = label
+          option.selected = value === selectedMode
+          mode.appendChild(option)
+        })
+        modeCell.appendChild(mode)
+
+        const stateCell = document.createElement('td')
+        const state = document.createElement('label')
+        state.className = 'monitoring-keyword-state'
+        const enabled = document.createElement('input')
+        enabled.type = 'checkbox'
+        enabled.checked = item.enabled !== false
+        enabled.dataset.monitoringKeywordField = 'enabled'
+        const stateText = document.createElement('span')
+        stateText.textContent = enabled.checked ? '启用' : '停用'
+        state.append(enabled, stateText)
+        stateCell.appendChild(state)
+
+        const actionCell = document.createElement('td')
+        const remove = document.createElement('button')
+        remove.className = 'btn btn-ghost'
+        remove.type = 'button'
+        remove.textContent = '删除'
+        remove.dataset.codeAction = 'monitoring-keyword-remove'
+        actionCell.appendChild(remove)
+
+        row.append(keywordCell, categoryCell, weightCell, modeCell, stateCell, actionCell)
+        body.appendChild(row)
+      })
+      updateMonitoringKeywordSummary()
+    }
+
+    function readMonitoringKeywords() {
+      return $$('.monitoring-keyword-table tbody tr', root).map((row) => ({
+        keyword: $('[data-monitoring-keyword-field="keyword"]', row)?.value.trim() || '',
+        category: $('[data-monitoring-keyword-field="category"]', row)?.value || 'custom_keywords',
+        weight: Number($('[data-monitoring-keyword-field="weight"]', row)?.value || 0),
+        enabled: Boolean($('[data-monitoring-keyword-field="enabled"]', row)?.checked),
+        match_mode: $('[data-monitoring-keyword-field="match_mode"]', row)?.value || 'contains'
+      })).filter((item) => item.keyword)
     }
 
     function renderDocumentTerms(terms = []) {
@@ -2631,6 +2743,9 @@ export function initializePrototype() {
         tasks.push(['/api/code-monitoring/watchlists', renderCodeWatchlists, 'watchlists'])
         tasks.push(['/api/exposure-watchlists', renderExposureWatchlists, 'watchlists'])
       }
+      if (root.hasAttribute('data-needs-monitoring-keywords')) {
+        tasks.push(['/api/monitoring/keywords', renderMonitoringKeywords, 'monitoring-keywords'])
+      }
       if ($('.document-session-grid', root)) tasks.push(['/api/platform-sessions?module=document_exposure', renderDocumentSessions, 'document-sessions'])
       if ($('.source-access-table', root)) tasks.push(['/api/exposure-platforms?module=document_exposure', renderExposurePlatforms, 'exposure-platforms'])
       const results = await Promise.allSettled(tasks.map(async ([url, render]) => render(await request(url))))
@@ -2769,6 +2884,24 @@ export function initializePrototype() {
       if (codeAction === 'watchlist-new') {
         createCodeWatchlist()
         return
+      }
+      if (codeAction === 'monitoring-keyword-refresh') return void runAction(button, async () => renderMonitoringKeywords(await request('/api/monitoring/keywords')), '情报监控关键词已刷新')
+      if (codeAction === 'monitoring-keyword-add') {
+        renderMonitoringKeywords([...readMonitoringKeywords(), { keyword: '', category: 'custom_keywords', weight: 5, enabled: true, match_mode: 'contains' }])
+        $('.monitoring-keyword-table tbody tr:last-child input', root)?.focus()
+        return
+      }
+      if (codeAction === 'monitoring-keyword-remove') {
+        button.closest('tr')?.remove()
+        updateMonitoringKeywordSummary()
+        return
+      }
+      if (codeAction === 'monitoring-keyword-save') {
+        if (!readMonitoringKeywords().length) {
+          showToast('至少保留一条情报监控关键词')
+          return
+        }
+        return void runAction(button, async () => renderMonitoringKeywords(await request('/api/monitoring/keywords', { method: 'POST', body: JSON.stringify({ keywords: readMonitoringKeywords() }) })), '情报监控关键词已保存')
       }
       if (codeAction === 'watchlist-save') return void runAction(button, async () => {
         const saved = await request('/api/code-monitoring/watchlists', { method: 'POST', body: JSON.stringify(codeWatchlistPayload()) })
@@ -3001,6 +3134,13 @@ export function initializePrototype() {
     })
 
     root.addEventListener('change', (event) => {
+      if (event.target.matches('[data-monitoring-keyword-field]')) {
+        if (event.target.matches('[data-monitoring-keyword-field="enabled"]')) {
+          const label = event.target.closest('.monitoring-keyword-state')?.querySelector('span')
+          if (label) label.textContent = event.target.checked ? '启用' : '停用'
+        }
+        updateMonitoringKeywordSummary()
+      }
       if (event.target.matches('#code-object-name, #code-organization-name, [data-code-profile], [data-code-platform], [data-code-rule], [data-code-term-field], [data-document-field], [data-document-file-type], [data-document-term-field]')) refreshObjectReadiness()
       if (event.target.matches('[data-document-term-field="enabled"]')) {
         const label = event.target.closest('.document-term-state')?.lastElementChild

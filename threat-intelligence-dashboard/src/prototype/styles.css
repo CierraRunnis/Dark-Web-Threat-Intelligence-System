@@ -3958,6 +3958,64 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   accent-color: var(--accent);
 }
 
+.monitoring-keyword-summary {
+  display: grid;
+  grid-template-columns: 120px 120px minmax(0, 1fr);
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  background: var(--settings-tint-strong);
+}
+
+.monitoring-keyword-summary > div {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-height: 58px;
+  padding: 9px 13px;
+  border-right: 1px solid var(--border);
+}
+
+.monitoring-keyword-summary span,
+.monitoring-keyword-summary p {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.monitoring-keyword-summary strong { font-size: 18px; }
+
+.monitoring-keyword-summary p {
+  align-self: center;
+  margin: 0;
+  padding: 9px 13px;
+  line-height: 1.65;
+}
+
+.monitoring-keyword-table {
+  table-layout: fixed;
+}
+
+.monitoring-keyword-table th:nth-child(1) { width: 26%; }
+.monitoring-keyword-table th:nth-child(2) { width: 18%; }
+.monitoring-keyword-table th:nth-child(3) { width: 11%; }
+.monitoring-keyword-table th:nth-child(4) { width: 19%; }
+.monitoring-keyword-table th:nth-child(5) { width: 13%; }
+.monitoring-keyword-table th:nth-child(6) { width: 13%; }
+
+.monitoring-keyword-table .input,
+.monitoring-keyword-table .select {
+  min-height: 30px;
+  padding: 5px 7px;
+}
+
+.monitoring-keyword-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.monitoring-keyword-state input { accent-color: var(--accent); }
+
 .term-import-summary {
   margin: 8px 12px 0;
   padding: 8px 10px;
@@ -4091,6 +4149,7 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   .access-overview,
   .scan-policy-grid,
   .code-term-toolbar,
+  .monitoring-keyword-summary,
   .rule-toggle-grid {
     grid-template-columns: 1fr;
   }
@@ -4152,6 +4211,23 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   .code-term-table th:nth-child(1) { width: 48%; }
   .code-term-table th:nth-child(3) { width: 22%; }
   .code-term-table th:nth-child(5) { width: 30%; }
+
+  .monitoring-keyword-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .monitoring-keyword-table th:nth-child(2),
+  .monitoring-keyword-table td:nth-child(2),
+  .monitoring-keyword-table th:nth-child(4),
+  .monitoring-keyword-table td:nth-child(4) {
+    display: none;
+  }
+
+  .monitoring-keyword-table th:nth-child(1) { width: 42%; }
+  .monitoring-keyword-table th:nth-child(3) { width: 18%; }
+  .monitoring-keyword-table th:nth-child(5) { width: 20%; }
+  .monitoring-keyword-table th:nth-child(6) { width: 20%; }
 }
 
 /* Document monitoring integration */

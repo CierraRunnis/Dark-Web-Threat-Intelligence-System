@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from darkweb_collector.bot_assistant import BOT_PROVIDER_WECHAT_WORK_WEBHOOK, BotConfig
 from darkweb_collector.dingtalk_bot import DingTalkConfig
@@ -161,5 +162,20 @@ dingtalk_only = notifications.notify_keyword_matches_for_events(
 assert dingtalk_only["sent"] == 1
 assert deliveries.count((notifications.CHANNEL_WECHAT_WORK, current_event_id)) == 0
 assert deliveries.count((notifications.CHANNEL_DINGTALK, current_event_id)) == 1
+
+root = Path(__file__).resolve().parents[2]
+settings_html = (root / "threat-intelligence-dashboard/src/prototype/screens/settings.html").read_text(encoding="utf-8")
+settings_runtime = (root / "threat-intelligence-dashboard/src/prototype/runtime.js").read_text(encoding="utf-8")
+router_source = (root / "threat-intelligence-dashboard/src/router/index.js").read_text(encoding="utf-8")
+
+assert "screen('/settings', 'Settings', 'settings.html')" in router_source
+assert "情报监控关键词" in settings_html
+assert 'data-monitoring-keyword-list' in settings_html
+for action in ("monitoring-keyword-refresh", "monitoring-keyword-add", "monitoring-keyword-save"):
+    assert f'data-code-action="{action}"' in settings_html
+assert "renderMonitoringKeywords" in settings_runtime
+assert "readMonitoringKeywords" in settings_runtime
+assert "request('/api/monitoring/keywords')" in settings_runtime
+assert "method: 'POST', body: JSON.stringify({ keywords: readMonitoringKeywords() })" in settings_runtime
 
 print("Monitoring keyword WeCom/DingTalk channel checks passed.")
