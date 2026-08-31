@@ -3805,6 +3805,41 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   border-top: 0;
 }
 
+.scope-badge {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border: 1px solid var(--settings-line);
+  border-radius: 6px;
+  background: var(--settings-tint-strong);
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.scope-badge strong { margin-left: 4px; color: var(--accent); }
+
+[data-watchlist-scoped].is-scope-disabled {
+  position: relative;
+  opacity: .68;
+}
+
+[data-watchlist-scoped].is-scope-disabled::after {
+  content: '请先在“监测对象”中创建并保存对象';
+  position: absolute;
+  inset: 54px 12px auto;
+  z-index: 3;
+  padding: 8px 11px;
+  border: 1px dashed var(--settings-line);
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--surface) 94%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  pointer-events: none;
+}
+
 .rule-toggle-item {
   min-width: 0;
   min-height: 62px;
@@ -3957,6 +3992,35 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 .code-term-state input {
   accent-color: var(--accent);
 }
+
+.derived-term-strip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--border);
+  background: var(--settings-tint-strong);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.derived-term-strip > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.derived-term-tag {
+  padding: 3px 7px;
+  border: 1px solid var(--settings-line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.notification-object-select { width: min(320px, 100%); }
 
 .monitoring-keyword-summary {
   display: grid;

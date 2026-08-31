@@ -377,6 +377,13 @@ def _with_monitoring(event: dict[str, Any], keywords: list[dict[str, Any]]) -> d
 
 def enrich_events(connection, normalized_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keywords = _seed_keywords(connection)
+    return enrich_events_with_keywords(normalized_events, keywords)
+
+
+def enrich_events_with_keywords(
+    normalized_events: list[dict[str, Any]],
+    keywords: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     return [_with_monitoring(event, keywords) for event in normalized_events]
 
 

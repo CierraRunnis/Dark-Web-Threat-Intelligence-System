@@ -1338,6 +1338,7 @@ export function initializePrototype() {
       watchlists: [],
       selectedWatchlistId: null
     }
+    let watchlistNotificationState = {}
     let torConfigState = {}
     let torPollTimer = 0
     let torPollBusy = false
@@ -1364,6 +1365,10 @@ export function initializePrototype() {
 
     const syncMutationButton = (button) => {
       const capability = mutationCapability(button)
+      if (button.closest('[data-watchlist-scoped]') && !codeConfigState.selectedWatchlistId) {
+        button.disabled = true
+        return
+      }
       if (!capability) return
       if (!readyCapabilities.has(capability)) {
         button.dataset.capabilityGated = '1'
@@ -1376,6 +1381,17 @@ export function initializePrototype() {
       }
     }
     const syncMutationButtons = () => $$('button', root).forEach(syncMutationButton)
+    const syncObjectScopedControls = () => {
+      const disabled = !codeConfigState.selectedWatchlistId
+      $$('[data-watchlist-scoped]', root).forEach((container) => {
+        $$('input, select, textarea, button', container).forEach((control) => {
+          if (control.matches('#code-term-watchlist')) return
+          if (disabled) control.disabled = true
+          else if (!control.dataset.capabilityGated && control.dataset.runtimeUnsupported !== '1') control.disabled = false
+        })
+        container.classList.toggle('is-scope-disabled', disabled)
+      })
+    }
 
     const collectorState = document.createElement('div')
     collectorState.className = 'runtime-data-state'
@@ -1627,7 +1643,7 @@ export function initializePrototype() {
     }
 
     function fillWatchlistSelectors() {
-      const selectors = [$('#code-watchlist-select', root), $('#code-term-watchlist', root), $('#document-policy-watchlist', root)].filter(Boolean)
+      const selectors = [$('#code-watchlist-select', root), $('#code-term-watchlist', root), $('#document-policy-watchlist', root), $('#notification-watchlist-select', root)].filter(Boolean)
       selectors.forEach((select) => {
         const value = codeConfigState.selectedWatchlistId == null ? '' : String(codeConfigState.selectedWatchlistId)
         select.replaceChildren()
@@ -1762,6 +1778,20 @@ export function initializePrototype() {
       const table = $('#code-term-table', root)
       if (table) refreshTable(table)
       refreshObjectReadiness()
+    }
+
+    function renderDerivedCodeTerms(terms = []) {
+      const list = $('[data-derived-code-terms]', root)
+      if (!list) return
+      list.replaceChildren()
+      terms.forEach((item) => {
+        const tag = document.createElement('span')
+        tag.className = 'derived-term-tag'
+        tag.textContent = item.term || ''
+        list.appendChild(tag)
+      })
+      bindText('derived-code-term-count', terms.length)
+      if (!terms.length) list.textContent = codeConfigState.selectedWatchlistId ? '当前企业画像尚未生成搜索词。' : '保存监测对象后显示自动生成词。'
     }
 
     function updateMonitoringKeywordSummary() {
@@ -2026,6 +2056,7 @@ export function initializePrototype() {
       const enabled = $('#code-object-enabled', root)
       if (enabled) enabled.checked = item?.enabled ?? true
       bindText('code-watchlist-state', item?.id ? (item.enabled === false ? '已停用' : '已启用') : '新建草稿')
+      $$('[data-bind="current-watchlist-scope"]', root).forEach((node) => { node.textContent = item?.name || '未选择' })
 
       const profile = item?.enterprise_profile || {}
       $$('[data-code-profile]', root).forEach((control) => {
@@ -2049,6 +2080,9 @@ export function initializePrototype() {
       const ruleKeys = Array.isArray(item?.enabled_rule_keys) ? item.enabled_rule_keys : ['api_key', 'token', 'ak_sk', 'db_url', 'jwt_secret', 'redis_url', 'private_key', 'internal_url', 'password']
       $$('[data-code-rule]', root).forEach((control) => { control.checked = ruleKeys.includes(control.dataset.codeRule) })
       renderCodeTerms(Array.isArray(item?.terms) ? item.terms : [])
+      renderDerivedCodeTerms(Array.isArray(item?.derived_terms) ? item.derived_terms : [])
+      syncMutationButtons()
+      syncObjectScopedControls()
     }
 
     function renderCodeWatchlists(payload = {}) {
@@ -2721,13 +2755,81 @@ export function initializePrototype() {
       if (secret) secret.value = ''
     }
 
+    function renderWatchlistNotifications(payload = {}) {
+      watchlistNotificationState = payload
+      renderMonitoringKeywords(payload.keywords || [])
+      renderBot(payload.wechat || {})
+      renderDingTalk(payload.dingtalk || {})
+      const wechatEnabled = $('#watchlist-wechat-enabled', root)
+      const dingtalkEnabled = $('#watchlist-dingtalk-enabled', root)
+      const wechatConfigured = Boolean(payload.wechat?.configured)
+      const dingtalkConfigured = Boolean(payload.dingtalk?.configured)
+      if (wechatEnabled) {
+        wechatEnabled.checked = Boolean(payload.wechat_enabled)
+        wechatEnabled.disabled = !wechatConfigured
+        wechatEnabled.dataset.runtimeUnsupported = wechatConfigured ? '0' : '1'
+      }
+      if (dingtalkEnabled) {
+        dingtalkEnabled.checked = Boolean(payload.dingtalk_enabled)
+        dingtalkEnabled.disabled = !dingtalkConfigured
+        dingtalkEnabled.dataset.runtimeUnsupported = dingtalkConfigured ? '0' : '1'
+      }
+      const channelActions = [['bot-test', wechatConfigured], ['bot-delete', wechatConfigured], ['dingtalk-test', dingtalkConfigured], ['dingtalk-delete', dingtalkConfigured]]
+      channelActions.forEach(([action, configured]) => {
+        const button = $(`[data-collector-action="${action}"]`, root)
+        if (!button) return
+        button.disabled = !configured
+        button.dataset.runtimeUnsupported = configured ? '0' : '1'
+      })
+      $$('[data-bind="current-watchlist-scope"]', root).forEach((node) => {
+        node.textContent = payload.watchlist_name || codeConfigState.watchlists.find((item) => String(item.id) === String(codeConfigState.selectedWatchlistId))?.name || '未选择'
+      })
+    }
+
+    const watchlistNotificationProfilePayload = () => ({
+      keywords: readMonitoringKeywords(),
+      wechat_enabled: Boolean($('#watchlist-wechat-enabled', root)?.checked),
+      dingtalk_enabled: Boolean($('#watchlist-dingtalk-enabled', root)?.checked)
+    })
+
+    async function saveWatchlistNotificationProfile() {
+      const watchlistId = codeConfigState.selectedWatchlistId
+      if (!watchlistId) throw new Error('请先选择监测对象')
+      const payload = await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications`, {
+        method: 'PUT',
+        body: JSON.stringify(watchlistNotificationProfilePayload())
+      })
+      renderWatchlistNotifications(payload)
+      return payload
+    }
+
+    async function refreshWatchlistNotifications() {
+      const watchlistId = codeConfigState.selectedWatchlistId
+      if (!watchlistId) {
+        renderWatchlistNotifications({ keywords: [], wechat: {}, dingtalk: {} })
+        readyCapabilities.delete('monitoring-keywords')
+        readyCapabilities.delete('bot')
+        readyCapabilities.delete('dingtalk')
+        syncMutationButtons()
+        syncObjectScopedControls()
+        return
+      }
+      const payload = await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications`)
+      renderWatchlistNotifications(payload)
+      readyCapabilities.add('monitoring-keywords')
+      readyCapabilities.add('bot')
+      readyCapabilities.add('dingtalk')
+      syncMutationButtons()
+      syncObjectScopedControls()
+    }
+
     async function refreshCollector(options = {}) {
       const tasks = []
       if (root.hasAttribute('data-needs-jobs')) tasks.push(['/api/jobs', renderJobs, 'jobs'])
       if ($('#netdisk-cursor-table', root)) tasks.push(['/api/document-exposures/netdisk/source-health?source_family=netdisk_aggregator', renderNetdiskCursors, 'netdisk'])
       if (root.hasAttribute('data-needs-tor') || $('[data-bind="tor-status"]', root)) tasks.push(['/api/tor-bridge/status', renderTor, 'tor'])
-      if (root.hasAttribute('data-needs-bot') || $('[data-bind="bot-status"]', root)) tasks.push(['/api/bot/status', renderBot, 'bot'])
-      if ($('[data-bind="dingtalk-status"]', root)) tasks.push(['/api/dingtalk/status', renderDingTalk, 'dingtalk'])
+      if (root.hasAttribute('data-needs-bot')) tasks.push(['/api/bot/status', renderBot, 'bot'])
+      if ($('[data-bind="dingtalk-status"]', root) && !root.hasAttribute('data-needs-watchlist-notifications')) tasks.push(['/api/dingtalk/status', renderDingTalk, 'dingtalk'])
       if ($('[data-od-id="collector-vulnerability-sync"]', root)) {
         tasks.push(['/api/vulnerabilities/sync/status', renderVulnerabilitySync, 'vulnerability'])
         tasks.push(['/api/ransomware/sync/status', renderRansomwareSync, 'ransomware'])
@@ -2743,9 +2845,6 @@ export function initializePrototype() {
         tasks.push(['/api/code-monitoring/watchlists', renderCodeWatchlists, 'watchlists'])
         tasks.push(['/api/exposure-watchlists', renderExposureWatchlists, 'watchlists'])
       }
-      if (root.hasAttribute('data-needs-monitoring-keywords')) {
-        tasks.push(['/api/monitoring/keywords', renderMonitoringKeywords, 'monitoring-keywords'])
-      }
       if ($('.document-session-grid', root)) tasks.push(['/api/platform-sessions?module=document_exposure', renderDocumentSessions, 'document-sessions'])
       if ($('.source-access-table', root)) tasks.push(['/api/exposure-platforms?module=document_exposure', renderExposurePlatforms, 'exposure-platforms'])
       const results = await Promise.allSettled(tasks.map(async ([url, render]) => render(await request(url))))
@@ -2760,8 +2859,19 @@ export function initializePrototype() {
         if (states.every(Boolean)) readyCapabilities.add(capability)
         else readyCapabilities.delete(capability)
       })
-      syncMutationButtons()
       const failures = results.filter((result) => result.status === 'rejected')
+      if (root.hasAttribute('data-needs-watchlist-notifications')) {
+        try {
+          await refreshWatchlistNotifications()
+        } catch (error) {
+          readyCapabilities.delete('monitoring-keywords')
+          readyCapabilities.delete('bot')
+          readyCapabilities.delete('dingtalk')
+          failures.push({ status: 'rejected', reason: error })
+        }
+      }
+      syncMutationButtons()
+      syncObjectScopedControls()
       if (failures.length) {
         const message = failures.map((result) => result.reason?.message).filter(Boolean).join('；') || '真实数据接口加载失败'
         setCollectorState('error', `部分真实数据加载失败：${message}`)
@@ -2885,7 +2995,7 @@ export function initializePrototype() {
         createCodeWatchlist()
         return
       }
-      if (codeAction === 'monitoring-keyword-refresh') return void runAction(button, async () => renderMonitoringKeywords(await request('/api/monitoring/keywords')), '情报监控关键词已刷新')
+      if (codeAction === 'monitoring-keyword-refresh') return void runAction(button, refreshWatchlistNotifications, '当前对象情报监控关键词已刷新')
       if (codeAction === 'monitoring-keyword-add') {
         renderMonitoringKeywords([...readMonitoringKeywords(), { keyword: '', category: 'custom_keywords', weight: 5, enabled: true, match_mode: 'contains' }])
         $('.monitoring-keyword-table tbody tr:last-child input', root)?.focus()
@@ -2901,7 +3011,7 @@ export function initializePrototype() {
           showToast('至少保留一条情报监控关键词')
           return
         }
-        return void runAction(button, async () => renderMonitoringKeywords(await request('/api/monitoring/keywords', { method: 'POST', body: JSON.stringify({ keywords: readMonitoringKeywords() }) })), '情报监控关键词已保存')
+        return void runAction(button, saveWatchlistNotificationProfile, '当前对象情报监控关键词已保存')
       }
       if (codeAction === 'watchlist-save') return void runAction(button, async () => {
         const saved = await request('/api/code-monitoring/watchlists', { method: 'POST', body: JSON.stringify(codeWatchlistPayload()) })
@@ -3033,7 +3143,7 @@ export function initializePrototype() {
       if (codeAction === 'term-template') {
         try {
           downloadCodeTermTemplate()
-          showToast('代码检索词模板已生成')
+          showToast('附加代码检索词模板已生成')
         } catch (error) {
           showToast(error.message || '模板生成失败')
         }
@@ -3079,36 +3189,65 @@ export function initializePrototype() {
       if (action === 'ransomware-run') return void runAction(button, () => request('/api/ransomware/sync/run', { method: 'POST', body: JSON.stringify({ limit: 0 }) }), '已触发 ransomware.live 同步')
       if (action === 'ransomware-start') return void runAction(button, () => request('/api/ransomware/sync/start', { method: 'POST', body: JSON.stringify({ interval_seconds: Number($('#ransomware-interval', root)?.value || 1) * 3600, limit: 0 }) }), '已开启 ransomware.live 自动同步')
       if (action === 'ransomware-stop') return void runAction(button, () => request('/api/ransomware/sync/stop', { method: 'POST' }), '已停止 ransomware.live 自动同步')
-      if (action === 'bot-save') return void runAction(button, () => {
+      if (action === 'bot-save') return void runAction(button, async () => {
+        const watchlistId = codeConfigState.selectedWatchlistId
+        if (!watchlistId) throw new Error('请先选择监测对象')
         const botId = $('#bot-id', root)?.value.trim()
         const secret = $('#bot-secret', root)?.value.trim()
-        if (!botId || !secret) throw new Error('请输入 Bot ID 和 Secret')
-        return request('/api/bot/config', { method: 'POST', body: JSON.stringify({ provider: 'wechat_work_aibot', bot_id: botId, secret }) })
-      }, 'Bot 助手配置已保存')
+        if (botId || secret) {
+          if (!botId || !secret) throw new Error('替换企业微信配置时需同时填写 Bot ID 和 Secret')
+          await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/wechat`, { method: 'PUT', body: JSON.stringify({ bot_id: botId, secret }) })
+          const enabled = $('#watchlist-wechat-enabled', root)
+          if (enabled) enabled.checked = true
+        } else if (!watchlistNotificationState.wechat?.configured) {
+          throw new Error('请填写当前监测对象的 Bot ID 和 Secret')
+        }
+        await saveWatchlistNotificationProfile()
+      }, '当前对象企业微信配置已保存')
       if (action === 'bot-delete') {
-        if (!window.confirm('仅删除企业微信机器人保存配置和已登记会话，不会删除监测对象、企业画像或历史数据。确认删除？')) return
+        if (!window.confirm('仅删除当前监测对象的企业微信配置和已登记会话，不影响其他对象。确认删除？')) return
         return void runAction(button, async () => {
-          renderBot(await request('/api/bot/config', { method: 'DELETE' }))
+          const watchlistId = codeConfigState.selectedWatchlistId
+          if (!watchlistId) throw new Error('请先选择监测对象')
+          renderWatchlistNotifications(await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/wechat`, { method: 'DELETE' }))
           const botId = $('#bot-id', root)
           const secret = $('#bot-secret', root)
           if (botId) botId.value = ''
           if (secret) secret.value = ''
-        }, '企业微信机器人保存配置已删除')
+        }, '当前对象企业微信配置已删除')
       }
-      if (action === 'bot-test') return void runAction(button, () => request('/api/bot/send', { method: 'POST', body: JSON.stringify({ type: 'markdown', content: `### 玄鉴威胁情报平台\n> Bot 助手测试推送：${new Date().toLocaleString('zh-CN')}` }) }), 'Bot 测试消息已发送')
+      if (action === 'bot-test') return void runAction(button, () => {
+        const watchlistId = codeConfigState.selectedWatchlistId
+        if (!watchlistId) throw new Error('请先选择监测对象')
+        return request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/wechat_work/test`, { method: 'POST', body: JSON.stringify({ content: `### 玄鉴威胁情报平台\n> 当前监测对象企业微信测试：${new Date().toLocaleString('zh-CN')}` }) })
+      }, '当前对象企业微信测试消息已发送')
       if (action === 'dingtalk-save') return void runAction(button, async () => {
+        const watchlistId = codeConfigState.selectedWatchlistId
+        if (!watchlistId) throw new Error('请先选择监测对象')
         const webhookUrl = $('#dingtalk-webhook', root)?.value.trim()
         const secret = $('#dingtalk-secret', root)?.value.trim() || ''
-        if (!webhookUrl) throw new Error('请输入钉钉机器人 Webhook 或 access_token')
-        renderDingTalk(await request('/api/dingtalk/config', { method: 'POST', body: JSON.stringify({ webhook_url: webhookUrl, secret }) }))
-      }, '钉钉机器人配置已保存')
+        if (webhookUrl) {
+          await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk`, { method: 'PUT', body: JSON.stringify({ webhook_url: webhookUrl, secret }) })
+          const enabled = $('#watchlist-dingtalk-enabled', root)
+          if (enabled) enabled.checked = true
+        } else if (!watchlistNotificationState.dingtalk?.configured) {
+          throw new Error('请输入当前监测对象的钉钉 Webhook 或 access_token')
+        }
+        await saveWatchlistNotificationProfile()
+      }, '当前对象钉钉配置已保存')
       if (action === 'dingtalk-delete') {
-        if (!window.confirm('仅删除钉钉机器人保存配置，不会删除监测对象、企业画像或历史数据。确认删除？')) return
+        if (!window.confirm('仅删除当前监测对象的钉钉配置，不影响其他对象。确认删除？')) return
         return void runAction(button, async () => {
-          renderDingTalk(await request('/api/dingtalk/config', { method: 'DELETE' }))
-        }, '钉钉机器人保存配置已删除')
+          const watchlistId = codeConfigState.selectedWatchlistId
+          if (!watchlistId) throw new Error('请先选择监测对象')
+          renderWatchlistNotifications(await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk`, { method: 'DELETE' }))
+        }, '当前对象钉钉配置已删除')
       }
-      if (action === 'dingtalk-test') return void runAction(button, () => request('/api/dingtalk/send', { method: 'POST', body: JSON.stringify({ title: '玄鉴威胁情报平台测试推送', content: `### 玄鉴威胁情报平台\n> 钉钉机器人测试推送：${new Date().toLocaleString('zh-CN')}` }) }), '钉钉测试消息已发送')
+      if (action === 'dingtalk-test') return void runAction(button, () => {
+        const watchlistId = codeConfigState.selectedWatchlistId
+        if (!watchlistId) throw new Error('请先选择监测对象')
+        return request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk/test`, { method: 'POST', body: JSON.stringify({ content: `### 玄鉴威胁情报平台\n> 当前监测对象钉钉测试：${new Date().toLocaleString('zh-CN')}` }) })
+      }, '当前对象钉钉测试消息已发送')
       if (button.dataset.siteRun) return void runAction(button, async () => requireDispatched(await request('/api/jobs/run-site', { method: 'POST', body: JSON.stringify({ site_name: button.dataset.siteRun, force: true }) })), `已触发 ${button.dataset.siteRun} 运行一次`)
       if (button.dataset.siteToggle) {
         const enabled = button.dataset.enabled !== 'true'
@@ -3123,11 +3262,15 @@ export function initializePrototype() {
     const selectCodeWatchlist = (value) => {
       const item = codeConfigState.watchlists.find((candidate) => String(candidate.id) === String(value)) || null
       applyCodeWatchlist(item)
+      if (root.hasAttribute('data-needs-watchlist-notifications')) {
+        refreshWatchlistNotifications().catch((error) => showToast(error.message || '对象通知配置加载失败'))
+      }
     }
 
     $('#code-watchlist-select', root)?.addEventListener('change', (event) => selectCodeWatchlist(event.target.value))
     $('#code-term-watchlist', root)?.addEventListener('change', (event) => selectCodeWatchlist(event.target.value))
     $('#document-policy-watchlist', root)?.addEventListener('change', (event) => selectCodeWatchlist(event.target.value))
+    $('#notification-watchlist-select', root)?.addEventListener('change', (event) => selectCodeWatchlist(event.target.value))
 
     root.addEventListener('input', (event) => {
       if (event.target.matches('#code-object-name, #code-organization-name, [data-code-profile], [data-code-term-field="term"], [data-document-term-field="term"]')) refreshObjectReadiness()

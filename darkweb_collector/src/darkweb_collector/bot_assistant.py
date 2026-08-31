@@ -122,15 +122,17 @@ def _find_first_value_for_keys(value: Any, keys: set[str]) -> str:
     return ""
 
 
-def _settings_path() -> Path:
+def _settings_path(settings_path: str | Path | None = None) -> Path:
+    if settings_path:
+        return Path(settings_path).expanduser().resolve()
     raw_path = _normalize_text(os.environ.get(BOT_SETTINGS_PATH_ENV))
     if raw_path:
         return Path(raw_path).expanduser().resolve()
     return default_db_path().with_name(BOT_SETTINGS_FILE).resolve()
 
 
-def _load_settings() -> dict[str, Any]:
-    path = _settings_path()
+def _load_settings(settings_path: str | Path | None = None) -> dict[str, Any]:
+    path = _settings_path(settings_path)
     if not path.exists():
         return {}
     try:
@@ -141,8 +143,8 @@ def _load_settings() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _save_settings(payload: dict[str, Any]) -> None:
-    path = _settings_path()
+def _save_settings(payload: dict[str, Any], settings_path: str | Path | None = None) -> None:
+    path = _settings_path(settings_path)
     with _SETTINGS_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -198,6 +200,7 @@ def load_bot_config(
     secret: str | None = None,
     timeout_seconds: float | None = None,
     dry_run: bool | None = None,
+    settings_path: str | Path | None = None,
 ) -> BotConfig:
     raw_timeout = timeout_seconds
     if raw_timeout is None:
@@ -206,8 +209,9 @@ def load_bot_config(
     if raw_dry_run is None:
         raw_dry_run = os.environ.get("BOT_DRY_RUN", "0") == "1"
 
-    settings = _load_settings()
-    settings_path = str(_settings_path())
+    settings = _load_settings(settings_path)
+    resolved_settings_path = str(_settings_path(settings_path))
+    allow_environment = settings_path is None
     explicit_bot = _normalize_text(bot_id) or _normalize_text(secret) or _normalize_text(chat_id)
     explicit_webhook = _normalize_text(webhook_url) or _normalize_text(webhook_key)
 
@@ -216,12 +220,12 @@ def load_bot_config(
     saved_chat_ids = _normalize_chat_ids(settings.get("chat_ids"))
     saved_url = _normalize_text(settings.get("webhook_url"))
     saved_key = _normalize_text(settings.get("webhook_key"))
-    env_bot_id = _normalize_text(os.environ.get(BOT_ID_ENV))
-    env_bot_secret = _normalize_text(os.environ.get(BOT_SECRET_ENV))
+    env_bot_id = _normalize_text(os.environ.get(BOT_ID_ENV)) if allow_environment else ""
+    env_bot_secret = _normalize_text(os.environ.get(BOT_SECRET_ENV)) if allow_environment else ""
     env_url = _normalize_text(
-        os.environ.get(BOT_WEBHOOK_URL_ENV)
+        (os.environ.get(BOT_WEBHOOK_URL_ENV)
         or os.environ.get(WECHAT_WORK_BOT_WEBHOOK_ENV)
-        or os.environ.get(WECHAT_BOT_WEBHOOK_ENV)
+        or os.environ.get(WECHAT_BOT_WEBHOOK_ENV)) if allow_environment else ""
     )
     raw_provider = _normalize_text(provider or settings.get("provider") or os.environ.get("BOT_PROVIDER"))
     if raw_provider:
@@ -243,14 +247,14 @@ def load_bot_config(
                 _normalize_text(chat_id),
                 *saved_chat_ids,
                 _normalize_text(settings.get("chat_id")),
-                _normalize_text(os.environ.get(BOT_CHAT_ID_ENV)),
+                _normalize_text(os.environ.get(BOT_CHAT_ID_ENV)) if allow_environment else "",
             ]
         )
         resolved_chat_id = resolved_chat_ids[0] if resolved_chat_ids else ""
         resolved_websocket_url = (
             _normalize_text(websocket_url)
             or _normalize_text(settings.get("websocket_url"))
-            or _normalize_text(os.environ.get(BOT_WEBSOCKET_URL_ENV))
+            or (_normalize_text(os.environ.get(BOT_WEBSOCKET_URL_ENV)) if allow_environment else "")
             or WECHAT_WORK_AIBOT_WEBSOCKET_URL
         )
         if _normalize_text(bot_id) or _normalize_text(secret) or _normalize_text(chat_id):
@@ -291,8 +295,8 @@ def load_bot_config(
             resolved_url, resolved_key = _normalize_wechat_work_webhook(env_url)
             resolved_secret = _normalize_text(
                 secret
-                or os.environ.get(BOT_WEBHOOK_SECRET_ENV)
-                or os.environ.get(WECHAT_WORK_BOT_SECRET_ENV)
+                or (os.environ.get(BOT_WEBHOOK_SECRET_ENV) if allow_environment else "")
+                or (os.environ.get(WECHAT_WORK_BOT_SECRET_ENV) if allow_environment else "")
             )
             resolved_bot_id = ""
             resolved_chat_id = ""
@@ -326,7 +330,7 @@ def load_bot_config(
         timeout_seconds=float(raw_timeout),
         dry_run=bool(raw_dry_run),
         source=source,
-        settings_path=settings_path,
+        settings_path=resolved_settings_path,
         updated_at=updated_at,
     )
 
@@ -340,6 +344,7 @@ def set_bot_config(
     webhook_url: str = "",
     webhook_key: str = "",
     provider: str = BOT_PROVIDER_WECHAT_WORK_AIBOT,
+    settings_path: str | Path | None = None,
 ) -> dict[str, Any]:
     normalized_provider = _normalize_text(provider) or BOT_PROVIDER_WECHAT_WORK_AIBOT
     if normalized_provider == BOT_PROVIDER_WECHAT_WORK_AIBOT:
@@ -347,7 +352,7 @@ def set_bot_config(
         normalized_secret = _normalize_text(secret)
         if not normalized_bot_id or not normalized_secret:
             raise BotAssistantError("bot_id and secret are required for WeCom AI Bot")
-        existing = _load_settings()
+        existing = _load_settings(settings_path)
         same_bot = _normalize_text(existing.get("bot_id")) == normalized_bot_id
         existing_chat_ids = _normalize_chat_ids(existing.get("chat_ids")) if same_bot else ()
         chat_ids = _normalize_chat_ids([_normalize_text(chat_id), *existing_chat_ids, _normalize_text(existing.get("chat_id")) if same_bot else ""])
@@ -361,9 +366,10 @@ def set_bot_config(
         }
         if same_bot and isinstance(existing.get("target_metadata"), dict):
             payload["target_metadata"] = existing["target_metadata"]
-        _save_settings(payload)
-        status = bot_config_status(load_bot_config())
-        ensure_wecom_aibot_listener()
+        _save_settings(payload, settings_path)
+        config = load_bot_config(settings_path=settings_path)
+        status = bot_config_status(config)
+        ensure_wecom_aibot_listener(config)
         return status
 
     raw_webhook = _normalize_text(webhook_url) or _normalize_text(webhook_key)
@@ -377,8 +383,8 @@ def set_bot_config(
         "secret": _normalize_text(secret),
         "updated_at": _now_utc_iso(),
     }
-    _save_settings(payload)
-    return bot_config_status(load_bot_config())
+    _save_settings(payload, settings_path)
+    return bot_config_status(load_bot_config(settings_path=settings_path))
 
 
 def bot_config_status(config: BotConfig | None = None) -> dict[str, Any]:
@@ -407,8 +413,8 @@ def bot_config_status(config: BotConfig | None = None) -> dict[str, Any]:
     return status
 
 
-def _target_metadata() -> dict[str, dict[str, Any]]:
-    settings = _load_settings()
+def _target_metadata(settings_path: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    settings = _load_settings(settings_path)
     raw_metadata = settings.get("target_metadata")
     if not isinstance(raw_metadata, dict):
         return {}
@@ -461,21 +467,25 @@ def _extract_wecom_aibot_target(frame: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
-def register_wecom_aibot_target_from_frame(frame: dict[str, Any]) -> dict[str, Any]:
+def register_wecom_aibot_target_from_frame(
+    frame: dict[str, Any],
+    *,
+    settings_path: str | Path | None = None,
+) -> dict[str, Any]:
     target, target_type = _extract_wecom_aibot_target(frame)
     if not target:
         return {"registered": False, "reason": "target_not_found"}
 
     now = _now_utc_iso()
     with _SETTINGS_LOCK:
-        settings = _load_settings()
+        settings = _load_settings(settings_path)
         chat_ids = list(_normalize_chat_ids([*(_normalize_chat_ids(settings.get("chat_ids"))), _normalize_text(settings.get("chat_id"))]))
         added = target not in chat_ids
         if added:
             chat_ids.append(target)
         chat_ids = chat_ids[-MAX_REGISTERED_TARGETS:]
 
-        metadata = _target_metadata()
+        metadata = _target_metadata(settings_path)
         current = dict(metadata.get(target) or {})
         current.setdefault("first_seen_at", now)
         current["last_seen_at"] = now
@@ -486,7 +496,7 @@ def register_wecom_aibot_target_from_frame(frame: dict[str, Any]) -> dict[str, A
         settings["chat_ids"] = chat_ids
         settings["target_metadata"] = metadata
         settings.pop("chat_id", None)
-        _save_settings(settings)
+        _save_settings(settings, settings_path)
 
     return {
         "registered": True,
@@ -649,7 +659,7 @@ class _WeComAibotListener:
             self._client = client
 
         def handle_frame(frame: dict[str, Any]) -> None:
-            result = register_wecom_aibot_target_from_frame(frame)
+            result = register_wecom_aibot_target_from_frame(frame, settings_path=config.settings_path)
             if result.get("registered"):
                 self._mark_registered(thread=active_thread)
 
@@ -690,20 +700,29 @@ class _WeComAibotListener:
         raise BotAssistantError("WeCom AI Bot listener is not connected")
 
 
-_WECOM_AIBOT_LISTENER = _WeComAibotListener()
+_WECOM_AIBOT_LISTENERS: dict[str, _WeComAibotListener] = {}
+_WECOM_AIBOT_LISTENERS_LOCK = Lock()
+
+
+def _wecom_aibot_listener(config: BotConfig | None = None) -> _WeComAibotListener:
+    resolved = config or load_bot_config()
+    key = str(Path(resolved.settings_path or _settings_path()).resolve())
+    with _WECOM_AIBOT_LISTENERS_LOCK:
+        return _WECOM_AIBOT_LISTENERS.setdefault(key, _WeComAibotListener())
 
 
 def ensure_wecom_aibot_listener(config: BotConfig | None = None) -> None:
-    _WECOM_AIBOT_LISTENER.ensure_started(config)
+    _wecom_aibot_listener(config).ensure_started(config)
 
 
 def wecom_aibot_listener_status(config: BotConfig | None = None) -> dict[str, Any]:
-    return _WECOM_AIBOT_LISTENER.status(config)
+    return _wecom_aibot_listener(config).status(config)
 
 
-def delete_bot_config() -> dict[str, Any]:
-    path = _settings_path()
-    _WECOM_AIBOT_LISTENER.stop()
+def delete_bot_config(settings_path: str | Path | None = None) -> dict[str, Any]:
+    path = _settings_path(settings_path)
+    config = load_bot_config(settings_path=settings_path)
+    _wecom_aibot_listener(config).stop()
     with _SETTINGS_LOCK:
         deleted = path.is_file()
         try:
@@ -711,7 +730,7 @@ def delete_bot_config() -> dict[str, Any]:
         except OSError as exc:
             raise BotAssistantError(f"Unable to delete Bot settings: {exc}") from exc
     return {
-        **bot_config_status(load_bot_config()),
+        **bot_config_status(load_bot_config(settings_path=settings_path)),
         "saved_config_deleted": deleted,
     }
 
@@ -936,13 +955,14 @@ async def _post_wecom_aibot_payload_async(payload: dict[str, Any], config: BotCo
     if not chat_ids:
         raise BotAssistantError("WeCom AI Bot has no registered push target; add the bot to a group chat or send it a private message first")
     ensure_wecom_aibot_listener(config)
+    listener = _wecom_aibot_listener(config)
     try:
         responses = []
         errors = []
         for chat_id in chat_ids:
             try:
                 response = await asyncio.wait_for(
-                    _WECOM_AIBOT_LISTENER.send_to_target(chat_id, payload, config.timeout_seconds),
+                    listener.send_to_target(chat_id, payload, config.timeout_seconds),
                     timeout=max(8.0, config.timeout_seconds + 5.0),
                 )
                 responses.append({"chat_id": _mask_secret(chat_id), "response": _serialize_sdk_response(response)})
@@ -958,7 +978,7 @@ async def _post_wecom_aibot_payload_async(payload: dict[str, Any], config: BotCo
             "failed_count": len(errors),
             "responses": responses,
             "errors": errors,
-            **bot_config_status(load_bot_config()),
+            **bot_config_status(load_bot_config(settings_path=config.settings_path)),
         }
     except BotAssistantError:
         raise

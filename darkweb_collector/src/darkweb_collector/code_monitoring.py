@@ -684,6 +684,56 @@ def _domain_pattern_from_root(domain: str) -> str:
     return f"*.{normalized}" if normalized else ""
 
 
+def _derived_search_terms_from_profile(profile: dict[str, Any] | None) -> list[dict[str, Any]]:
+    source = profile if isinstance(profile, dict) else {}
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    mappings = (
+        ("official_names", "company_name"),
+        ("brand_aliases", "company_name"),
+        ("english_aliases", "company_name"),
+        ("root_domains", "domain"),
+        ("internal_system_keywords", "custom"),
+    )
+    for field, term_type in mappings:
+        for value in _normalize_profile_list(source.get(field)):
+            term = _normalize_domain_value(value) if term_type == "domain" else _normalize_text(value)
+            key = term.casefold()
+            if not term or key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "term": term,
+                    "term_type": term_type,
+                    "weight": 10,
+                    "enabled": True,
+                    "source": "enterprise_profile",
+                }
+            )
+    return rows
+
+
+def _effective_code_watch_terms(
+    enterprise_profile: dict[str, Any] | None,
+    supplemental_terms: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    rows = [*_derived_search_terms_from_profile(enterprise_profile), *(supplemental_terms or [])]
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not bool(row.get("enabled", True)):
+            continue
+        term = _normalize_text(row.get("term"))
+        term_type = _normalize_text(row.get("term_type")) or "custom"
+        key = term.casefold()
+        if not term or key in seen:
+            continue
+        seen.add(key)
+        deduped.append({**row, "term": term, "term_type": term_type})
+    return deduped
+
+
 def _metadata_enterprise_profile(metadata: dict[str, Any] | None, *, organization_name: str = "", terms: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     profile_payload = ((metadata or {}).get("enterprise_profile") or {}) if isinstance(metadata, dict) else {}
     profile_payload = profile_payload if isinstance(profile_payload, dict) else {}
@@ -767,6 +817,10 @@ def _watchlist_enterprise_profile(watchlist: dict[str, Any] | None, terms: list[
     )
 
 
+def _watchlist_stored_enterprise_profile(watchlist: dict[str, Any] | None) -> dict[str, Any]:
+    return _watchlist_enterprise_profile(watchlist, [])
+
+
 def _is_legacy_code_placeholder(payload: dict[str, Any] | None) -> bool:
     item = payload or {}
     return (
@@ -817,7 +871,7 @@ def _payload_enterprise_profile(payload: dict[str, Any] | None) -> dict[str, Any
     return _metadata_enterprise_profile(
         {"enterprise_profile": profile_payload},
         organization_name=str((payload or {}).get("organization_name") or ""),
-        terms=list((payload or {}).get("terms") or []),
+        terms=[],
     )
 
 
@@ -839,18 +893,27 @@ def _public_code_watchlist_payload(
         "name": public_name,
         "organization_name": public_organization,
     }
+    enterprise_profile = _watchlist_stored_enterprise_profile(profile_source)
+    derived_terms = _derived_search_terms_from_profile(enterprise_profile)
+    derived_keys = {_normalize_text(row.get("term")).casefold() for row in derived_terms}
+    supplemental_terms = [
+        row
+        for row in public_terms
+        if _normalize_text(row.get("term")).casefold() not in derived_keys
+    ]
     return {
         **public_row,
         "name": public_name,
         "organization_name": public_organization,
-        "terms": public_terms,
+        "terms": supplemental_terms,
+        "derived_terms": derived_terms,
         "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
         "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
         "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
         "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
         "detail_fetch": bool(metadata.get("detail_fetch", True)),
         "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
-        "enterprise_profile": _watchlist_enterprise_profile(profile_source, public_terms),
+        "enterprise_profile": enterprise_profile,
     }
 
 
@@ -4118,6 +4181,12 @@ def delete_code_watchlist_payload(watchlist_id: int) -> dict[str, Any]:
             output_dir.rmdir()
         except Exception:
             pass
+    try:
+        from darkweb_collector.watchlist_notifications import delete_watchlist_notification_files
+
+        delete_watchlist_notification_files(watchlist_id)
+    except Exception:
+        logger.exception("failed to remove watchlist notification files for %s", watchlist_id)
     return {
         "removed": True,
         "watchlistId": int(watchlist_id),
@@ -4168,9 +4237,11 @@ def _scan_code_watchlist_once_unlocked(
             raise ValueError(f"watchlist not found: {watchlist_id}")
         if not bool(watchlist.get("enabled")):
             return {"watchlist_id": watchlist_id, "scanned_terms": 0, "candidates": 0, "hits": 0, "message": "watchlist disabled"}
-        terms = [item for item in list_code_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
+        supplemental_terms = [item for item in list_code_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
     metadata = _watchlist_metadata(watchlist)
-    enterprise_profile = _watchlist_enterprise_profile(watchlist, terms)
+    stored_enterprise_profile = _watchlist_stored_enterprise_profile(watchlist)
+    terms = _effective_code_watch_terms(stored_enterprise_profile, supplemental_terms)
+    enterprise_profile = _watchlist_enterprise_profile(watchlist, supplemental_terms)
     selected_platforms = _normalize_string_list(platforms or metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS)
     selected_extensions = _normalize_code_file_extensions(file_extensions or metadata.get("file_extensions"))
     selected_search_page_limit = _normalize_search_page_limit(

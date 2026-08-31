@@ -170,6 +170,16 @@ from darkweb_collector.tor_bridge_control import (
     write_torrc,
 )
 from darkweb_collector.version_check import build_version_status, current_version_payload
+from darkweb_collector.watchlist_notifications import (
+    delete_watchlist_dingtalk_config,
+    delete_watchlist_wechat_config,
+    ensure_watchlist_wecom_listeners,
+    get_watchlist_notification_profile,
+    save_watchlist_notification_profile,
+    send_watchlist_test,
+    set_watchlist_dingtalk_config,
+    set_watchlist_wechat_config,
+)
 from darkweb_collector.self_update import (
     SelfUpdateError,
     read_public_update_status,
@@ -426,6 +436,10 @@ def warm_payloads_on_startup() -> None:
         ensure_wecom_aibot_listener()
     except Exception:
         logger.exception("failed to start WeCom AI Bot listener")
+    try:
+        ensure_watchlist_wecom_listeners()
+    except Exception:
+        logger.exception("failed to start watchlist WeCom AI Bot listeners")
     try:
         ensure_netdisk_source_health_defaults()
     except Exception:
@@ -960,6 +974,27 @@ class CodeWatchlistRequest(BaseModel):
     enabled_rule_keys: list[str] = []
     terms: list[CodeWatchTermRequest] = []
     enterprise_profile: CodeEnterpriseProfileRequest = Field(default_factory=CodeEnterpriseProfileRequest)
+
+
+class WatchlistNotificationProfileRequest(BaseModel):
+    keywords: list[MonitoringKeywordRow] = Field(default_factory=list)
+    wechat_enabled: bool = False
+    dingtalk_enabled: bool = False
+
+
+class WatchlistWeChatConfigRequest(BaseModel):
+    bot_id: str
+    secret: SecretStr
+    websocket_url: str = ""
+
+
+class WatchlistDingTalkConfigRequest(BaseModel):
+    webhook_url: SecretStr
+    secret: SecretStr = Field(default_factory=lambda: SecretStr(""))
+
+
+class WatchlistNotificationTestRequest(BaseModel):
+    content: str = ""
 
 
 class CodeScanRequest(BaseModel):
@@ -1579,6 +1614,90 @@ def delete_code_monitoring_watchlist(watchlist_id: int) -> dict:
         return delete_code_watchlist_payload(watchlist_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/code-monitoring/watchlists/{watchlist_id}/notifications")
+def code_monitoring_watchlist_notifications(watchlist_id: int) -> dict:
+    try:
+        return get_watchlist_notification_profile(watchlist_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/api/code-monitoring/watchlists/{watchlist_id}/notifications")
+def update_code_monitoring_watchlist_notifications(
+    watchlist_id: int,
+    payload: WatchlistNotificationProfileRequest,
+) -> dict:
+    try:
+        return save_watchlist_notification_profile(
+            watchlist_id,
+            keywords=[item.model_dump() for item in payload.keywords],
+            wechat_enabled=payload.wechat_enabled,
+            dingtalk_enabled=payload.dingtalk_enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.put("/api/code-monitoring/watchlists/{watchlist_id}/notifications/wechat")
+def update_code_monitoring_watchlist_wechat(
+    watchlist_id: int,
+    payload: WatchlistWeChatConfigRequest,
+) -> dict:
+    try:
+        return set_watchlist_wechat_config(
+            watchlist_id,
+            bot_id=payload.bot_id,
+            secret=payload.secret.get_secret_value(),
+            websocket_url=payload.websocket_url,
+        )
+    except (ValueError, BotAssistantError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/code-monitoring/watchlists/{watchlist_id}/notifications/wechat")
+def remove_code_monitoring_watchlist_wechat(watchlist_id: int) -> dict:
+    try:
+        return delete_watchlist_wechat_config(watchlist_id)
+    except (ValueError, BotAssistantError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk")
+def update_code_monitoring_watchlist_dingtalk(
+    watchlist_id: int,
+    payload: WatchlistDingTalkConfigRequest,
+) -> dict:
+    try:
+        return set_watchlist_dingtalk_config(
+            watchlist_id,
+            webhook_url=payload.webhook_url.get_secret_value(),
+            secret=payload.secret.get_secret_value(),
+        )
+    except (ValueError, DingTalkBotError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk")
+def remove_code_monitoring_watchlist_dingtalk(watchlist_id: int) -> dict:
+    try:
+        return delete_watchlist_dingtalk_config(watchlist_id)
+    except (ValueError, DingTalkBotError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/code-monitoring/watchlists/{watchlist_id}/notifications/{channel}/test")
+def test_code_monitoring_watchlist_notification(
+    watchlist_id: int,
+    channel: str,
+    payload: WatchlistNotificationTestRequest,
+) -> dict:
+    content = payload.content.strip() or f"### 玄鉴威胁情报平台\n> 监测对象 {watchlist_id} 通知测试"
+    try:
+        return send_watchlist_test(watchlist_id, channel, content)
+    except (ValueError, BotAssistantError, DingTalkBotError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/code-monitoring/watchlists/{watchlist_id}/scan")

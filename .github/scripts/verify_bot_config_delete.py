@@ -75,6 +75,23 @@ try:
         assert dingtalk_config_status(load_dingtalk_config())["configured"] is True
         assert unrelated_path.read_text(encoding="utf-8") == "preserve"
 
+        object_a_wecom = root / "objects" / "1" / "wecom.json"
+        object_b_wecom = root / "objects" / "2" / "wecom.json"
+        object_a_dingtalk = root / "objects" / "1" / "dingtalk.json"
+        object_b_dingtalk = root / "objects" / "2" / "dingtalk.json"
+        set_bot_config(bot_id="object-a-bot", secret="object-a-secret", settings_path=object_a_wecom)
+        set_bot_config(bot_id="object-b-bot", secret="object-b-secret", settings_path=object_b_wecom)
+        set_dingtalk_config(webhook_url="object-a-token", settings_path=object_a_dingtalk)
+        set_dingtalk_config(webhook_url="object-b-token", settings_path=object_b_dingtalk)
+        assert load_bot_config(settings_path=object_a_wecom).bot_id == "object-a-bot"
+        assert load_bot_config(settings_path=object_b_wecom).bot_id == "object-b-bot"
+        assert "object-a-token" in load_dingtalk_config(settings_path=object_a_dingtalk).webhook_url
+        assert "object-b-token" in load_dingtalk_config(settings_path=object_b_dingtalk).webhook_url
+        delete_bot_config(settings_path=object_a_wecom)
+        delete_dingtalk_config(settings_path=object_a_dingtalk)
+        assert not object_a_wecom.exists() and object_b_wecom.exists()
+        assert not object_a_dingtalk.exists() and object_b_dingtalk.exists()
+
         set_bot_config(bot_id="replacement-bot", secret="replacement-secret")
         dingtalk_deleted = delete_dingtalk_config()
         assert dingtalk_deleted["saved_config_deleted"] is True
@@ -119,6 +136,6 @@ runtime_js = (repository_root / "threat-intelligence-dashboard/src/prototype/run
 )
 assert 'data-collector-action="bot-delete"' in settings_html
 assert 'data-collector-action="dingtalk-delete"' in settings_html
-assert "request('/api/bot/config', { method: 'DELETE' })" in runtime_js
-assert "request('/api/dingtalk/config', { method: 'DELETE' })" in runtime_js
+assert "/notifications/wechat`, { method: 'DELETE' }" in runtime_js
+assert "/notifications/dingtalk`, { method: 'DELETE' }" in runtime_js
 print("Independent Bot delete buttons are wired to separate endpoints.")
