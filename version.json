@@ -1,9 +1,9 @@
 {
-  "version": "v20260831",
+  "version": "v20260831.1.0",
   "commit": "",
   "branch": "main",
   "channel": "stable",
   "data_schema": 1,
   "repository": "Threat-Intelligence-monitor/Dark-Web-Threat-Intelligence-System",
-  "updated_at": "2026-08-31T14:08:19+08:00"
+  "updated_at": "2026-08-31T17:13:29+08:00"
 }
