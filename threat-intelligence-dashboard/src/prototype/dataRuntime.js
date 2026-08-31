@@ -51,6 +51,7 @@ const INTELLIGENCE_PAGE_SIZE = 20
 const PAGE_EVENT_LIMIT = 500
 const CACHEABLE_JSON_PATHS = new Set([
   '/api/intelligence',
+  '/api/intelligence/dashboard',
   '/api/intelligence/ransomware',
   '/api/intelligence/data-leak',
   '/api/events/search',
@@ -861,57 +862,25 @@ function showLoadError(root, error) {
 
 async function hydrateDashboard(root, state) {
   const table = clearTable(root, '#dashboard-events-table')
-  const payload = await requestJson('/api/intelligence')
   const range = state.dashboardRange || query(root, '.situation-range .tab.active')?.dataset.tab || '7d'
   const days = { today: 1, '7d': 7, '30d': 30 }[range] || 7
   state.dashboardRange = range
-  const storedRansomware = payload.ransomwareEvents || []
-  const storedLeaks = payload.dataLeakEvents || []
-  const storedVulnerabilities = payload.vulnerabilityEvents || []
-  const ransomware = filterByDays(storedRansomware, days)
-  const leaks = filterByDays(storedLeaks, days)
-  const vulnerabilities = filterByDays(storedVulnerabilities, days)
-  const ransomwareStats = ransomware.length ? ransomware : storedRansomware
-  const leakStats = leaks.length ? leaks : storedLeaks
-  const ransomwareFallback = !ransomware.length && storedRansomware.length > 0
-  const leakFallback = !leaks.length && storedLeaks.length > 0
-  const all = [...ransomware, ...leaks, ...vulnerabilities]
-  const allStored = [...storedRansomware, ...storedLeaks, ...storedVulnerabilities]
-  const highRisk = all.filter((item) => ['critical', 'high'].includes(severityOf(item))).length
-  setCounts(query(root, '.situation-kpi-grid'), [leakStats.length, ransomwareStats.length, vulnerabilities.length, highRisk])
+  const payload = await requestJson(`/api/intelligence/dashboard?days=${days}`)
+  const kpis = payload.kpis || []
+  setCounts(query(root, '.situation-kpi-grid'), kpis.map((item) => item.value || 0))
 
   const dashboardCards = queryAll(root, '.situation-kpi-grid .situation-kpi')
-  const leakTop = countBy(leakStats, (item) => item.category)[0]
-  const ransomwareActors = new Set(ransomwareStats.map((item) => String(item.attacker || '').toLocaleLowerCase()).filter(Boolean)).size
-  const exploitedCount = vulnerabilities.filter((item) => item.isExploited || item.is_exploited).length
-  const kpiHighlights = [
-    leakFallback ? `累计 ${number(leakStats.length)} 条` : leakTop ? `${leakTop.name} ${number(leakTop.value)} 条` : '本期无新增',
-    ransomwareFallback ? `累计 ${number(ransomwareActors)} 个团伙` : `${number(ransomwareActors)} 个活跃团伙`,
-    `${number(exploitedCount)} 项已利用`,
-    `${number(highRisk)} 条需优先研判`,
-  ]
   dashboardCards.forEach((card, index) => {
-    setText(card, '.situation-kpi-head b', kpiHighlights[index])
+    setText(card, '.situation-kpi-head b', kpis[index]?.highlight || '本期无新增')
   })
-  ;[
-    { items: leakStats, fallback: leakFallback },
-    { items: ransomwareStats, fallback: ransomwareFallback },
-    { items: vulnerabilities, fallback: false },
-    { items: all.filter((item) => ['critical', 'high'].includes(severityOf(item))), fallback: false },
-  ].forEach(({ items, fallback }, index) => {
+  kpis.forEach((item, index) => {
     const path = query(dashboardCards[index], '.situation-spark path')
     if (!path) return
-    const timestamps = fallback ? items.map((item) => parseTimestamp(itemDateValue(item))).filter(Number.isFinite) : []
-    const referenceTime = timestamps.length ? Math.max(...timestamps) : Date.now()
-    const values = buildDailyTrend(items, days, referenceTime).map((item) => item.value)
-    const points = chartPoints(values, { xStart: 2, xEnd: 118, yTop: 4, yBottom: 24 })
+    const points = chartPoints(item.trend || [], { xStart: 2, xEnd: 118, yTop: 4, yBottom: 24 })
     path.setAttribute('d', linePath(points))
   })
 
-  const events = [...all]
-    .sort((a, b) => Number(b.priorityScore || b.riskScore || 0) - Number(a.priorityScore || a.riskScore || 0)
-      || parseTimestamp(itemDateValue(b)) - parseTimestamp(itemDateValue(a)))
-    .slice(0, 20)
+  const events = payload.priorityEvents || []
   replaceRows(table, events, (row, item) => {
     const cells = queryAll(row, 'td')
     const type = eventType(item)
@@ -927,26 +896,10 @@ async function hydrateDashboard(root, state) {
     setActionCell(cells[7], '查看', detailHref(item))
   })
 
-  const periodGeoItems = all.filter((item) => item.countryCode || item.country_code)
-  const storedGeoItems = allStored.filter((item) => item.countryCode || item.country_code)
-  const mapFallback = !periodGeoItems.length && storedGeoItems.length > 0
-  const mapItems = periodGeoItems.length ? periodGeoItems : storedGeoItems
+  const mapFallback = Boolean(payload.fallback?.geo)
   setText(root, '.situation-live-label span', mapFallback ? '累计地域分布' : '本期地域分布')
   setText(root, '.situation-region-rank .region-rank-head span:last-child', '事件数')
-  const countryMap = new Map()
-  for (const item of mapItems) {
-    const code = String(item.countryCode || item.country_code || '').toUpperCase()
-    const name = item.country && item.country !== '未知' ? item.country : item.region
-    if (!code || !name || name === '未知') continue
-    const current = countryMap.get(code) || { name, code, count: 0, score: 0 }
-    current.count += 1
-    current.score += Number(item.riskScore || item.risk_score || 0)
-    countryMap.set(code, current)
-  }
-  const countries = [...countryMap.values()]
-    .map((item) => ({ ...item, value: item.count, risk: Math.round(item.score / Math.max(1, item.count)) }))
-    .sort((a, b) => b.count - a.count || b.risk - a.risk)
-    .slice(0, 6)
+  const countries = payload.geo?.countries || []
   const maxCountryValue = Math.max(1, ...countries.map((item) => Number(item.value || 0)))
   queryAll(root, '.situation-region-rank .compact-bar').forEach((row, index) => {
     const item = countries[index]
@@ -1022,23 +975,8 @@ async function hydrateDashboard(root, state) {
   if (mapImage?.complete) positionMapAnnotations()
   else mapImage?.addEventListener('load', positionMapAnnotations, { once: true })
   queryAll(root, '.situation-route').forEach((routeNode) => { routeNode.hidden = true })
-  const averageRisk = mapItems.length
-    ? Math.round(mapItems.reduce((sum, item) => sum + Number(item.riskScore || item.risk_score || 0), 0) / mapItems.length)
-    : 0
-  setText(root, '.situation-map-foot > b strong', number(averageRisk))
-  const industryMap = new Map()
-  for (const item of all) {
-    const name = item.industry && item.industry !== '未知' ? item.industry : ''
-    if (!name) continue
-    const current = industryMap.get(name) || { name, count: 0, score: 0 }
-    current.count += 1
-    current.score += Number(item.riskScore || item.risk_score || 0)
-    industryMap.set(name, current)
-  }
-  const industries = [...industryMap.values()]
-    .map((item) => ({ ...item, value: Math.round(item.score / Math.max(1, item.count)) }))
-    .sort((a, b) => b.value - a.value || b.count - a.count)
-    .slice(0, 4)
+  setText(root, '.situation-map-foot > b strong', number(payload.geo?.averageRisk || 0))
+  const industries = payload.industries || []
   queryAll(root, '.industry-heat-list > div').forEach((row, index) => {
     const item = industries[index]
     row.hidden = !item
@@ -1062,11 +1000,7 @@ async function hydrateDashboard(root, state) {
     setText(link, ':scope > b', severityLabel(severityOf(item)))
   })
   setText(root, '.situation-watch-card .panel-header .badge', number(Math.min(4, events.length)))
-  const recentRansomware = filterByDays(payload.ransomwareEvents || [], 1)
-  const recentLeaks = filterByDays(payload.dataLeakEvents || [], 1)
-  const recentVulnerabilities = filterByDays(payload.vulnerabilityEvents || [], 1)
-  const recentDocuments = filterByDays(payload.documentExposureEvents || [], 1)
-  const distribution = [recentRansomware.length, recentLeaks.length, recentVulnerabilities.length, recentDocuments.length]
+  const distribution = payload.distribution24h || [0, 0, 0, 0]
   queryAll(root, '.situation-donut-legend .legend-item b').forEach((node, index) => {
     node.textContent = number(distribution[index] ?? 0)
   })
@@ -1078,21 +1012,16 @@ async function hydrateDashboard(root, state) {
     donut.setAttribute('aria-label', `近 24 小时情报类型分布：勒索 ${distribution[0]}，数据泄露 ${distribution[1]}，漏洞 ${distribution[2]}，文件监测 ${distribution[3]}`)
     setConicChart(donut, distribution, ['var(--danger)', 'var(--warning)', 'var(--accent)', 'var(--secondary)'], '--runtime-donut')
   }
-  const trend = payload.threatExecutiveTrend || {}
-  const requestedLength = Math.min(days, 30)
-  const labels = (trend.labels || []).slice(-requestedLength)
-  const totalTrend = (trend.total || []).slice(-requestedLength)
-  const highTrend = (trend.highRisk || []).slice(-requestedLength)
+  const trend = payload.threatTrend || {}
+  const labels = trend.labels || []
+  const totalTrend = trend.total || []
+  const highTrend = trend.highRisk || []
   const totalPoints = chartPoints(totalTrend, { xStart: 36, xEnd: 602, yTop: 28, yBottom: 160 })
   const highPoints = chartPoints(highTrend, { xStart: 36, xEnd: 602, yTop: 28, yBottom: 160 })
   query(root, '.situation-trend-chart .trend-line.total')?.setAttribute('d', linePath(totalPoints))
   query(root, '.situation-trend-chart .trend-line.critical')?.setAttribute('d', linePath(highPoints))
   query(root, '.situation-trend-chart .trend-area')?.setAttribute('d', areaPath(highPoints, 160))
-  const trendTotals = ['critical', 'high', 'medium'].map((level, index) => {
-    if (index === 0) return all.filter((item) => severityOf(item) === 'critical').length
-    if (index === 1) return all.filter((item) => severityOf(item) === 'high').length
-    return all.filter((item) => ['medium', 'low'].includes(severityOf(item))).length
-  })
+  const trendTotals = trend.severityTotals || [0, 0, 0]
   queryAll(root, '.trend-summary > div strong').forEach((node, index) => { node.textContent = number(trendTotals[index] || 0) })
   const trendLabels = ['严重', '高危', '中低危']
   queryAll(root, '.trend-summary > div span').forEach((node, index) => { node.textContent = trendLabels[index] || node.textContent })
@@ -1108,16 +1037,15 @@ async function hydrateDashboard(root, state) {
   const monitoring = payload.monitoringStatus || {}
   setText(root, '.situation-status-strip > div:first-child strong', monitoring.statusLabel || monitoring.statusValue || '监测状态未提供')
   setText(root, '.situation-status-strip > div:first-child small', monitoring.subtitle || monitoring.refreshedValue || '实时接口数据')
-  const pendingCount = all.filter((item) => ['critical', 'high'].includes(String(item.monitoringPriority || '').toLowerCase()) || Number(item.monitoringWeight || 0) > 0).length
-  const statusValues = [countries.length, industries.length, pendingCount]
+  const statusValues = payload.statusCounts || [countries.length, industries.length, 0]
   queryAll(root, '.situation-status-strip > div').slice(1).forEach((item, index) => {
     setText(item, 'strong', number(statusValues[index] || 0))
   })
 
   const cards = queryAll(root, '.rank-card')
-  fillRankCard(cards[0], countBy(ransomwareStats, (item) => item.attacker), ransomwareFallback ? '当前库累计' : '当前周期最活跃')
-  fillRankCard(cards[1], countBy(leakStats, (item) => item.leakType || item.leak_type || item.category), leakFallback ? '当前库累计' : '当前周期占比最高')
-  fillRankCard(cards[2], countBy(vulnerabilities, (item) => item.vendor), '当前周期重点厂商')
+  fillRankCard(cards[0], payload.rankings?.ransomwareActors || [], payload.fallback?.ransomware ? '当前库累计' : '当前周期最活跃')
+  fillRankCard(cards[1], payload.rankings?.sensitiveTypes || [], payload.fallback?.dataLeak ? '当前库累计' : '当前周期占比最高')
+  fillRankCard(cards[2], payload.rankings?.vulnerabilityVendors || [], '当前周期重点厂商')
   const refresh = queryAll(root, 'button[data-toast]').find((button) => button.textContent.includes('刷新总览'))
   if (refresh) {
     refresh.dataset.runtimeRefresh = 'dashboard'
@@ -1668,70 +1596,125 @@ function accessStatusMeta(item) {
   return { label, className: 'result-status processing' }
 }
 
-async function hydrateDocumentMonitoring(root, state, source) {
+const DOCUMENT_HIT_PAGE_SIZE = 20
+
+function documentHitPageUrl(root, source, page) {
+  const surface = query(root, `.${source === 'netdisk' ? 'netdisk' : 'library'}-surface`)
+  const params = new URLSearchParams({
+    source_family: source === 'netdisk' ? 'netdisk_aggregator' : 'document_library',
+    offset: String((page - 1) * DOCUMENT_HIT_PAGE_SIZE),
+    limit: String(DOCUMENT_HIT_PAGE_SIZE),
+  })
+  queryAll(surface, '[data-document-hit-filter]').forEach((control) => {
+    const key = control.dataset.documentHitFilter
+    const value = String(control.value || '').trim()
+    if (!value) return
+    if (key === 'recent_days') params.set('recent_hours', String(Math.max(1, Number(value)) * 24))
+    else params.set(key, value)
+  })
+  return `/api/document-exposures/page?${params.toString()}`
+}
+
+async function reloadDocumentMonitoringData(root, state, source, pageState) {
+  if (pageState.loading) return
+  pageState.loading = true
   const sourceFamily = source === 'netdisk' ? 'netdisk_aggregator' : 'document_library'
   const tableSelector = source === 'netdisk' ? '#netdisk-table' : '#library-table'
   const table = clearTable(root, tableSelector)
-  const [summary, items] = await Promise.all([
-    requestJson(`/api/document-exposures/summary?source_family=${sourceFamily}`),
-    requestJson(`/api/document-exposures?source_family=${sourceFamily}&limit=200`),
-  ])
   const surface = query(root, `.${source === 'netdisk' ? 'netdisk' : 'library'}-surface`)
-  replaceFilterOptions(
-    root,
-    `[data-filter-target="${source === 'netdisk' ? 'netdisk-table' : 'library-table'}"][data-filter-key="${source === 'netdisk' ? 'platform' : 'source'}"]`,
-    source === 'netdisk' ? '全部平台' : '全部来源',
-    items.map((item) => ({ value: item.platform, label: item.platformLabel || item.platform })),
-  )
-  const kpis = source === 'netdisk'
-    ? [summary.totalHits, summary.highRiskCount, items.filter((item) => item.shareCode).length, summary.invalidCount]
-    : [summary.publicCount, summary.totalHits, summary.highRiskCount, summary.recentCount]
-  setCounts(query(surface, '.monitor-kpi-grid'), kpis)
-  replaceRows(table, items, (row, item) => {
-    const cells = queryAll(row, 'td')
-    const severity = severityOf(item)
-    row.dataset.platform = item.platform
-    if (source === 'library') row.dataset.source = item.platform
-    row.dataset.severity = severity
-    row.dataset.discoveredAt = item.lastSeenAt || item.firstSeenAt || ''
-    if (source === 'netdisk') {
-      setCell(cells[0], item.primaryFileName || item.title)
-      setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
-      setClassTextCell(cells[2], item.shareCode ? '口令分享' : '公开分享', `share-type ${item.shareCode ? 'password' : 'public'}`)
-      setCell(cells[3], item.shareCode || '—')
-      setCell(cells[4], item.primaryFileSize || '—')
-      setCell(cells[5], (item.matchedTerms || []).map((term) => term.term).join('、'))
-      setBadgeCell(cells[6], severityLabel(severity), severity)
-      setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
-      const status = accessStatusMeta(item)
-      setClassTextCell(cells[8], status.label, status.className)
-      setActionCell(cells[9], '查看', `/document-exposure/detail/netdisk_aggregator/${encodeURIComponent(item.id)}`)
-    } else {
-      setDocumentTitleCell(cells[0], item.title, item.primaryFileType)
-      setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
-      setCell(cells[2], item.primaryFileType || '—')
-      setCell(cells[3], '—')
-      setCell(cells[4], (item.matchedTerms || []).map((term) => term.term).join('、'))
-      setCell(cells[5], item.shareOwner || '—')
-      setBadgeCell(cells[6], severityLabel(severity), severity)
-      setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
-      const review = item.reviewStatusLabel || reviewStatusLabel(item.reviewStatus)
-      const access = item.accessStateLabel || ''
-      setResultStatusCell(cells[8], [review, access && access !== review ? access : ''].filter(Boolean).join(' · '))
-      setActionCell(cells[9], '详情', `/document-exposure/detail/document_library/${encodeURIComponent(item.id)}`)
+  try {
+    const [summary, pagePayload] = await Promise.all([
+      pageState.summary || requestJson(`/api/document-exposures/summary?source_family=${sourceFamily}`),
+      requestJson(documentHitPageUrl(root, source, pageState.page)),
+    ])
+    pageState.summary = summary
+    const items = pagePayload.items || []
+    setCodeServerPage(table, pagePayload)
+    replaceFilterOptions(
+      root,
+      `[data-filter-target="${source === 'netdisk' ? 'netdisk-table' : 'library-table'}"][data-filter-key="${source === 'netdisk' ? 'platform' : 'source'}"]`,
+      source === 'netdisk' ? '全部平台' : '全部来源',
+      summary.platformOptions || [],
+    )
+    const kpis = source === 'netdisk'
+      ? [summary.totalHits, summary.highRiskCount, summary.passwordShareCount, summary.invalidCount]
+      : [summary.publicCount, summary.totalHits, summary.highRiskCount, summary.recentCount]
+    setCounts(query(surface, '.monitor-kpi-grid'), kpis)
+    replaceRows(table, items, (row, item) => {
+      const cells = queryAll(row, 'td')
+      const severity = severityOf(item)
+      row.dataset.platform = item.platform
+      if (source === 'library') row.dataset.source = item.platform
+      row.dataset.severity = severity
+      row.dataset.discoveredAt = item.lastSeenAt || item.firstSeenAt || ''
+      if (source === 'netdisk') {
+        setCell(cells[0], item.primaryFileName || item.title)
+        setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
+        setClassTextCell(cells[2], item.shareCode ? '口令分享' : '公开分享', `share-type ${item.shareCode ? 'password' : 'public'}`)
+        setCell(cells[3], item.shareCode || '—')
+        setCell(cells[4], item.primaryFileSize || '—')
+        setCell(cells[5], (item.matchedTerms || []).map((term) => term.term).join('、'))
+        setBadgeCell(cells[6], severityLabel(severity), severity)
+        setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
+        const status = accessStatusMeta(item)
+        setClassTextCell(cells[8], status.label, status.className)
+        setActionCell(cells[9], '查看', `/document-exposure/detail/netdisk_aggregator/${encodeURIComponent(item.id)}`)
+      } else {
+        setDocumentTitleCell(cells[0], item.title, item.primaryFileType)
+        setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
+        setCell(cells[2], item.primaryFileType || '—')
+        setCell(cells[3], '—')
+        setCell(cells[4], (item.matchedTerms || []).map((term) => term.term).join('、'))
+        setCell(cells[5], item.shareOwner || '—')
+        setBadgeCell(cells[6], severityLabel(severity), severity)
+        setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
+        const review = item.reviewStatusLabel || reviewStatusLabel(item.reviewStatus)
+        const access = item.accessStateLabel || ''
+        setResultStatusCell(cells[8], [review, access && access !== review ? access : ''].filter(Boolean).join(' · '))
+        setActionCell(cells[9], '详情', `/document-exposure/detail/document_library/${encodeURIComponent(item.id)}`)
+      }
+    })
+    setText(surface, '.monitor-donut strong', number(summary.totalHits))
+    setText(surface, '.monitor-donut-card .meta', `总计 ${number(summary.totalHits)}`)
+    const distribution = summary.platformDistribution || []
+    fillSourceDistribution(query(surface, '.monitor-donut-legend'), distribution, summary.totalHits, source === 'library')
+    setConicChart(query(surface, '.monitor-donut'), distribution.map((item) => item.value), ['var(--accent)', 'var(--warning)', 'var(--secondary)', 'var(--success)', 'var(--violet)'])
+    renderMonitorTrend(surface, summary.trend || [])
+    markExports(surface, state, [tableSelector])
+    if (source === 'library') {
+      const batchReview = queryAll(surface, 'button[data-toast]').find((button) => button.textContent.includes('批量复核'))
+      if (batchReview) setActionAvailable(batchReview, false, '后端未提供批量复核接口')
     }
-  })
-  setText(surface, '.monitor-donut strong', number(summary.totalHits))
-  setText(surface, '.monitor-donut-card .meta', `总计 ${number(summary.totalHits)}`)
-  const distribution = summary.platformDistribution || []
-  fillSourceDistribution(query(surface, '.monitor-donut-legend'), distribution, summary.totalHits, source === 'library')
-  setConicChart(query(surface, '.monitor-donut'), distribution.map((item) => item.value), ['var(--accent)', 'var(--warning)', 'var(--secondary)', 'var(--success)', 'var(--violet)'])
-  renderMonitorTrend(surface, summary.trend || [])
-  markExports(surface, state, [tableSelector])
-  if (source === 'library') {
-    const batchReview = queryAll(surface, 'button[data-toast]').find((button) => button.textContent.includes('批量复核'))
-    if (batchReview) setActionAvailable(batchReview, false, '后端未提供批量复核接口')
+  } finally {
+    pageState.loading = false
   }
+}
+
+function setupDocumentMonitoringFilters(root, source, pageState, reload) {
+  const surface = query(root, `.${source === 'netdisk' ? 'netdisk' : 'library'}-surface`)
+  let searchTimer = null
+  queryAll(surface, '[data-document-hit-filter]').forEach((control) => {
+    const eventName = control.dataset.documentHitFilter === 'query' ? 'input' : 'change'
+    control.addEventListener(eventName, () => {
+      window.clearTimeout(searchTimer)
+      searchTimer = window.setTimeout(() => {
+        pageState.page = 1
+        reload()
+      }, eventName === 'input' ? 300 : 0)
+    })
+  })
+  const table = query(root, source === 'netdisk' ? '#netdisk-table' : '#library-table')
+  table?.addEventListener('prototype:server-page', (event) => {
+    pageState.page = Math.max(1, Number(event.detail?.page || 1))
+    reload()
+  })
+}
+
+async function hydrateDocumentMonitoring(root, state, source) {
+  const pageState = { page: 1, loading: false, summary: null }
+  const reload = () => reloadDocumentMonitoringData(root, state, source, pageState)
+  setupDocumentMonitoringFilters(root, source, pageState, reload)
+  await reload()
 }
 
 const CODE_CONTINUOUS_INTERVAL_SECONDS = 3600

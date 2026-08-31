@@ -2483,6 +2483,27 @@ function Ensure-DashboardDependencies {
     Set-Content -LiteralPath $PackageLockStamp -Value $expectedHash -Encoding ASCII
 }
 
+function Build-Dashboard {
+    $null = Ensure-NodeRuntime
+    $node = $script:NodeExePath
+    $viteCli = Join-Path $DashboardRoot "node_modules\vite\bin\vite.js"
+    Write-Info "Building optimized dashboard assets"
+    Push-Location $DashboardRoot
+    try {
+        & $node $viteCli build
+        if ($LASTEXITCODE -ne 0) {
+            Stop-WithError "Failed to build optimized dashboard assets."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+    $distIndex = Join-Path $DashboardDistDir "index.html"
+    if (-not (Test-Path -LiteralPath $distIndex -PathType Leaf)) {
+        Stop-WithError "Dashboard build did not produce dist/index.html."
+    }
+}
+
 function Ensure-RuntimeDatabase {
     Ensure-Directory (Split-Path -Parent $CollectorDbPath)
     Ensure-Directory $CollectorOutputRoot
@@ -2706,6 +2727,7 @@ function Ensure-Environment {
     Invoke-TimedStep "Ensure-CollectorDependencies" { Ensure-CollectorDependencies }
     Invoke-TimedStep "Ensure-PlaywrightRuntime" { Ensure-PlaywrightRuntime }
     Invoke-TimedStep "Ensure-DashboardDependencies" { Ensure-DashboardDependencies }
+    Invoke-TimedStep "Build-Dashboard" { Build-Dashboard }
     Invoke-TimedStep "Ensure-PostgreSqlMigrationTarget" { Ensure-PostgreSqlMigrationTarget }
     Invoke-TimedStep "Ensure-RuntimeDatabase" { Ensure-RuntimeDatabase }
     Invoke-TimedStep "Ensure-SiteConfigsLoad" { Ensure-SiteConfigsLoad }
@@ -2794,7 +2816,7 @@ function Start-Services {
         Write-Warn "Darkweb API did not return configured site health within ${ServiceWaitSeconds}s"
     }
 
-    $records += Start-ManagedProcess -Name "frontend" -WorkingDirectory $DashboardRoot -Body "& $node $viteCli --host 0.0.0.0 --port $FrontendPort --strictPort"
+    $records += Start-ManagedProcess -Name "frontend" -WorkingDirectory $DashboardRoot -Body "& $node $viteCli preview --host 0.0.0.0 --port $FrontendPort --strictPort"
     $records += Start-ManagedProcess -Name "worker-seed" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q seed_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"seed-http-$PID@%h`""
     $records += Start-ManagedProcess -Name "worker-detail" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q detail_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"detail-http-$PID@%h`""
     for ($index = 1; $index -le $BrowserConcurrency; $index++) {

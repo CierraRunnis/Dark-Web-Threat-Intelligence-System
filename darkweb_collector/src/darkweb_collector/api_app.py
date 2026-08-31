@@ -99,6 +99,7 @@ from darkweb_collector.document_exposure import (
     build_document_exposure_summary,
     ensure_netdisk_source_health_defaults,
     list_document_exposures_payload,
+    list_document_exposures_page_payload,
     list_netdisk_source_health_payload,
     list_netdisk_source_states_payload,
     list_watchlists_payload,
@@ -692,7 +693,11 @@ def intelligence() -> dict:
 
 
 @app.get("/api/intelligence/{page}")
-def intelligence_page(page: str, limit: int | None = None) -> dict:
+def intelligence_page(page: str, limit: int | None = None, days: int = 7) -> dict:
+    if page == "dashboard":
+        if days not in {1, 7, 30}:
+            raise HTTPException(status_code=422, detail="days 必须是 1、7 或 30")
+        return _reload_api_modules().build_dashboard_payload(days=days)
     if limit is not None and not 1 <= limit <= 2000:
         raise HTTPException(status_code=422, detail="limit 必须在 1 到 2000 之间")
     try:
@@ -1499,6 +1504,33 @@ def document_exposures(
 @app.get("/api/document-exposures/summary")
 def document_exposure_summary(source_family: str | None = None) -> dict:
     return build_document_exposure_summary(source_family=source_family)
+
+
+@app.get("/api/document-exposures/page")
+def document_exposures_page(
+    watchlist_id: int | None = None,
+    review_status: str | None = None,
+    platform: str | None = None,
+    access_state: str | None = None,
+    source_family: str | None = None,
+    severity: str | None = None,
+    recent_hours: int | None = None,
+    query: str | None = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> dict:
+    return list_document_exposures_page_payload(
+        watchlist_id=watchlist_id,
+        review_status=review_status,
+        platform=platform,
+        access_state=access_state,
+        source_family=source_family,
+        severity=severity,
+        recent_hours=recent_hours,
+        query=query,
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.get("/api/document-exposures/netdisk/source-states")
