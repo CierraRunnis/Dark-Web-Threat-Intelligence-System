@@ -11,6 +11,7 @@ import logging
 import os
 from pathlib import Path
 import re
+from threading import Lock
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -68,6 +69,9 @@ from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
 logger = logging.getLogger("darkweb_collector.document_exposure")
 SHANGHAI_TZ = timezone(timedelta(hours=8))
+_DOCUMENT_EXPOSURE_PAYLOAD_CACHE_LOCK = Lock()
+_DOCUMENT_EXPOSURE_PAYLOAD_CACHE_TTL_SECONDS = 3600.0
+_DOCUMENT_EXPOSURE_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
 SENSITIVE_KEYWORDS = (
     "内部",
     "机密",
@@ -3425,7 +3429,7 @@ def scan_watchlist_once(
     return result
 
 
-def list_document_exposures_payload(
+def _build_document_exposures_payload(
     *,
     watchlist_id: int | None = None,
     review_status: str | None = None,
@@ -3564,6 +3568,144 @@ def list_document_exposures_payload(
     if source_family:
         payloads = [item for item in payloads if item.get("sourceFamily") == source_family]
     return payloads
+
+
+def _document_exposure_payload_cache_revision() -> tuple[Any, ...]:
+    ensure_default_watchlist()
+    with get_db_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM document_hits) AS hit_count,
+                (SELECT COALESCE(MAX(id), 0) FROM document_hits) AS max_hit_id,
+                (SELECT COALESCE(MAX(last_seen_at), '') FROM document_hits) AS max_hit_seen_at,
+                (SELECT COALESCE(MAX(last_snapshot_id), 0) FROM document_hits) AS max_snapshot_id,
+                (SELECT COUNT(*) FROM document_hit_reviews) AS review_count,
+                (SELECT COALESCE(MAX(id), 0) FROM document_hit_reviews) AS max_review_id,
+                (SELECT COALESCE(MAX(updated_at), '') FROM exposure_watchlists) AS watchlist_updated_at,
+                (SELECT COUNT(*) FROM exposure_watch_terms) AS term_count,
+                (SELECT COALESCE(MAX(updated_at), '') FROM exposure_watch_terms) AS term_updated_at
+            """
+        ).fetchone()
+    if row is None:
+        return ()
+    fields = (
+        "hit_count",
+        "max_hit_id",
+        "max_hit_seen_at",
+        "max_snapshot_id",
+        "review_count",
+        "max_review_id",
+        "watchlist_updated_at",
+        "term_count",
+        "term_updated_at",
+    )
+    return tuple(row[field] for field in fields)
+
+
+def _cached_document_exposure_payloads(source_family: str | None) -> list[dict[str, Any]]:
+    normalized_family = _normalize_text(source_family)
+    revision = _document_exposure_payload_cache_revision()
+    cache_key = (normalized_family, revision)
+    now = time.monotonic()
+    with _DOCUMENT_EXPOSURE_PAYLOAD_CACHE_LOCK:
+        cached = _DOCUMENT_EXPOSURE_PAYLOAD_CACHE.get(cache_key)
+        if cached and now - cached[0] <= _DOCUMENT_EXPOSURE_PAYLOAD_CACHE_TTL_SECONDS:
+            return [dict(item) for item in cached[1]]
+        payloads = _build_document_exposures_payload(source_family=normalized_family or None, limit=None)
+        for key in list(_DOCUMENT_EXPOSURE_PAYLOAD_CACHE):
+            if key[1] != revision:
+                _DOCUMENT_EXPOSURE_PAYLOAD_CACHE.pop(key, None)
+        _DOCUMENT_EXPOSURE_PAYLOAD_CACHE[cache_key] = (time.monotonic(), payloads)
+        return [dict(item) for item in payloads]
+
+
+def _document_exposure_matches_query(item: dict[str, Any], query: str) -> bool:
+    needle = _normalize_text(query).casefold()
+    if not needle:
+        return True
+    matched_terms = " ".join(
+        _normalize_text(term.get("term"))
+        for term in (item.get("matchedTerms") or [])
+        if isinstance(term, dict)
+    )
+    haystack = " ".join(
+        _normalize_text(value)
+        for value in (
+            item.get("title"),
+            item.get("primaryFileName"),
+            item.get("canonicalUrl"),
+            item.get("platformLabel"),
+            item.get("shareOwner"),
+            matched_terms,
+        )
+    ).casefold()
+    return needle in haystack
+
+
+def _document_exposure_is_recent(item: dict[str, Any], recent_hours: int | None) -> bool:
+    if not recent_hours:
+        return True
+    text = _normalize_text(item.get("lastSeenAt") or item.get("firstSeenAt"))
+    if not text:
+        return False
+    try:
+        observed_at = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    return observed_at >= datetime.now(timezone.utc) - timedelta(hours=max(1, int(recent_hours)))
+
+
+def list_document_exposures_payload(
+    *,
+    watchlist_id: int | None = None,
+    review_status: str | None = None,
+    platform: str | None = None,
+    access_state: str | None = None,
+    source_family: str | None = None,
+    severity: str | None = None,
+    recent_hours: int | None = None,
+    query: str | None = None,
+    offset: int = 0,
+    limit: int | None = 200,
+) -> list[dict[str, Any]]:
+    payloads = _cached_document_exposure_payloads(source_family)
+    if watchlist_id is not None:
+        payloads = [item for item in payloads if int(item.get("watchlistId") or 0) == int(watchlist_id)]
+    if review_status:
+        payloads = [item for item in payloads if item.get("reviewStatus") == review_status]
+    if platform:
+        payloads = [item for item in payloads if item.get("platform") == platform]
+    if access_state:
+        payloads = [item for item in payloads if item.get("accessState") == access_state]
+    if severity:
+        payloads = [item for item in payloads if item.get("severity") == severity]
+    if recent_hours:
+        payloads = [item for item in payloads if _document_exposure_is_recent(item, recent_hours)]
+    if query:
+        payloads = [item for item in payloads if _document_exposure_matches_query(item, query)]
+    start = max(0, int(offset or 0))
+    end = start + max(1, int(limit)) if limit else None
+    return payloads[start:end]
+
+
+def list_document_exposures_page_payload(
+    *,
+    offset: int = 0,
+    limit: int = 20,
+    **filters: Any,
+) -> dict[str, Any]:
+    filtered = list_document_exposures_payload(limit=None, **filters)
+    safe_limit = min(100, max(1, int(limit)))
+    safe_offset = max(0, int(offset))
+    return {
+        "items": filtered[safe_offset : safe_offset + safe_limit],
+        "total": len(filtered),
+        "offset": safe_offset,
+        "limit": safe_limit,
+    }
 
 
 def build_document_exposure_detail(hit_id: int) -> dict[str, Any] | None:
@@ -3859,7 +4001,7 @@ def add_document_exposure_review(hit_id: int, *, status: str, reviewer: str = ""
 
 
 def build_document_exposure_summary(source_family: str | None = None) -> dict[str, Any]:
-    rows = list_document_exposures_payload(limit=500, source_family=source_family)
+    rows = list_document_exposures_payload(limit=None, source_family=source_family)
     high_risk = [row for row in rows if int(row.get("riskScore") or 0) >= 75]
     login_required = [row for row in rows if row.get("accessState") == "login_required"]
     platforms = sorted({row.get("platform") for row in rows if row.get("platform")})
@@ -3893,6 +4035,7 @@ def build_document_exposure_summary(source_family: str | None = None) -> dict[st
     recent_count = 0
     invalid_count = 0
     public_count = 0
+    password_share_count = 0
     for row in rows:
         bucket = _format_day_bucket(row.get("lastSeenAt") or row.get("firstSeenAt"))
         if bucket in trend_counter:
@@ -3911,6 +4054,8 @@ def build_document_exposure_summary(source_family: str | None = None) -> dict[st
         review_distribution[review_state] = review_distribution.get(review_state, 0) + 1
         if access_state == "public":
             public_count += 1
+        if row.get("shareCode"):
+            password_share_count += 1
         if access_state in {"removed", "forbidden"}:
             invalid_count += 1
         file_total += int(row.get("fileCount") or 0)
@@ -3938,6 +4083,7 @@ def build_document_exposure_summary(source_family: str | None = None) -> dict[st
         "lastErrorCount": int(latest_scan.get("errorCount") or 0),
         "recentCount": recent_count,
         "publicCount": public_count,
+        "passwordShareCount": password_share_count,
         "invalidCount": invalid_count,
         "fileCount": file_total,
         "evidenceCount": evidence_total,
@@ -3958,6 +4104,20 @@ def build_document_exposure_summary(source_family: str | None = None) -> dict[st
             for key, value in sorted(review_distribution.items(), key=lambda item: item[1], reverse=True)
         ],
         "keywordTop": [{"name": key, "value": value} for key, value in sorted(keyword_top.items(), key=lambda item: item[1], reverse=True)[:10]],
+        "platformOptions": [
+            {
+                "value": key,
+                "label": next(
+                    (
+                        str(item.get("platformLabel") or key)
+                        for item in rows
+                        if item.get("platform") == key
+                    ),
+                    key,
+                ),
+            }
+            for key in platforms
+        ],
     }
 
 
