@@ -11,6 +11,7 @@ import { ASSIGNABLE_MODULE_KEYS, MODULE_KEYS } from '@/config/permissions'
 import PrototypeScreen from '@/views/PrototypeScreen.vue'
 import DataMigration from '@/views/DataMigration.vue'
 import AccountManagement from '@/views/AccountManagement.vue'
+import DocumentExposureScans from '@/views/DocumentExposureScans.vue'
 
 const screen = (path, name, file, meta = {}) => ({
   path,
@@ -35,6 +36,7 @@ const routes = [
   screen('/document-exposure/detail/netdisk_aggregator/:hitId', 'DocumentExposureNetdiskDetail', 'netdisk-detail.html', { source: 'netdisk' }),
   screen('/document-exposure/detail/document_library/:hitId', 'DocumentExposureLibraryDetail', 'library-detail.html', { source: 'library' }),
   screen('/document-exposure/code-monitoring/detail/:hitId', 'CodeMonitoringDetail', 'code-detail.html', { source: 'code' }),
+  { path: '/document-exposure/scans', name: 'DocumentExposureScans', component: DocumentExposureScans, meta: { layout: 'prototype-vue' } },
   screen('/collector-control/sites', 'CollectorSites', 'collector-sites.html'),
   screen('/collector-control/sync', 'CollectorSync', 'collector-sync.html'),
   screen('/collector-control/runtime', 'CollectorRuntime', 'collector-runtime.html'),
@@ -56,7 +58,6 @@ const routes = [
   { path: '/document-exposure/netdisk/settings', redirect: '/settings?tab=objects&module=netdisk' },
   { path: '/document-exposure/document-library/settings', redirect: '/settings?tab=objects&module=library' },
   { path: '/document-exposure/code-monitoring/settings', redirect: '/settings?tab=objects&module=code' },
-  { path: '/document-exposure/scans', redirect: '/collector-control/failures' },
   { path: '/document-exposure/results', redirect: '/document-exposure/netdisk' },
   { path: '/document-exposure/code-monitoring/scans', redirect: '/collector-control/failures' },
   { path: '/:pathMatch(.*)*', redirect: '/' },
