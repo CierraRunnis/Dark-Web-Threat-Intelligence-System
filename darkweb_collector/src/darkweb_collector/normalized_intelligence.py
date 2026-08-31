@@ -3125,11 +3125,11 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
     connection.commit()
     refreshed_events = load_normalized_events(connection, refresh=False)
     try:
-        from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_events
+        from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_watchlists
 
         new_events = _new_normalized_events(refreshed_events, set(previous_resources))
         if new_events:
-            notify_keyword_matches_for_events(connection, new_events)
+            notify_keyword_matches_for_watchlists(connection, new_events)
     except Exception:
         logger.exception("failed to send monitoring keyword notifications after normalized intelligence refresh")
     return refreshed_events

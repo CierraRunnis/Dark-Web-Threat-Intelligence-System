@@ -52,15 +52,17 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _settings_path() -> Path:
+def _settings_path(settings_path: str | Path | None = None) -> Path:
+    if settings_path:
+        return Path(settings_path).expanduser().resolve()
     configured = _normalize_text(os.environ.get(DINGTALK_SETTINGS_PATH_ENV))
     if configured:
         return Path(configured).expanduser().resolve()
     return default_db_path().with_name(DINGTALK_SETTINGS_FILE).resolve()
 
 
-def _load_settings() -> dict[str, Any]:
-    path = _settings_path()
+def _load_settings(settings_path: str | Path | None = None) -> dict[str, Any]:
+    path = _settings_path(settings_path)
     if not path.exists():
         return {}
     try:
@@ -71,8 +73,8 @@ def _load_settings() -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _save_settings(payload: dict[str, Any]) -> None:
-    path = _settings_path()
+def _save_settings(payload: dict[str, Any], settings_path: str | Path | None = None) -> None:
+    path = _settings_path(settings_path)
     with _SETTINGS_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -122,12 +124,14 @@ def load_dingtalk_config(
     secret: str | None = None,
     timeout_seconds: float | None = None,
     dry_run: bool | None = None,
+    settings_path: str | Path | None = None,
 ) -> DingTalkConfig:
-    settings = _load_settings()
+    settings = _load_settings(settings_path)
+    allow_environment = settings_path is None
     saved_webhook = _normalize_text(settings.get("webhook_url"))
     saved_secret = _normalize_text(settings.get("secret"))
-    env_webhook = _normalize_text(os.environ.get(DINGTALK_WEBHOOK_ENV))
-    env_secret = _normalize_text(os.environ.get(DINGTALK_SECRET_ENV))
+    env_webhook = _normalize_text(os.environ.get(DINGTALK_WEBHOOK_ENV)) if allow_environment else ""
+    env_secret = _normalize_text(os.environ.get(DINGTALK_SECRET_ENV)) if allow_environment else ""
     explicit_webhook = _normalize_text(webhook_url)
 
     resolved_webhook = explicit_webhook or saved_webhook or env_webhook
@@ -159,12 +163,17 @@ def load_dingtalk_config(
         timeout_seconds=float(resolved_timeout),
         dry_run=bool(resolved_dry_run),
         source=source,
-        settings_path=str(_settings_path()),
+        settings_path=str(_settings_path(settings_path)),
         updated_at=updated_at,
     )
 
 
-def set_dingtalk_config(*, webhook_url: str, secret: str = "") -> dict[str, Any]:
+def set_dingtalk_config(
+    *,
+    webhook_url: str,
+    secret: str = "",
+    settings_path: str | Path | None = None,
+) -> dict[str, Any]:
     normalized_webhook = _normalize_webhook(webhook_url)
     if not normalized_webhook:
         raise DingTalkBotError("DingTalk webhook is required")
@@ -173,13 +182,14 @@ def set_dingtalk_config(*, webhook_url: str, secret: str = "") -> dict[str, Any]
             "webhook_url": normalized_webhook,
             "secret": _normalize_text(secret),
             "updated_at": _now_utc_iso(),
-        }
+        },
+        settings_path,
     )
-    return dingtalk_config_status(load_dingtalk_config())
+    return dingtalk_config_status(load_dingtalk_config(settings_path=settings_path))
 
 
-def delete_dingtalk_config() -> dict[str, Any]:
-    path = _settings_path()
+def delete_dingtalk_config(settings_path: str | Path | None = None) -> dict[str, Any]:
+    path = _settings_path(settings_path)
     with _SETTINGS_LOCK:
         deleted = path.is_file()
         try:
@@ -187,7 +197,7 @@ def delete_dingtalk_config() -> dict[str, Any]:
         except OSError as exc:
             raise DingTalkBotError(f"Unable to delete DingTalk settings: {exc}") from exc
     return {
-        **dingtalk_config_status(load_dingtalk_config()),
+        **dingtalk_config_status(load_dingtalk_config(settings_path=settings_path)),
         "saved_config_deleted": deleted,
     }
 

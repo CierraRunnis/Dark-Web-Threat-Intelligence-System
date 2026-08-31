@@ -78,17 +78,53 @@ def notify_code_monitoring_hits(
     *,
     wechat_config: BotConfig | None = None,
     dingtalk_config: DingTalkConfig | None = None,
+    _load_default_configs: bool = True,
 ) -> dict[str, Any]:
     eligible_hits = _primary_hits(hits)
+    if _load_default_configs and wechat_config is None and dingtalk_config is None:
+        from darkweb_collector.watchlist_notifications import load_watchlist_channel_configs
+
+        aggregate: dict[str, Any] = {
+            "eligible": len(eligible_hits),
+            "sent": 0,
+            "failed": 0,
+            "skipped": 0,
+            "channels": {"wechat_work": False, "dingtalk": False},
+            "errors": [],
+            "objects": [],
+        }
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for hit in eligible_hits:
+            watchlist_id = int(hit.get("watchlistId") or hit.get("watchlist_id") or 0)
+            if watchlist_id <= 0:
+                aggregate["skipped"] += 1
+                continue
+            grouped.setdefault(watchlist_id, []).append(hit)
+        for watchlist_id, object_hits in grouped.items():
+            scoped_wechat, scoped_dingtalk, _ = load_watchlist_channel_configs(watchlist_id)
+            scoped = notify_code_monitoring_hits(
+                object_hits,
+                wechat_config=scoped_wechat,
+                dingtalk_config=scoped_dingtalk,
+                _load_default_configs=False,
+            )
+            aggregate["objects"].append({"watchlist_id": watchlist_id, "result": scoped})
+            for key in ("sent", "failed", "skipped"):
+                aggregate[key] += int(scoped.get(key) or 0)
+            for channel, ready in (scoped.get("channels") or {}).items():
+                aggregate["channels"][channel] = aggregate["channels"].get(channel, False) or bool(ready)
+            aggregate["errors"].extend(scoped.get("errors") or [])
+        return aggregate
+
     config_errors: list[dict[str, Any]] = []
     resolved_wechat: BotConfig | None = wechat_config
     resolved_dingtalk: DingTalkConfig | None = dingtalk_config
-    if resolved_wechat is None:
+    if resolved_wechat is None and _load_default_configs:
         try:
             resolved_wechat = load_bot_config()
         except Exception as exc:
             config_errors.append({"channel": "wechat_work", "error": str(exc)})
-    if resolved_dingtalk is None:
+    if resolved_dingtalk is None and _load_default_configs:
         try:
             resolved_dingtalk = load_dingtalk_config()
         except Exception as exc:

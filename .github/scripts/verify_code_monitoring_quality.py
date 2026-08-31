@@ -9,6 +9,7 @@ from darkweb_collector.code_monitoring import (
     CODE_CLASSIFICATION_VERSION,
     _build_stored_code_hit_payload,
     _classify_code_hit,
+    _derived_search_terms_from_profile,
     paginate_code_hits_payloads,
 )
 from darkweb_collector.code_monitoring_notifications import _primary_hits
@@ -18,6 +19,7 @@ from darkweb_collector import code_monitoring_notifications as code_notification
 from darkweb_collector.db import _ensure_schema, upsert_code_hit_with_state, upsert_code_watchlist
 from darkweb_collector.postgres_backend import CompatRow
 from darkweb_collector import code_monitoring as code_monitoring_module
+from darkweb_collector import watchlist_notifications as watchlist_notification_module
 
 
 ENTERPRISE_MATCH = {
@@ -25,6 +27,24 @@ ENTERPRISE_MATCH = {
     "level": "strong",
     "anchors": [{"type": "root_domain", "label": "企业主域名", "value": "catl.com"}],
     "system_keywords": [],
+}
+
+derived_terms = _derived_search_terms_from_profile(
+    {
+        "official_names": ["宁德时代"],
+        "brand_aliases": ["CATL"],
+        "english_aliases": ["catl"],
+        "root_domains": ["catl.com"],
+        "internal_system_keywords": ["battery-platform"],
+        "negative_aliases": ["cat"],
+        "trusted_subdomain_patterns": ["*.catl.com"],
+    }
+)
+assert {(item["term"], item["term_type"]) for item in derived_terms} == {
+    ("宁德时代", "company_name"),
+    ("CATL", "company_name"),
+    ("catl.com", "domain"),
+    ("battery-platform", "custom"),
 }
 
 
@@ -145,6 +165,43 @@ finally:
     code_notifications.post_dingtalk_markdown = original_dingtalk_post
 assert notification_result["eligible"] == 1 and notification_result["sent"] == 2
 assert deliveries == ["wechat", "dingtalk"]
+
+scoped_deliveries: list[tuple[str, str]] = []
+original_scoped_loader = watchlist_notification_module.load_watchlist_channel_configs
+original_wechat_post = code_notifications.post_bot_payload
+original_dingtalk_post = code_notifications.post_dingtalk_markdown
+try:
+    watchlist_notification_module.load_watchlist_channel_configs = lambda watchlist_id: (
+        (
+            BotConfig(
+                provider=BOT_PROVIDER_WECHAT_WORK_WEBHOOK,
+                webhook_url=f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=object-{watchlist_id}",
+                webhook_key=f"object-{watchlist_id}",
+                settings_path=f"object-{watchlist_id}-wechat.json",
+            ) if watchlist_id == 11 else None
+        ),
+        (
+            DingTalkConfig(
+                webhook_url=f"https://oapi.dingtalk.com/robot/send?access_token=object-{watchlist_id}",
+                settings_path=f"object-{watchlist_id}-dingtalk.json",
+            ) if watchlist_id == 22 else None
+        ),
+        {},
+    )
+    code_notifications.post_bot_payload = lambda _payload, config: scoped_deliveries.append(("wechat", config.settings_path)) or {"ok": True}
+    code_notifications.post_dingtalk_markdown = lambda _content, config, *, title: scoped_deliveries.append(("dingtalk", config.settings_path)) or {"ok": True}
+    scoped_result = code_notifications.notify_code_monitoring_hits(
+        [
+            {"id": 11, "watchlistId": 11, "displayBucket": "primary", "suppressed": False, "resultLayer": "sensitive", "sensitiveType": "api_key"},
+            {"id": 22, "watchlistId": 22, "displayBucket": "primary", "suppressed": False, "resultLayer": "sensitive", "sensitiveType": "api_key"},
+        ]
+    )
+finally:
+    watchlist_notification_module.load_watchlist_channel_configs = original_scoped_loader
+    code_notifications.post_bot_payload = original_wechat_post
+    code_notifications.post_dingtalk_markdown = original_dingtalk_post
+assert scoped_result["sent"] == 2 and scoped_result["eligible"] == 2
+assert scoped_deliveries == [("wechat", "object-11-wechat.json"), ("dingtalk", "object-22-dingtalk.json")]
 
 now = datetime.now(timezone.utc)
 items = [
