@@ -1502,7 +1502,14 @@ function Test-DarkwebApiReady {
 function Test-DarkwebFrontendReady {
     try {
         $response = Invoke-WebRequest -Uri $FrontendUrl -UseBasicParsing -TimeoutSec 3
-        $htmlReady = $response.Content.Contains($NewUiMarker) -and $response.Content.Contains('/src/main.js')
+        $developmentEntryReady = $response.Content.Contains('/src/main.js')
+        $previewEntryReady = [regex]::IsMatch(
+            $response.Content,
+            '<script\b[^>]*\bsrc="/assets/[^"]+\.js"'
+        )
+        $htmlReady = $response.Content.Contains($NewUiMarker) -and (
+            $developmentEntryReady -or $previewEntryReady
+        )
         if (-not $htmlReady) {
             return $false
         }
