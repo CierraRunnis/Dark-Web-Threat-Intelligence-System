@@ -40,11 +40,17 @@
 
 - `seed_fetch_mode`
 - `detail_fetch_mode`
+- `browser_queue`
+- `max_concurrent_details`
 
 只表示抓取方式：
 
 - `tor_http`：非浏览器直取
 - `browser`：浏览器渲染
+
+浏览器任务按来源隔离：公网论坛使用 `browser_public`，`.onion` 站点使用
+`browser_onion`。`browser_render` 仅用于兼容升级前已经入队的任务。
+`max_concurrent_details` 限制同一站点同时执行的详情任务数量，默认值为 `1`。
 
 是否走 Tor 由目标 URL 自动决定。
 
@@ -311,8 +317,14 @@ Windows 一键启动未显式配置 `REDIS_URL` 时会自动准备项目托管�
 ```bash
 python scripts/crawl.py worker --queue seed_http
 python scripts/crawl.py worker --queue detail_http
-python scripts/crawl.py worker --queue browser_render
+python scripts/crawl.py worker --queue browser_public
+python scripts/crawl.py worker --queue browser_onion
 ```
+
+一键启动脚本默认启动两个公网浏览器 worker 和一个 Onion 浏览器 worker。
+可用 `DARKWEB_BROWSER_PUBLIC_CONCURRENCY`、`DARKWEB_BROWSER_ONION_CONCURRENCY`
+分别扩容；旧的 `DARKWEB_BROWSER_CONCURRENCY` 仍作为总量兼容配置。
+为保证两个队列都可消费，隔离模式下浏览器 worker 总数最低为 `2`。
 
 投递到期任务：
 

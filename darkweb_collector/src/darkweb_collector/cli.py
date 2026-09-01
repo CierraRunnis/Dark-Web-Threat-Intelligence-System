@@ -74,6 +74,8 @@ def _run_list_sites() -> int:
                 "profile": config.profile,
                 "seed_fetch_mode": config.seed_fetch_mode,
                 "detail_fetch_mode": config.detail_fetch_mode,
+                "browser_queue": config.browser_queue,
+                "max_concurrent_details": config.max_concurrent_details,
                 "seed_urls": list(config.seed_urls),
             }
         )
@@ -113,7 +115,7 @@ def _enqueue_due() -> int:
         raise RuntimeError("Celery is required to enqueue queued crawl jobs") from exc
 
     def seed_dispatcher(config) -> str | None:
-        queue_name = queue_for_seed(config.seed_fetch_mode)
+        queue_name = queue_for_seed(config)
         async_result = crawl_seed.apply_async(
             kwargs={"site_name": config.site_name, "force": False},
             queue=queue_name,

@@ -50,15 +50,28 @@ $ServiceWaitSeconds = 45
 $SchedulerIntervalSeconds = if ($env:SCHEDULER_INTERVAL_SECONDS) { [int]$env:SCHEDULER_INTERVAL_SECONDS } else { 60 }
 $VulnSyncIntervalSeconds = if ($env:VULN_SYNC_INTERVAL_SECONDS) { [int]$env:VULN_SYNC_INTERVAL_SECONDS } else { 3600 }
 $VulnSyncLimit = if ($env:VULN_SYNC_LIMIT) { [int]$env:VULN_SYNC_LIMIT } else { 300 }
-$BrowserConcurrency = 2
+$ConfiguredBrowserConcurrency = 3
 if ($env:DARKWEB_BROWSER_CONCURRENCY) {
     try {
-        $BrowserConcurrency = [Math]::Max([int]$env:DARKWEB_BROWSER_CONCURRENCY, 1)
+        $ConfiguredBrowserConcurrency = [Math]::Max([int]$env:DARKWEB_BROWSER_CONCURRENCY, 1)
     }
     catch {
-        $BrowserConcurrency = 2
+        $ConfiguredBrowserConcurrency = 3
     }
 }
+$BrowserPublicConcurrency = if ($env:DARKWEB_BROWSER_PUBLIC_CONCURRENCY) {
+    [Math]::Max([int]$env:DARKWEB_BROWSER_PUBLIC_CONCURRENCY, 1)
+}
+else {
+    [Math]::Max([int][Math]::Ceiling($ConfiguredBrowserConcurrency / 2.0), 1)
+}
+$BrowserOnionConcurrency = if ($env:DARKWEB_BROWSER_ONION_CONCURRENCY) {
+    [Math]::Max([int]$env:DARKWEB_BROWSER_ONION_CONCURRENCY, 1)
+}
+else {
+    [Math]::Max($ConfiguredBrowserConcurrency - $BrowserPublicConcurrency, 1)
+}
+$BrowserConcurrency = $BrowserPublicConcurrency + $BrowserOnionConcurrency
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $CollectorRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
@@ -1635,8 +1648,11 @@ function Get-ServiceRecords {
 
 function Test-ManagedServicesRunning {
     $requiredNames = @("api", "frontend", "worker-seed", "worker-detail", "scheduler", "vuln-sync")
-    for ($index = 1; $index -le $BrowserConcurrency; $index++) {
-        $requiredNames += "worker-browser-$index"
+    for ($index = 1; $index -le $BrowserPublicConcurrency; $index++) {
+        $requiredNames += "worker-browser-public-$index"
+    }
+    for ($index = 1; $index -le $BrowserOnionConcurrency; $index++) {
+        $requiredNames += "worker-browser-onion-$index"
     }
     $records = @(Get-ServiceRecords)
     if ($records | Where-Object { $_.name -eq "garnet" } | Select-Object -First 1) {
@@ -2028,6 +2044,8 @@ Set-Location -LiteralPath $quotedWorkDir
 `$env:DARKWEB_TOR_EXECUTABLE = $(Quote-PS $script:TorBridgeTorExecutable)
 `$env:DARKWEB_TOR_TRANSPORT_EXECUTABLE = $(Quote-PS $script:TorBridgeTransportExecutable)
 `$env:DARKWEB_BROWSER_CONCURRENCY = $(Quote-PS ([string]$BrowserConcurrency))
+`$env:DARKWEB_BROWSER_PUBLIC_CONCURRENCY = $(Quote-PS ([string]$BrowserPublicConcurrency))
+`$env:DARKWEB_BROWSER_ONION_CONCURRENCY = $(Quote-PS ([string]$BrowserOnionConcurrency))
 `$env:NPM_CONFIG_CACHE = $(Quote-PS (Join-Path $DefaultUserDataDir "npm-cache"))
 $Body *>> $quotedLog
 "@
@@ -2819,8 +2837,11 @@ function Start-Services {
     $records += Start-ManagedProcess -Name "frontend" -WorkingDirectory $DashboardRoot -Body "& $node $viteCli preview --host 0.0.0.0 --port $FrontendPort --strictPort"
     $records += Start-ManagedProcess -Name "worker-seed" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q seed_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"seed-http-$PID@%h`""
     $records += Start-ManagedProcess -Name "worker-detail" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q detail_http --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"detail-http-$PID@%h`""
-    for ($index = 1; $index -le $BrowserConcurrency; $index++) {
-        $records += Start-ManagedProcess -Name "worker-browser-$index" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q browser_render --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"browser-render-$index-$PID@%h`""
+    for ($index = 1; $index -le $BrowserPublicConcurrency; $index++) {
+        $records += Start-ManagedProcess -Name "worker-browser-public-$index" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q browser_public,browser_render --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"browser-public-$index-$PID@%h`""
+    }
+    for ($index = 1; $index -le $BrowserOnionConcurrency; $index++) {
+        $records += Start-ManagedProcess -Name "worker-browser-onion-$index" -WorkingDirectory $CollectorRoot -Body "& $python -m celery -A darkweb_collector.celery_app:app worker -Q browser_onion --concurrency 1 --prefetch-multiplier 1 --pool solo --loglevel info --hostname `"browser-onion-$index-$PID@%h`""
     }
     $records += Start-ManagedProcess -Name "scheduler" -WorkingDirectory $CollectorRoot -Body "while (`$true) { Write-Host `"[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] enqueue-due`"; & $python $crawler enqueue-due; Start-Sleep -Seconds $SchedulerIntervalSeconds }"
     $records += Start-ManagedProcess -Name "vuln-sync" -WorkingDirectory $CollectorRoot -Body "while (`$true) { Write-Host `"[`$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] sync-public-vulns --limit $VulnSyncLimit`"; & $python $crawler sync-public-vulns --limit $VulnSyncLimit; Start-Sleep -Seconds $VulnSyncIntervalSeconds }"

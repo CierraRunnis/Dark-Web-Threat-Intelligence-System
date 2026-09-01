@@ -49,6 +49,27 @@ def mark_job_running(job_id: str, site_name: str, job_type: str, queue_name: str
         connection.commit()
 
 
+def mark_job_enqueued(
+    job_id: str,
+    site_name: str,
+    job_type: str,
+    queue_name: str,
+    target: str,
+) -> None:
+    with get_db_connection() as connection:
+        upsert_crawl_job(
+            connection,
+            job_id=job_id,
+            site_name=site_name,
+            job_type=job_type,
+            queue_name=queue_name,
+            target=target,
+            status="enqueued",
+            enqueued_at=utc_now_iso(),
+        )
+        connection.commit()
+
+
 def mark_job_finished(
     job_id: str,
     site_name: str,
@@ -188,7 +209,7 @@ def execute_detail_job(
 
 
 def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Path | None = None) -> str:
-    queue_name = queue_for_detail(get_site_config(site_name, config_path).detail_fetch_mode)
+    queue_name = queue_for_detail(get_site_config(site_name, config_path))
     job_id = new_job_id("detail", site_name)
     mark_job_running(
         job_id=job_id,
@@ -254,7 +275,7 @@ def run_site_once(
     from darkweb_collector.state_store import InMemoryStateStore
 
     config = get_site_config(site_name, config_path)
-    seed_queue = queue_for_seed(config.seed_fetch_mode)
+    seed_queue = queue_for_seed(config)
     selected_job_id = job_id or new_job_id("seed", site_name)
     mark_job_running(
         job_id=selected_job_id,
@@ -372,7 +393,7 @@ def enqueue_due_sites(
                 continue
             if not state_store.claim_seed_slot(config.site_name, max(config.effective_interval_seconds, 300)):
                 continue
-            queue_name = queue_for_seed(config.seed_fetch_mode)
+            queue_name = queue_for_seed(config)
             job_id = seed_dispatcher(config)
             if not job_id:
                 continue
