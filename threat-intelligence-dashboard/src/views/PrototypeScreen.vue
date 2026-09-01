@@ -6,7 +6,7 @@
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { initializePrototype } from '@/prototype/runtime'
-import { hydratePrototypeScreen } from '@/prototype/dataRuntime'
+import { disposePrototypeScreen, hydratePrototypeScreen } from '@/prototype/dataRuntime'
 
 const screens = import.meta.glob('@/prototype/screens/*.html', {
   eager: true,
@@ -84,6 +84,7 @@ function handleNavigation(event) {
 async function renderScreen() {
   const version = ++renderVersion
   const file = route.meta.screen
+  disposePrototypeScreen(screenRoot.value)
   if (activeFile && activeFile !== file && screenRoot.value) {
     const readyState = screenRoot.value.querySelector('.runtime-data-state[data-state="ready"]')
     if (activeFile === 'intelligence.html' && readyState) {
@@ -143,6 +144,7 @@ async function renderScreen() {
 watch(() => route.fullPath, renderScreen, { immediate: true })
 
 onBeforeUnmount(() => {
+  disposePrototypeScreen(screenRoot.value)
   delete document.body.dataset.prototypePage
   delete document.body.dataset.prototypeSource
   delete document.body.dataset.prototypeRecordId

@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import atexit
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
+import os
 import re
-from typing import Any, Sequence
+from threading import BoundedSemaphore, Lock
+from typing import Any, Callable, Sequence
 
 
 class PostgreSQLBackendError(RuntimeError):
     pass
+
+
+_POOL_LOCK = Lock()
+_POOLS: dict[tuple[str, str, str, str], Any] = {}
+_POOL_IDENTITY_TABLES: dict[tuple[str, str, str, str], frozenset[str]] = {}
+_POOL_GATES: dict[tuple[str, str, str, str], BoundedSemaphore] = {}
 
 
 def _compat_value(value: Any) -> Any:
@@ -169,19 +178,17 @@ class PostgresCursor:
 class PostgresConnection:
     backend_name = "postgresql"
 
-    def __init__(self, raw_connection) -> None:
+    def __init__(
+        self,
+        raw_connection,
+        *,
+        identity_tables: frozenset[str],
+        release: Callable[[Any], None],
+    ) -> None:
         self._raw = raw_connection
-        with self._raw.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT table_name
-                FROM information_schema.columns
-                WHERE table_schema = current_schema()
-                  AND column_name = 'id'
-                  AND is_identity = 'YES'
-                """
-            )
-            self.identity_tables = {str(row[0]).lower() for row in cursor.fetchall()}
+        self._release = release
+        self._closed = False
+        self.identity_tables = identity_tables
 
     def cursor(self) -> PostgresCursor:
         return PostgresCursor(self)
@@ -201,7 +208,12 @@ class PostgresConnection:
         self._raw.rollback()
 
     def close(self) -> None:
-        self._raw.close()
+        if self._closed:
+            return
+        self._closed = True
+        raw = self._raw
+        self._raw = None
+        self._release(raw)
 
     def __enter__(self) -> "PostgresConnection":
         return self
@@ -217,31 +229,25 @@ class PostgresConnection:
         return False
 
 
-def connect_postgres(
-    database_url: str,
+def _positive_int_from_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _validate_schema_name(schema: str) -> None:
+    if schema and not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema):
+        raise PostgreSQLBackendError("Invalid PostgreSQL release schema")
+
+
+def _validate_pool_connection(
+    raw,
     *,
-    schema: str = "",
-    expected_fingerprint: str = "",
-    expected_version: str = "0002_sqlite_compat",
-) -> PostgresConnection:
+    expected_fingerprint: str,
+    expected_version: str,
+) -> frozenset[str]:
     try:
-        import psycopg2  # type: ignore
-        from psycopg2 import sql  # type: ignore
-    except ImportError as exc:
-        raise PostgreSQLBackendError(
-            "PostgreSQL selected but psycopg2 is not installed"
-        ) from exc
-    raw = psycopg2.connect(database_url, application_name="darkweb-threat-intelligence")
-    try:
-        if schema:
-            if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema):
-                raise PostgreSQLBackendError("Invalid PostgreSQL release schema")
-            raw.autocommit = True
-            with raw.cursor() as cursor:
-                cursor.execute(
-                    sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema))
-                )
-            raw.autocommit = False
         with raw.cursor() as cursor:
             cursor.execute(
                 """
@@ -251,6 +257,16 @@ def connect_postgres(
                 """
             )
             migrations = {str(row[0]): row[1] for row in cursor.fetchall()}
+            cursor.execute(
+                """
+                SELECT table_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND column_name = 'id'
+                  AND is_identity = 'YES'
+                """
+            )
+            identity_tables = frozenset(str(row[0]).lower() for row in cursor.fetchall())
         baseline_fingerprint = migrations.get("0001_baseline")
         if not expected_fingerprint:
             raise PostgreSQLBackendError("Expected PostgreSQL schema fingerprint is required")
@@ -262,7 +278,118 @@ def connect_postgres(
             raise PostgreSQLBackendError(
                 f"Required PostgreSQL migration is not applied: {expected_version}"
             )
-        return PostgresConnection(raw)
+        return identity_tables
+    finally:
+        raw.rollback()
+
+
+def _get_pool(
+    database_url: str,
+    *,
+    schema: str,
+    expected_fingerprint: str,
+    expected_version: str,
+):
+    try:
+        from psycopg2.pool import ThreadedConnectionPool  # type: ignore
+    except ImportError as exc:
+        raise PostgreSQLBackendError(
+            "PostgreSQL selected but psycopg2 is not installed"
+        ) from exc
+
+    _validate_schema_name(schema)
+    key = (database_url, schema, expected_fingerprint, expected_version)
+    with _POOL_LOCK:
+        pool = _POOLS.get(key)
+        if pool is not None:
+            return pool, _POOL_IDENTITY_TABLES[key], _POOL_GATES[key]
+        minimum = _positive_int_from_env("DARKWEB_POSTGRES_POOL_MIN", 1)
+        maximum = max(minimum, _positive_int_from_env("DARKWEB_POSTGRES_POOL_MAX", 8))
+        options = f"-c search_path={schema},public" if schema else ""
+        connect_kwargs = {"application_name": "darkweb-threat-intelligence"}
+        if options:
+            connect_kwargs["options"] = options
+        pool = ThreadedConnectionPool(minimum, maximum, database_url, **connect_kwargs)
+        try:
+            raw = pool.getconn()
+            try:
+                identity_tables = _validate_pool_connection(
+                    raw,
+                    expected_fingerprint=expected_fingerprint,
+                    expected_version=expected_version,
+                )
+            finally:
+                pool.putconn(raw)
+        except Exception:
+            pool.closeall()
+            raise
+        _POOLS[key] = pool
+        _POOL_IDENTITY_TABLES[key] = identity_tables
+        _POOL_GATES[key] = BoundedSemaphore(maximum)
+        return pool, identity_tables, _POOL_GATES[key]
+
+
+def _return_pool_connection(pool, gate: BoundedSemaphore, raw) -> None:
+    if raw is None:
+        gate.release()
+        return
+    close_connection = False
+    try:
+        if raw.closed:
+            close_connection = True
+        else:
+            raw.rollback()
     except Exception:
-        raw.close()
+        close_connection = True
+    try:
+        pool.putconn(raw, close=close_connection)
+    finally:
+        gate.release()
+
+
+def close_postgres_pools() -> None:
+    with _POOL_LOCK:
+        pools = list(_POOLS.values())
+        _POOLS.clear()
+        _POOL_IDENTITY_TABLES.clear()
+        _POOL_GATES.clear()
+    for pool in pools:
+        try:
+            pool.closeall()
+        except Exception:
+            pass
+
+
+def connect_postgres(
+    database_url: str,
+    *,
+    schema: str = "",
+    expected_fingerprint: str = "",
+    expected_version: str = "0002_sqlite_compat",
+) -> PostgresConnection:
+    pool, identity_tables, gate = _get_pool(
+        database_url,
+        schema=schema,
+        expected_fingerprint=expected_fingerprint,
+        expected_version=expected_version,
+    )
+    wait_seconds = _positive_int_from_env("DARKWEB_POSTGRES_POOL_WAIT_SECONDS", 10)
+    if not gate.acquire(timeout=wait_seconds):
+        raise PostgreSQLBackendError("PostgreSQL connection pool wait timed out")
+    try:
+        raw = pool.getconn()
+    except Exception as exc:
+        gate.release()
+        raise PostgreSQLBackendError("PostgreSQL connection pool is exhausted") from exc
+    try:
+        return PostgresConnection(
+            raw,
+            identity_tables=identity_tables,
+            release=lambda connection: _return_pool_connection(pool, gate, connection),
+        )
+    except Exception:
+        _return_pool_connection(pool, gate, raw)
         raise
+
+
+atexit.register(close_postgres_pools)

@@ -1800,6 +1800,7 @@ async function setupCodeContinuousScan(root, watchlists = [], onScanCompleted = 
     toggle.disabled = false
   }
 
+  if (!root.isConnected) return
   select.addEventListener('change', () => { refreshStatus() })
   toggle.addEventListener('click', async () => {
     const watchlistId = Number(select.value || 0)
@@ -1827,7 +1828,7 @@ async function setupCodeContinuousScan(root, watchlists = [], onScanCompleted = 
   })
 
   root.__codeContinuousStatusTimer = window.setInterval(() => {
-    if (!query(root, '[data-code-scan-panel]')) {
+    if (!root.isConnected || !query(root, '[data-code-scan-panel]')) {
       window.clearInterval(root.__codeContinuousStatusTimer)
       root.__codeContinuousStatusTimer = null
       return
@@ -1961,17 +1962,21 @@ function setupCodeHitFilters(root, codeState, reload) {
 }
 
 async function hydrateCodeMonitoring(root, state) {
-  const watchlistsPayload = await requestJson('/api/code-monitoring/watchlists')
+  const codeState = { pages: { primary: 1, suppressed: 1 }, loading: false }
+  const reload = (resetPages = false) => reloadCodeMonitoringData(root, state, codeState, resetPages)
+  setupCodeHitFilters(root, codeState, reload)
+  const [watchlistsPayload] = await Promise.all([
+    requestJson('/api/code-monitoring/watchlists'),
+    reload(false),
+  ])
   const watchlists = Array.isArray(watchlistsPayload) ? watchlistsPayload : (watchlistsPayload.items || watchlistsPayload.watchlists || [])
   const watchlistFilter = query(root, '[data-code-hit-filter="watchlist_id"]')
   if (watchlistFilter) {
     watchlistFilter.replaceChildren(new Option('全部监测对象', ''), ...watchlists.map((item) => new Option(item.name || `监测对象 ${item.id}`, String(item.id))))
   }
-  const codeState = { pages: { primary: 1, suppressed: 1 }, loading: false }
-  const reload = (resetPages = false) => reloadCodeMonitoringData(root, state, codeState, resetPages)
-  setupCodeHitFilters(root, codeState, reload)
-  await reload(false)
-  await setupCodeContinuousScan(root, watchlists, () => reload(true))
+  setupCodeContinuousScan(root, watchlists, () => reload(true)).catch((error) => {
+    renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
+  })
 }
 
 function replaceRecordContainer(container, lines) {
@@ -3118,6 +3123,14 @@ async function hydrateCodeDetail(root, state, id) {
     ...(detail.suppressionReasons || []).map((line) => ({ label: '压制依据', value: line, note: '接口分析' })),
   ])
   configureReviewActions(root, state, 'code-detail.html', `/api/code-monitoring/hits/${encodeURIComponent(id)}/review`, detail.reviewStatus)
+}
+
+export function disposePrototypeScreen(root) {
+  if (!root) return
+  if (root.__codeContinuousStatusTimer) {
+    window.clearInterval(root.__codeContinuousStatusTimer)
+    root.__codeContinuousStatusTimer = null
+  }
 }
 
 export async function hydratePrototypeScreen({ root, route, file }) {
