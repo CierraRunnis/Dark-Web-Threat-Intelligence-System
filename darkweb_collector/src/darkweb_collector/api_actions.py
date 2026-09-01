@@ -26,7 +26,13 @@ from darkweb_collector.changan_auto_login import changan_auto_login_available
 from darkweb_collector.job_diagnostics import consecutive_failures, failure_cooldown_until
 from darkweb_collector.orchestrator import new_job_id, run_site_once
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
-from darkweb_collector.queueing import BROWSER_RENDER_QUEUE, browser_concurrency, queue_for_seed
+from darkweb_collector.queueing import (
+    BROWSER_ACTIVE_QUEUES,
+    BROWSER_QUEUES,
+    browser_concurrency,
+    browser_queue_concurrency,
+    queue_for_seed,
+)
 from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
 from darkweb_collector.site_auth import site_auth_readiness
 from darkweb_collector.tor_fetch import fetch_url, is_onion_url
@@ -486,7 +492,7 @@ def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
 
     _mark_stale_active_job(site_name, active_job)
 
-    queue_name = queue_for_seed(config.seed_fetch_mode)
+    queue_name = queue_for_seed(config)
     if not _has_queue_worker(queue_name):
         if config.uses_browser:
             return _dispatch_browser_process(
@@ -630,14 +636,26 @@ def get_browser_runtime_status() -> dict[str, Any]:
         worker_queues = sorted(_worker_queue_cache)
         worker_counts = dict(_worker_queue_worker_counts)
         worker_names = {name: list(names) for name, names in _worker_queue_worker_names.items()}
-    browser_worker_count = int(worker_counts.get(BROWSER_RENDER_QUEUE, 0))
+    browser_worker_names = sorted(
+        {
+            worker_name
+            for queue_name in BROWSER_QUEUES
+            for worker_name in worker_names.get(queue_name, [])
+        }
+    )
+    browser_worker_count = len(browser_worker_names)
     configured_concurrency = browser_concurrency()
     return {
-        "browser_queue": BROWSER_RENDER_QUEUE,
+        "browser_queue": ",".join(BROWSER_ACTIVE_QUEUES),
+        "browser_queues": list(BROWSER_QUEUES),
+        "queue_configured_concurrency": {
+            queue_name: browser_queue_concurrency(queue_name)
+            for queue_name in BROWSER_ACTIVE_QUEUES
+        },
         "configured_concurrency": configured_concurrency,
         "browser_concurrency": configured_concurrency,
         "browser_worker_count": browser_worker_count,
-        "browser_worker_names": worker_names.get(BROWSER_RENDER_QUEUE, []),
+        "browser_worker_names": browser_worker_names,
         "local_process_pool": browser_process_pool_status(),
         "worker_queues": worker_queues,
         "worker_counts": worker_counts,

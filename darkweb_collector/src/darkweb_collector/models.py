@@ -7,6 +7,7 @@ from typing import Any
 
 VALID_FETCH_MODES = {"tor_http", "browser"}
 VALID_PROFILES = {"hot", "warm", "cold"}
+VALID_BROWSER_QUEUES = {"browser_render", "browser_public", "browser_onion"}
 PROFILE_INTERVALS_SECONDS = {
     "hot": 10 * 60,
     "warm": 60 * 60,
@@ -48,6 +49,23 @@ class SiteConfig:
     @property
     def uses_browser(self) -> bool:
         return self.seed_fetch_mode == "browser" or self.detail_fetch_mode == "browser"
+
+    @property
+    def browser_queue(self) -> str:
+        return str(self.extras.get("browser_queue") or "browser_render").strip()
+
+    @property
+    def max_concurrent_details(self) -> int:
+        return max(1, int(self.extras.get("max_concurrent_details", 1)))
+
+    @property
+    def detail_slot_ttl_seconds(self) -> int:
+        default_ttl = max(900, self.fetch_timeout_seconds * 4)
+        return max(60, int(self.extras.get("detail_slot_ttl_seconds", default_ttl)))
+
+    @property
+    def detail_slot_retry_seconds(self) -> int:
+        return max(1, int(self.extras.get("detail_slot_retry_seconds", 5)))
 
     @property
     def failure_cooldown_seconds(self) -> int:
