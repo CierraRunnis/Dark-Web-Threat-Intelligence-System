@@ -15,7 +15,20 @@ SERVICE_WAIT_SECONDS=45
 SCHEDULER_INTERVAL_SECONDS="${SCHEDULER_INTERVAL_SECONDS:-60}"
 VULN_SYNC_INTERVAL_SECONDS="${VULN_SYNC_INTERVAL_SECONDS:-3600}"
 VULN_SYNC_LIMIT="${VULN_SYNC_LIMIT:-300}"
-BROWSER_CONCURRENCY="${DARKWEB_BROWSER_CONCURRENCY:-1}"
+CONFIGURED_BROWSER_CONCURRENCY="${DARKWEB_BROWSER_CONCURRENCY:-3}"
+BROWSER_PUBLIC_CONCURRENCY="${DARKWEB_BROWSER_PUBLIC_CONCURRENCY:-}"
+BROWSER_ONION_CONCURRENCY="${DARKWEB_BROWSER_ONION_CONCURRENCY:-}"
+if [[ "$CONFIGURED_BROWSER_CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
+  [[ -n "$BROWSER_PUBLIC_CONCURRENCY" ]] || BROWSER_PUBLIC_CONCURRENCY="$(( (CONFIGURED_BROWSER_CONCURRENCY + 1) / 2 ))"
+  [[ -n "$BROWSER_ONION_CONCURRENCY" ]] || BROWSER_ONION_CONCURRENCY="$(( CONFIGURED_BROWSER_CONCURRENCY - BROWSER_PUBLIC_CONCURRENCY ))"
+fi
+[[ -n "$BROWSER_PUBLIC_CONCURRENCY" ]] || BROWSER_PUBLIC_CONCURRENCY=1
+[[ "$BROWSER_ONION_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] || BROWSER_ONION_CONCURRENCY=1
+if [[ "$BROWSER_PUBLIC_CONCURRENCY" =~ ^[1-9][0-9]*$ && "$BROWSER_ONION_CONCURRENCY" =~ ^[1-9][0-9]*$ ]]; then
+  BROWSER_CONCURRENCY="$(( BROWSER_PUBLIC_CONCURRENCY + BROWSER_ONION_CONCURRENCY ))"
+else
+  BROWSER_CONCURRENCY="$CONFIGURED_BROWSER_CONCURRENCY"
+fi
 DARKWEB_TOR_BRIDGE_AUTO_INSTALL="${DARKWEB_TOR_BRIDGE_AUTO_INSTALL:-1}"
 DARKWEB_POSTGRESQL_AUTO_INSTALL="${DARKWEB_POSTGRESQL_AUTO_INSTALL:-1}"
 
@@ -622,6 +635,8 @@ build_env_exports() {
   exports+=("export VITE_API_TARGET=$(printf '%q' "$API_BASE_URL")")
   exports+=("export VITE_FRONTEND_PORT=$(printf '%q' "$FRONTEND_PORT")")
   exports+=("export DARKWEB_BROWSER_CONCURRENCY=$(printf '%q' "$BROWSER_CONCURRENCY")")
+  exports+=("export DARKWEB_BROWSER_PUBLIC_CONCURRENCY=$(printf '%q' "$BROWSER_PUBLIC_CONCURRENCY")")
+  exports+=("export DARKWEB_BROWSER_ONION_CONCURRENCY=$(printf '%q' "$BROWSER_ONION_CONCURRENCY")")
   if [[ -n "${DARKWEB_MIGRATION_TARGET_DATABASE_URL:-}" ]]; then
     exports+=("export DARKWEB_MIGRATION_TARGET_DATABASE_URL=$(printf '%q' "$DARKWEB_MIGRATION_TARGET_DATABASE_URL")")
   fi
@@ -707,6 +722,8 @@ write_user_env_file() {
     printf 'export VITE_API_TARGET=%q\n' "$API_BASE_URL"
     printf 'export VITE_FRONTEND_PORT=%q\n' "$FRONTEND_PORT"
     printf 'export DARKWEB_BROWSER_CONCURRENCY=%q\n' "$BROWSER_CONCURRENCY"
+    printf 'export DARKWEB_BROWSER_PUBLIC_CONCURRENCY=%q\n' "$BROWSER_PUBLIC_CONCURRENCY"
+    printf 'export DARKWEB_BROWSER_ONION_CONCURRENCY=%q\n' "$BROWSER_ONION_CONCURRENCY"
     for var_name in TOR_SOCKS_HOST TOR_SOCKS_PORT PROXY_HOST PROXY_PORT; do
       if [[ -n "${!var_name:-}" ]]; then
         printf 'export %s=%q\n' "$var_name" "${!var_name}"
@@ -808,7 +825,9 @@ register_darkweb_command() {
   load_runtime_ports
   validate_positive_integer "$API_PORT" "DARKWEB_API_PORT"
   validate_positive_integer "$FRONTEND_PORT" "DARKWEB_FRONTEND_PORT"
-  validate_positive_integer "$BROWSER_CONCURRENCY" "DARKWEB_BROWSER_CONCURRENCY"
+  validate_positive_integer "$CONFIGURED_BROWSER_CONCURRENCY" "DARKWEB_BROWSER_CONCURRENCY"
+  validate_positive_integer "$BROWSER_PUBLIC_CONCURRENCY" "DARKWEB_BROWSER_PUBLIC_CONCURRENCY"
+  validate_positive_integer "$BROWSER_ONION_CONCURRENCY" "DARKWEB_BROWSER_ONION_CONCURRENCY"
   if [[ -z "$COLLECTOR_SOURCE_DB" ]]; then
     if [[ -f "$DEFAULT_PROJECT_SOURCE_DB" ]]; then
       COLLECTOR_SOURCE_DB="$DEFAULT_PROJECT_SOURCE_DB"
@@ -917,7 +936,9 @@ ensure_postgresql_migration_target() {
 ensure_environment() {
   validate_positive_integer "$API_PORT" "DARKWEB_API_PORT"
   validate_positive_integer "$FRONTEND_PORT" "DARKWEB_FRONTEND_PORT"
-  validate_positive_integer "$BROWSER_CONCURRENCY" "DARKWEB_BROWSER_CONCURRENCY"
+  validate_positive_integer "$CONFIGURED_BROWSER_CONCURRENCY" "DARKWEB_BROWSER_CONCURRENCY"
+  validate_positive_integer "$BROWSER_PUBLIC_CONCURRENCY" "DARKWEB_BROWSER_PUBLIC_CONCURRENCY"
+  validate_positive_integer "$BROWSER_ONION_CONCURRENCY" "DARKWEB_BROWSER_ONION_CONCURRENCY"
   validate_positive_integer "$SCHEDULER_INTERVAL_SECONDS" "SCHEDULER_INTERVAL_SECONDS"
   validate_positive_integer "$VULN_SYNC_INTERVAL_SECONDS" "VULN_SYNC_INTERVAL_SECONDS"
   validate_positive_integer "$VULN_SYNC_LIMIT" "VULN_SYNC_LIMIT"
@@ -1258,13 +1279,22 @@ source \"$COLLECTOR_VENV/bin/activate\"
 python scripts/crawl.py worker --queue detail_http
 "
 
-  local browser_worker_command
-  browser_worker_command="
+  local browser_public_worker_command
+  browser_public_worker_command="
 set -euo pipefail
 cd \"$COLLECTOR_ROOT\"
 ${env_exports}
 source \"$COLLECTOR_VENV/bin/activate\"
-python scripts/crawl.py worker --queue browser_render
+python scripts/crawl.py worker --queue browser_public,browser_render
+"
+
+  local browser_onion_worker_command
+  browser_onion_worker_command="
+set -euo pipefail
+cd \"$COLLECTOR_ROOT\"
+${env_exports}
+source \"$COLLECTOR_VENV/bin/activate\"
+python scripts/crawl.py worker --queue browser_onion
 "
 
   local scheduler_command
@@ -1326,13 +1356,16 @@ PY" "$SERVICE_WAIT_SECONDS"; then
     "worker-seed" "$seed_worker_log"
     "worker-detail" "$detail_worker_log"
   )
-  for (( browser_index = 1; browser_index <= BROWSER_CONCURRENCY; browser_index++ )); do
-    browser_window="worker-browser"
-    if (( BROWSER_CONCURRENCY > 1 )); then
-      browser_window="worker-browser-${browser_index}"
-    fi
+  for (( browser_index = 1; browser_index <= BROWSER_PUBLIC_CONCURRENCY; browser_index++ )); do
+    browser_window="worker-browser-public-${browser_index}"
     local browser_log="$LOG_DIR/${browser_window}.log"
-    tmux_new_window "$browser_window" "$browser_log" "$browser_worker_command"
+    tmux_new_window "$browser_window" "$browser_log" "$browser_public_worker_command"
+    service_records+=("$browser_window" "$browser_log")
+  done
+  for (( browser_index = 1; browser_index <= BROWSER_ONION_CONCURRENCY; browser_index++ )); do
+    browser_window="worker-browser-onion-${browser_index}"
+    local browser_log="$LOG_DIR/${browser_window}.log"
+    tmux_new_window "$browser_window" "$browser_log" "$browser_onion_worker_command"
     service_records+=("$browser_window" "$browser_log")
   done
 
