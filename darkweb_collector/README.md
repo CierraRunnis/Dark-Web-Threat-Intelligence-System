@@ -362,6 +362,11 @@ SQLite 默认路径：
 
 - `data/collector.db`
 
+激活 PostgreSQL 数据发布后，API 和 worker 在各自进程内复用线程安全连接池，
+归还连接前会回滚未结束事务。默认每进程最少 `1`、最多 `8` 个连接，等待连接
+最长 `10` 秒；可分别通过 `DARKWEB_POSTGRES_POOL_MIN`、
+`DARKWEB_POSTGRES_POOL_MAX`、`DARKWEB_POSTGRES_POOL_WAIT_SECONDS` 调整。
+
 主要包含：
 
 - 采集结果表

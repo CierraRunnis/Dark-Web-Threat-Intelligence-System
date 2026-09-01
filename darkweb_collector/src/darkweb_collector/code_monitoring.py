@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import sqlite3
 import ssl
-from threading import Lock
+from threading import Lock, Thread
 import time
 from typing import Any
 from urllib.error import HTTPError
@@ -57,6 +57,8 @@ _CODE_SCAN_LOCK = Lock()
 _CODE_HITS_PAYLOAD_CACHE_LOCK = Lock()
 _CODE_HITS_PAYLOAD_CACHE_TTL_SECONDS = 3600.0
 _CODE_HITS_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
+_CODE_HITS_WARMUP_LOCK = Lock()
+_CODE_HITS_WARMUP_RUNNING = False
 _SQLITE_LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0, 4.0)
 _GITHUB_API_REQUEST_LOCK = Lock()
 _GITHUB_API_STATE_LOCK = Lock()
@@ -4852,6 +4854,7 @@ def _scan_code_watchlist_once_unlocked(
             "channels": {},
             "errors": [{"error": str(exc)}],
         }
+    schedule_code_monitoring_cache_warmup()
     return {
         "watchlist_id": watchlist_id,
         "watchlist_name": watchlist["name"],
@@ -5694,3 +5697,35 @@ def build_code_monitoring_summary() -> dict[str, Any]:
         ],
         "reviewDistribution": [{"key": key, "value": value} for key, value in sorted(review_counts.items(), key=lambda item: item[1], reverse=True)],
     }
+
+
+def warm_code_monitoring_cache() -> dict[str, Any]:
+    started_at = time.perf_counter()
+    payload = build_code_monitoring_summary()
+    logger.info(
+        "code monitoring cache warmup completed in %.2fs for %s hits",
+        time.perf_counter() - started_at,
+        int(payload.get("totalHits") or 0),
+    )
+    return payload
+
+
+def schedule_code_monitoring_cache_warmup() -> bool:
+    global _CODE_HITS_WARMUP_RUNNING
+    with _CODE_HITS_WARMUP_LOCK:
+        if _CODE_HITS_WARMUP_RUNNING:
+            return False
+        _CODE_HITS_WARMUP_RUNNING = True
+
+    def run() -> None:
+        global _CODE_HITS_WARMUP_RUNNING
+        try:
+            warm_code_monitoring_cache()
+        except Exception:
+            logger.exception("code monitoring cache warmup failed")
+        finally:
+            with _CODE_HITS_WARMUP_LOCK:
+                _CODE_HITS_WARMUP_RUNNING = False
+
+    Thread(target=run, name="code-monitoring-cache-warmup", daemon=True).start()
+    return True

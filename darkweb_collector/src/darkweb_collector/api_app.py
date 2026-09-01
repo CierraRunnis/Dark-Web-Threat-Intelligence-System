@@ -120,6 +120,7 @@ from darkweb_collector.code_monitoring import (
     search_code_hits_page,
     save_code_watchlist_payload,
     scan_code_watchlist_once,
+    warm_code_monitoring_cache,
 )
 from darkweb_collector.document_exposure_sessions import (
     auto_detect_platform_sessions,
@@ -453,6 +454,10 @@ def warm_payloads_on_startup() -> None:
     if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
         logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
         return
+    try:
+        warm_code_monitoring_cache()
+    except Exception:
+        logger.exception("code monitoring cache warmup failed")
     with _warmup_lock:
         if _warmup_started:
             return
