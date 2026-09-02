@@ -214,11 +214,12 @@ java</textarea></label>
             <article class="settings-ops-section settings-bot" data-watchlist-scoped data-od-id="settings-dingtalk-notification">
               <header class="settings-ops-head"><div><span>通知通道</span><h2>钉钉自定义机器人</h2></div><span class="badge" data-bind="dingtalk-status">待配置</span></header>
               <div class="settings-bot-channel">
-                <div class="bot-status-strip"><span>Webhook<strong data-bind="dingtalk-webhook-status">未配置</strong></span><span>加签 Secret<strong data-bind="dingtalk-secret-status">未配置（可选）</strong></span></div>
-                <div class="settings-bot-form"><label class="field"><span>Webhook / access_token</span><input class="input" id="dingtalk-webhook" type="password" placeholder="输入钉钉机器人 Webhook 或 access_token" autocomplete="new-password"></label><label class="field"><span>加签 Secret</span><input class="input" id="dingtalk-secret" type="password" placeholder="启用加签时填写 Secret" autocomplete="new-password"></label></div>
-                <label class="switch-control"><input type="checkbox" id="watchlist-dingtalk-enabled"><span class="switch-track" aria-hidden="true"></span><span>仅为当前对象启用</span></label><div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="dingtalk-save">保存配置</button><button class="btn btn-primary" data-collector-action="dingtalk-test">发送测试</button><button class="btn btn-danger" data-collector-action="dingtalk-delete">删除配置</button></div>
+                <div class="bot-status-strip"><span>机器人数量<strong class="num" data-bind="dingtalk-endpoint-count">0</strong></span><span>加签机器人<strong class="num" data-bind="dingtalk-secret-count">0</strong></span></div>
+                <div class="settings-bot-form settings-dingtalk-form"><label class="field"><span>机器人名称</span><input class="input" id="dingtalk-name" placeholder="例如：安全运营群" autocomplete="off"></label><label class="field"><span>Webhook / access_token</span><input class="input" id="dingtalk-webhook" type="password" placeholder="输入新的钉钉机器人 Webhook 或 access_token" autocomplete="new-password"></label><label class="field"><span>加签 Secret</span><input class="input" id="dingtalk-secret" type="password" placeholder="启用加签时填写 Secret" autocomplete="new-password"></label></div>
+                <div class="settings-bot-actions settings-dingtalk-actions"><label class="switch-control"><input type="checkbox" id="watchlist-dingtalk-enabled"><span class="switch-track" aria-hidden="true"></span><span>为当前对象启用</span></label><button class="btn btn-secondary" data-collector-action="dingtalk-toggle-save">保存开关</button><button class="btn btn-primary" data-collector-action="dingtalk-save">添加机器人</button><button class="btn btn-ghost" data-collector-action="dingtalk-test">全部测试</button><button class="btn btn-danger" data-collector-action="dingtalk-delete">清空全部</button></div>
               </div>
-              <p>作用范围：当前监测对象 — <strong data-bind="current-watchlist-scope">未选择</strong>；已压制列表和其他对象记录不会推送。</p>
+              <div class="dingtalk-endpoint-list" id="dingtalk-endpoint-list"><p class="dingtalk-endpoint-empty">当前对象尚未配置钉钉机器人</p></div>
+              <p>作用范围：当前监测对象 — <strong data-bind="current-watchlist-scope">未选择</strong>；消息会推送到该对象全部已配置机器人，单个机器人失败不影响其他机器人。</p>
             </article>
           </div>
         </section>

@@ -2254,7 +2254,18 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 .bot-status-strip span + span { border-left: 1px solid var(--border); }
 .bot-status-strip strong { color: var(--fg); font-size: 10px; }
 .settings-bot-form { min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 11px 12px; }
+.settings-dingtalk-form { grid-template-columns: .7fr 1.4fr 1fr; }
 .settings-bot-actions { display: flex; justify-content: flex-end; gap: 6px; padding: 11px 12px 11px 0; }
+.settings-dingtalk-actions { flex-wrap: wrap; align-items: center; }
+.settings-dingtalk-actions .switch-control { margin-right: auto; }
+.dingtalk-endpoint-list { display: grid; border-top: 1px solid var(--border); }
+.dingtalk-endpoint-item { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(220px, 1.3fr) auto; align-items: center; gap: 12px; padding: 10px 12px; }
+.dingtalk-endpoint-item + .dingtalk-endpoint-item { border-top: 1px solid var(--border); }
+.dingtalk-endpoint-identity, .dingtalk-endpoint-webhook { min-width: 0; }
+.dingtalk-endpoint-identity strong, .dingtalk-endpoint-identity small { display: block; }
+.dingtalk-endpoint-identity small, .dingtalk-endpoint-webhook { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.dingtalk-endpoint-row-actions { display: flex; gap: 6px; }
+.dingtalk-endpoint-empty { margin: 0; padding: 12px; color: var(--muted); font-size: 9px; text-align: center; }
 .settings-bot > p { margin: 0; padding: 9px 12px; border-top: 1px solid var(--border); background: var(--bg); color: var(--muted); font-size: 8px; }
 .settings-object-table { min-width: 0; table-layout: fixed; }
 
@@ -2274,6 +2285,7 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   .collector-table-surface .ds-table th:nth-child(3), .collector-table-surface .ds-table th:nth-child(4), .collector-table-surface .ds-table th:nth-child(5) { width: 11%; }
   .collector-table-surface .ds-table th:last-child { width: 29%; }
   .settings-bot-channel { grid-template-columns: minmax(150px, .5fr) minmax(0, 1.5fr); }
+  .settings-dingtalk-form { grid-template-columns: 1fr 1fr; }
   .settings-bot-actions { grid-column: 1 / -1; padding: 0 12px 11px; }
 }
 
@@ -2323,6 +2335,8 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   .settings-bot-channel { grid-template-columns: 1fr; }
   .bot-status-strip { border-right: 0; border-bottom: 1px solid var(--border); }
   .settings-bot-form { grid-template-columns: 1fr; }
+  .dingtalk-endpoint-item { grid-template-columns: 1fr; }
+  .dingtalk-endpoint-row-actions { justify-content: flex-start; }
 }
 
 /* Site management: open status rail and continuous operations matrix. */

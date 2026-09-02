@@ -35,6 +35,8 @@ class DingTalkBotError(RuntimeError):
 
 @dataclass(frozen=True)
 class DingTalkConfig:
+    endpoint_id: str = ""
+    name: str = ""
     webhook_url: str = ""
     secret: str = ""
     timeout_seconds: float = 10.0
@@ -207,6 +209,8 @@ def dingtalk_config_status(config: DingTalkConfig | None = None) -> dict[str, An
     parsed = urlparse(resolved.webhook_url)
     return {
         "provider": "dingtalk_webhook",
+        "endpoint_id": resolved.endpoint_id,
+        "name": resolved.name,
         "configured": bool(resolved.webhook_url),
         "source": resolved.source,
         "has_secret": bool(resolved.secret),
