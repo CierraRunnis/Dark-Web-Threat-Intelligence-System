@@ -78,10 +78,16 @@ def notify_code_monitoring_hits(
     *,
     wechat_config: BotConfig | None = None,
     dingtalk_config: DingTalkConfig | None = None,
+    dingtalk_configs: list[DingTalkConfig] | None = None,
     _load_default_configs: bool = True,
 ) -> dict[str, Any]:
     eligible_hits = _primary_hits(hits)
-    if _load_default_configs and wechat_config is None and dingtalk_config is None:
+    if (
+        _load_default_configs
+        and wechat_config is None
+        and dingtalk_config is None
+        and dingtalk_configs is None
+    ):
         from darkweb_collector.watchlist_notifications import load_watchlist_channel_configs
 
         aggregate: dict[str, Any] = {
@@ -105,7 +111,7 @@ def notify_code_monitoring_hits(
             scoped = notify_code_monitoring_hits(
                 object_hits,
                 wechat_config=scoped_wechat,
-                dingtalk_config=scoped_dingtalk,
+                dingtalk_configs=scoped_dingtalk,
                 _load_default_configs=False,
             )
             aggregate["objects"].append({"watchlist_id": watchlist_id, "result": scoped})
@@ -118,20 +124,29 @@ def notify_code_monitoring_hits(
 
     config_errors: list[dict[str, Any]] = []
     resolved_wechat: BotConfig | None = wechat_config
-    resolved_dingtalk: DingTalkConfig | None = dingtalk_config
+    resolved_dingtalk = (
+        list(dingtalk_configs)
+        if dingtalk_configs is not None
+        else ([dingtalk_config] if dingtalk_config else [])
+    )
     if resolved_wechat is None and _load_default_configs:
         try:
             resolved_wechat = load_bot_config()
         except Exception as exc:
             config_errors.append({"channel": "wechat_work", "error": str(exc)})
-    if resolved_dingtalk is None and _load_default_configs:
+    if (
+        not resolved_dingtalk
+        and dingtalk_configs is None
+        and dingtalk_config is None
+        and _load_default_configs
+    ):
         try:
-            resolved_dingtalk = load_dingtalk_config()
+            resolved_dingtalk = [load_dingtalk_config()]
         except Exception as exc:
             config_errors.append({"channel": "dingtalk", "error": str(exc)})
     channel_ready = {
         "wechat_work": bool(resolved_wechat and _wechat_ready(resolved_wechat)),
-        "dingtalk": bool(resolved_dingtalk and dingtalk_config_status(resolved_dingtalk).get("configured")),
+        "dingtalk": any(dingtalk_config_status(config).get("configured") for config in resolved_dingtalk),
     }
     result: dict[str, Any] = {
         "eligible": len(eligible_hits),
@@ -158,11 +173,22 @@ def notify_code_monitoring_hits(
                 result["errors"].append({"channel": "wechat_work", "hit_id": hit.get("id"), "error": str(exc)})
                 logger.exception("failed to send code monitoring hit to WeCom")
         if channel_ready["dingtalk"]:
-            try:
-                post_dingtalk_markdown(content, resolved_dingtalk, title="代码泄露监测通知")
-                result["sent"] += 1
-            except Exception as exc:
-                result["failed"] += 1
-                result["errors"].append({"channel": "dingtalk", "hit_id": hit.get("id"), "error": str(exc)})
-                logger.exception("failed to send code monitoring hit to DingTalk")
+            for config in resolved_dingtalk:
+                if not dingtalk_config_status(config).get("configured"):
+                    continue
+                try:
+                    post_dingtalk_markdown(content, config, title="代码泄露监测通知")
+                    result["sent"] += 1
+                except Exception as exc:
+                    result["failed"] += 1
+                    result["errors"].append(
+                        {
+                            "channel": "dingtalk",
+                            "endpoint_id": config.endpoint_id,
+                            "name": config.name,
+                            "hit_id": hit.get("id"),
+                            "error": str(exc),
+                        }
+                    )
+                    logger.exception("failed to send code monitoring hit to DingTalk")
     return result

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,6 @@ from darkweb_collector.dingtalk_bot import (
     dingtalk_config_status,
     load_dingtalk_config,
     post_dingtalk_markdown,
-    set_dingtalk_config,
 )
 from darkweb_collector.runtime import default_db_path
 
@@ -31,6 +32,8 @@ from darkweb_collector.runtime import default_db_path
 PROFILE_FILE = "profile.json"
 WECOM_FILE = "wecom.json"
 DINGTALK_FILE = "dingtalk.json"
+DINGTALK_CONFIG_VERSION = 2
+LEGACY_DINGTALK_ENDPOINT_ID = "legacy"
 
 
 def _now_utc_iso() -> str:
@@ -66,6 +69,87 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _dingtalk_entries(path: Path) -> list[dict[str, Any]]:
+    payload = _read_json(path)
+    endpoints = payload.get("endpoints")
+    if isinstance(endpoints, list):
+        return [
+            item
+            for item in endpoints
+            if isinstance(item, dict) and str(item.get("webhook_url") or "").strip()
+        ]
+    if str(payload.get("webhook_url") or "").strip():
+        return [
+            {
+                "id": LEGACY_DINGTALK_ENDPOINT_ID,
+                "name": "原钉钉机器人",
+                "webhook_url": payload.get("webhook_url"),
+                "secret": payload.get("secret"),
+                "updated_at": payload.get("updated_at"),
+            }
+        ]
+    return []
+
+
+def load_watchlist_dingtalk_configs(watchlist_id: int) -> list[DingTalkConfig]:
+    _, _, path = _paths(watchlist_id)
+    configs: list[DingTalkConfig] = []
+    for index, item in enumerate(_dingtalk_entries(path), start=1):
+        config = load_dingtalk_config(
+            webhook_url=str(item.get("webhook_url") or ""),
+            secret=str(item.get("secret") or ""),
+            settings_path=path,
+        )
+        configs.append(
+            replace(
+                config,
+                endpoint_id=str(item.get("id") or f"endpoint-{index}"),
+                name=str(item.get("name") or f"钉钉机器人 {index}"),
+                source="saved_file",
+                updated_at=str(item.get("updated_at") or ""),
+            )
+        )
+    return configs
+
+
+def _save_watchlist_dingtalk_configs(watchlist_id: int, configs: list[DingTalkConfig]) -> None:
+    _, _, path = _paths(watchlist_id)
+    updated_at = _now_utc_iso()
+    _write_json(
+        path,
+        {
+            "version": DINGTALK_CONFIG_VERSION,
+            "endpoints": [
+                {
+                    "id": config.endpoint_id,
+                    "name": config.name,
+                    "webhook_url": config.webhook_url,
+                    "secret": config.secret,
+                    "updated_at": config.updated_at or updated_at,
+                }
+                for config in configs
+            ],
+            "updated_at": updated_at,
+        },
+    )
+
+
+def _watchlist_dingtalk_status(watchlist_id: int) -> dict[str, Any]:
+    configs = load_watchlist_dingtalk_configs(watchlist_id)
+    _, _, path = _paths(watchlist_id)
+    endpoints = [dingtalk_config_status(config) for config in configs]
+    return {
+        "provider": "dingtalk_webhook",
+        "configured": bool(endpoints),
+        "endpoint_count": len(endpoints),
+        "has_secret": any(bool(item.get("has_secret")) for item in endpoints),
+        "webhook_host": "oapi.dingtalk.com" if endpoints else "",
+        "settings_path": str(path),
+        "updated_at": max((str(item.get("updated_at") or "") for item in endpoints), default=""),
+        "endpoints": endpoints,
+    }
 
 
 def _require_watchlist(watchlist_id: int) -> dict[str, Any]:
@@ -128,8 +212,7 @@ def save_watchlist_notification_profile(
         profile["wechat_enabled"] = bool(wechat_enabled)
     if dingtalk_enabled is not None:
         if dingtalk_enabled:
-            _, _, dingtalk_path = _paths(watchlist_id)
-            if not dingtalk_config_status(load_dingtalk_config(settings_path=dingtalk_path)).get("configured"):
+            if not _watchlist_dingtalk_status(watchlist_id).get("configured"):
                 raise ValueError("当前监测对象尚未配置钉钉")
         profile["dingtalk_enabled"] = bool(dingtalk_enabled)
     profile["updated_at"] = _now_utc_iso()
@@ -141,9 +224,9 @@ def save_watchlist_notification_profile(
 def get_watchlist_notification_profile(watchlist_id: int) -> dict[str, Any]:
     watchlist = _require_watchlist(watchlist_id)
     profile = _load_profile(watchlist_id)
-    _, wecom_path, dingtalk_path = _paths(watchlist_id)
+    _, wecom_path, _ = _paths(watchlist_id)
     wechat = bot_config_status(load_bot_config(settings_path=wecom_path))
-    dingtalk = dingtalk_config_status(load_dingtalk_config(settings_path=dingtalk_path))
+    dingtalk = _watchlist_dingtalk_status(watchlist_id)
     return {
         "watchlist_id": int(watchlist_id),
         "watchlist_name": str(watchlist.get("name") or ""),
@@ -184,11 +267,59 @@ def set_watchlist_dingtalk_config(
     *,
     webhook_url: str,
     secret: str = "",
+    name: str = "",
 ) -> dict[str, Any]:
     _require_watchlist(watchlist_id)
     _, _, dingtalk_path = _paths(watchlist_id)
-    set_dingtalk_config(webhook_url=webhook_url, secret=secret, settings_path=dingtalk_path)
+    validated = load_dingtalk_config(
+        webhook_url=webhook_url,
+        secret=secret,
+        settings_path=dingtalk_path,
+    )
+    configs = load_watchlist_dingtalk_configs(watchlist_id)
+    existing_index = next(
+        (index for index, item in enumerate(configs) if item.webhook_url == validated.webhook_url),
+        None,
+    )
+    if existing_index is None:
+        endpoint_id = uuid.uuid4().hex[:12]
+        endpoint_name = str(name or "").strip() or f"钉钉机器人 {len(configs) + 1}"
+        configs.append(
+            replace(
+                validated,
+                endpoint_id=endpoint_id,
+                name=endpoint_name,
+                source="saved_file",
+                updated_at=_now_utc_iso(),
+            )
+        )
+    else:
+        existing = configs[existing_index]
+        configs[existing_index] = replace(
+            validated,
+            endpoint_id=existing.endpoint_id,
+            name=str(name or "").strip() or existing.name,
+            secret=validated.secret or existing.secret,
+            source="saved_file",
+            updated_at=_now_utc_iso(),
+        )
+    _save_watchlist_dingtalk_configs(watchlist_id, configs)
     return save_watchlist_notification_profile(watchlist_id, dingtalk_enabled=True)
+
+
+def delete_watchlist_dingtalk_endpoint(watchlist_id: int, endpoint_id: str) -> dict[str, Any]:
+    _require_watchlist(watchlist_id)
+    selected_id = str(endpoint_id or "").strip()
+    configs = load_watchlist_dingtalk_configs(watchlist_id)
+    remaining = [config for config in configs if config.endpoint_id != selected_id]
+    if len(remaining) == len(configs):
+        raise ValueError(f"dingtalk endpoint not found: {selected_id}")
+    _, _, path = _paths(watchlist_id)
+    if remaining:
+        _save_watchlist_dingtalk_configs(watchlist_id, remaining)
+    else:
+        delete_dingtalk_config(settings_path=path)
+    return save_watchlist_notification_profile(watchlist_id, dingtalk_enabled=bool(remaining))
 
 
 def delete_watchlist_dingtalk_config(watchlist_id: int) -> dict[str, Any]:
@@ -200,11 +331,11 @@ def delete_watchlist_dingtalk_config(watchlist_id: int) -> dict[str, Any]:
 
 def load_watchlist_channel_configs(
     watchlist_id: int,
-) -> tuple[BotConfig | None, DingTalkConfig | None, dict[str, Any]]:
+) -> tuple[BotConfig | None, list[DingTalkConfig], dict[str, Any]]:
     profile = _load_profile(watchlist_id)
-    _, wecom_path, dingtalk_path = _paths(watchlist_id)
+    _, wecom_path, _ = _paths(watchlist_id)
     wechat = load_bot_config(settings_path=wecom_path) if profile["wechat_enabled"] else None
-    dingtalk = load_dingtalk_config(settings_path=dingtalk_path) if profile["dingtalk_enabled"] else None
+    dingtalk = load_watchlist_dingtalk_configs(watchlist_id) if profile["dingtalk_enabled"] else []
     return wechat, dingtalk, profile
 
 
@@ -241,16 +372,37 @@ def send_watchlist_test(
     watchlist_id: int,
     channel: str,
     content: str,
+    endpoint_id: str = "",
 ) -> dict[str, Any]:
-    wechat, dingtalk, _ = load_watchlist_channel_configs(watchlist_id)
+    wechat, _, _ = load_watchlist_channel_configs(watchlist_id)
     if channel == "wechat_work":
         if wechat is None:
             raise ValueError("当前监测对象未启用企业微信")
         return post_bot_payload(build_markdown_payload(content), wechat)
     if channel == "dingtalk":
-        if dingtalk is None:
+        dingtalk_configs = load_watchlist_dingtalk_configs(watchlist_id)
+        selected = [
+            config
+            for config in dingtalk_configs
+            if not endpoint_id or config.endpoint_id == str(endpoint_id).strip()
+        ]
+        if not selected:
             raise ValueError("当前监测对象未启用钉钉")
-        return post_dingtalk_markdown(content, dingtalk, title="监测对象通知测试")
+        result: dict[str, Any] = {"ok": True, "sent": 0, "failed": 0, "results": [], "errors": []}
+        for config in selected:
+            try:
+                response = post_dingtalk_markdown(content, config, title="监测对象通知测试")
+                result["sent"] += 1
+                result["results"].append(
+                    {"endpoint_id": config.endpoint_id, "name": config.name, "response": response}
+                )
+            except Exception as exc:
+                result["ok"] = False
+                result["failed"] += 1
+                result["errors"].append(
+                    {"endpoint_id": config.endpoint_id, "name": config.name, "error": str(exc)}
+                )
+        return result
     raise ValueError(f"unsupported channel: {channel}")
 
 

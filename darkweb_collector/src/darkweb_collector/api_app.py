@@ -174,6 +174,7 @@ from darkweb_collector.tor_bridge_control import (
 from darkweb_collector.version_check import build_version_status, current_version_payload
 from darkweb_collector.watchlist_notifications import (
     delete_watchlist_dingtalk_config,
+    delete_watchlist_dingtalk_endpoint,
     delete_watchlist_wechat_config,
     ensure_watchlist_wecom_listeners,
     get_watchlist_notification_profile,
@@ -999,6 +1000,7 @@ class WatchlistWeChatConfigRequest(BaseModel):
 
 
 class WatchlistDingTalkConfigRequest(BaseModel):
+    name: str = ""
     webhook_url: SecretStr
     secret: SecretStr = Field(default_factory=lambda: SecretStr(""))
 
@@ -1709,6 +1711,7 @@ def update_code_monitoring_watchlist_dingtalk(
     try:
         return set_watchlist_dingtalk_config(
             watchlist_id,
+            name=payload.name,
             webhook_url=payload.webhook_url.get_secret_value(),
             secret=payload.secret.get_secret_value(),
         )
@@ -1724,6 +1727,14 @@ def remove_code_monitoring_watchlist_dingtalk(watchlist_id: int) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.delete("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk/{endpoint_id}")
+def remove_code_monitoring_watchlist_dingtalk_endpoint(watchlist_id: int, endpoint_id: str) -> dict:
+    try:
+        return delete_watchlist_dingtalk_endpoint(watchlist_id, endpoint_id)
+    except (ValueError, DingTalkBotError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/code-monitoring/watchlists/{watchlist_id}/notifications/{channel}/test")
 def test_code_monitoring_watchlist_notification(
     watchlist_id: int,
@@ -1734,6 +1745,19 @@ def test_code_monitoring_watchlist_notification(
     try:
         return send_watchlist_test(watchlist_id, channel, content)
     except (ValueError, BotAssistantError, DingTalkBotError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk/{endpoint_id}/test")
+def test_code_monitoring_watchlist_dingtalk_endpoint(
+    watchlist_id: int,
+    endpoint_id: str,
+    payload: WatchlistNotificationTestRequest,
+) -> dict:
+    content = payload.content.strip() or f"### 玄鉴威胁情报平台\n> 监测对象 {watchlist_id} 钉钉通知测试"
+    try:
+        return send_watchlist_test(watchlist_id, "dingtalk", content, endpoint_id=endpoint_id)
+    except (ValueError, DingTalkBotError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

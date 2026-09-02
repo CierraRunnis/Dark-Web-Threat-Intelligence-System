@@ -2743,16 +2743,70 @@ export function initializePrototype() {
 
     function renderDingTalk(payload = {}) {
       const configured = Boolean(payload.configured)
-      setBadge('dingtalk-status', configured ? '已配置' : '待配置', configured ? 'badge-success' : '')
+      const endpoints = Array.isArray(payload.endpoints) ? payload.endpoints : []
+      const endpointCount = Number(payload.endpoint_count ?? (endpoints.length || (configured ? 1 : 0)))
+      const secretCount = endpoints.length
+        ? endpoints.filter((item) => Boolean(item.has_secret)).length
+        : (payload.has_secret ? 1 : 0)
+      setBadge('dingtalk-status', configured ? `已配置 ${endpointCount} 个` : '待配置', configured ? 'badge-success' : '')
       bindText('dingtalk-webhook-status', configured ? (payload.webhook_host || '已配置') : '未配置')
       bindText('dingtalk-secret-status', payload.has_secret ? '已配置' : '未配置（可选）')
+      bindText('dingtalk-endpoint-count', endpointCount)
+      bindText('dingtalk-secret-count', secretCount)
       const webhook = $('#dingtalk-webhook', root)
       const secret = $('#dingtalk-secret', root)
+      const name = $('#dingtalk-name', root)
       if (webhook) {
         webhook.value = ''
-        webhook.placeholder = configured ? '已配置；输入新 Webhook 可替换' : '输入钉钉机器人 Webhook 或 access_token'
+        webhook.placeholder = '输入新的钉钉机器人 Webhook 或 access_token'
       }
       if (secret) secret.value = ''
+      if (name) name.value = ''
+
+      const list = $('#dingtalk-endpoint-list', root)
+      if (!list) return
+      list.replaceChildren()
+      if (!endpoints.length) {
+        const empty = document.createElement('p')
+        empty.className = 'dingtalk-endpoint-empty'
+        empty.textContent = '当前对象尚未配置钉钉机器人'
+        list.appendChild(empty)
+        return
+      }
+      endpoints.forEach((endpoint, index) => {
+        const endpointId = String(endpoint.endpoint_id || '')
+        const item = document.createElement('div')
+        item.className = 'dingtalk-endpoint-item'
+
+        const identity = document.createElement('div')
+        identity.className = 'dingtalk-endpoint-identity'
+        const title = document.createElement('strong')
+        title.textContent = endpoint.name || `钉钉机器人 ${index + 1}`
+        const detail = document.createElement('small')
+        detail.textContent = endpoint.has_secret ? '已启用加签' : '未启用加签'
+        identity.append(title, detail)
+
+        const maskedWebhook = document.createElement('div')
+        maskedWebhook.className = 'dingtalk-endpoint-webhook'
+        maskedWebhook.textContent = endpoint.masked_webhook_url || endpoint.webhook_host || 'Webhook 已保存'
+
+        const actions = document.createElement('div')
+        actions.className = 'dingtalk-endpoint-row-actions'
+        const testButton = document.createElement('button')
+        testButton.type = 'button'
+        testButton.className = 'btn btn-ghost'
+        testButton.textContent = '测试'
+        testButton.dataset.dingtalkEndpointTest = endpointId
+        const deleteButton = document.createElement('button')
+        deleteButton.type = 'button'
+        deleteButton.className = 'btn btn-danger'
+        deleteButton.textContent = '删除'
+        deleteButton.dataset.dingtalkEndpointDelete = endpointId
+        deleteButton.dataset.dingtalkEndpointName = title.textContent
+        actions.append(testButton, deleteButton)
+        item.append(identity, maskedWebhook, actions)
+        list.appendChild(item)
+      })
     }
 
     function renderWatchlistNotifications(payload = {}) {
@@ -3160,6 +3214,27 @@ export function initializePrototype() {
         refreshObjectReadiness()
         return
       }
+      if (button.dataset.dingtalkEndpointTest) return void runAction(button, async () => {
+        const watchlistId = codeConfigState.selectedWatchlistId
+        if (!watchlistId) throw new Error('请先选择监测对象')
+        const endpointId = encodeURIComponent(button.dataset.dingtalkEndpointTest)
+        const result = await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk/${endpointId}/test`, {
+          method: 'POST',
+          body: JSON.stringify({ content: `### 玄鉴威胁情报平台\n> 当前钉钉机器人测试：${new Date().toLocaleString('zh-CN')}` })
+        })
+        if (Number(result.failed || 0) > 0) throw new Error(result.errors?.[0]?.error || '钉钉机器人测试失败')
+        return result
+      }, '钉钉机器人测试消息已发送')
+      if (button.dataset.dingtalkEndpointDelete) {
+        const endpointName = button.dataset.dingtalkEndpointName || '该钉钉机器人'
+        if (!window.confirm(`仅删除当前监测对象的“${endpointName}”，其他机器人不受影响。确认删除？`)) return
+        return void runAction(button, async () => {
+          const watchlistId = codeConfigState.selectedWatchlistId
+          if (!watchlistId) throw new Error('请先选择监测对象')
+          const endpointId = encodeURIComponent(button.dataset.dingtalkEndpointDelete)
+          renderWatchlistNotifications(await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk/${endpointId}`, { method: 'DELETE' }))
+        }, '钉钉机器人已删除')
+      }
       if (action === 'refresh') return void refreshCollector()
       if (action === 'filter-failed') {
         const filter = $('[data-filter-target="collector-task-list"][data-filter-key="status"]', root)
@@ -3224,30 +3299,31 @@ export function initializePrototype() {
       if (action === 'dingtalk-save') return void runAction(button, async () => {
         const watchlistId = codeConfigState.selectedWatchlistId
         if (!watchlistId) throw new Error('请先选择监测对象')
+        const name = $('#dingtalk-name', root)?.value.trim() || ''
         const webhookUrl = $('#dingtalk-webhook', root)?.value.trim()
         const secret = $('#dingtalk-secret', root)?.value.trim() || ''
-        if (webhookUrl) {
-          await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk`, { method: 'PUT', body: JSON.stringify({ webhook_url: webhookUrl, secret }) })
-          const enabled = $('#watchlist-dingtalk-enabled', root)
-          if (enabled) enabled.checked = true
-        } else if (!watchlistNotificationState.dingtalk?.configured) {
-          throw new Error('请输入当前监测对象的钉钉 Webhook 或 access_token')
-        }
-        await saveWatchlistNotificationProfile()
-      }, '当前对象钉钉配置已保存')
+        if (!webhookUrl) throw new Error('请输入要添加的钉钉 Webhook 或 access_token')
+        renderWatchlistNotifications(await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk`, {
+          method: 'PUT',
+          body: JSON.stringify({ name, webhook_url: webhookUrl, secret })
+        }))
+      }, '钉钉机器人已添加')
+      if (action === 'dingtalk-toggle-save') return void runAction(button, saveWatchlistNotificationProfile, '当前对象钉钉启用状态已保存')
       if (action === 'dingtalk-delete') {
-        if (!window.confirm('仅删除当前监测对象的钉钉配置，不影响其他对象。确认删除？')) return
+        if (!window.confirm('将删除当前监测对象的全部钉钉机器人，不影响其他对象。确认清空？')) return
         return void runAction(button, async () => {
           const watchlistId = codeConfigState.selectedWatchlistId
           if (!watchlistId) throw new Error('请先选择监测对象')
           renderWatchlistNotifications(await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk`, { method: 'DELETE' }))
-        }, '当前对象钉钉配置已删除')
+        }, '当前对象钉钉机器人已清空')
       }
-      if (action === 'dingtalk-test') return void runAction(button, () => {
+      if (action === 'dingtalk-test') return void runAction(button, async () => {
         const watchlistId = codeConfigState.selectedWatchlistId
         if (!watchlistId) throw new Error('请先选择监测对象')
-        return request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk/test`, { method: 'POST', body: JSON.stringify({ content: `### 玄鉴威胁情报平台\n> 当前监测对象钉钉测试：${new Date().toLocaleString('zh-CN')}` }) })
-      }, '当前对象钉钉测试消息已发送')
+        const result = await request(`/api/code-monitoring/watchlists/${encodeURIComponent(watchlistId)}/notifications/dingtalk/test`, { method: 'POST', body: JSON.stringify({ content: `### 玄鉴威胁情报平台\n> 当前监测对象钉钉测试：${new Date().toLocaleString('zh-CN')}` }) })
+        if (Number(result.failed || 0) > 0) throw new Error(`已成功 ${result.sent || 0} 个，失败 ${result.failed} 个：${result.errors?.[0]?.error || '请检查机器人配置'}`)
+        return result
+      }, '全部钉钉机器人测试消息已发送')
       if (button.dataset.siteRun) return void runAction(button, async () => requireDispatched(await request('/api/jobs/run-site', { method: 'POST', body: JSON.stringify({ site_name: button.dataset.siteRun, force: true }) })), `已触发 ${button.dataset.siteRun} 运行一次`)
       if (button.dataset.siteToggle) {
         const enabled = button.dataset.enabled !== 'true'
