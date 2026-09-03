@@ -139,12 +139,28 @@ def _show_runs(limit: int) -> int:
 
 
 def _sync_public_vulns(sample_file: str | None, limit: int) -> int:
-    print(json.dumps(sync_public_vulnerability_feed(sample_file=sample_file, limit=limit), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            sync_public_vulnerability_feed(
+                sample_file=sample_file,
+                limit=limit,
+                refresh_normalized=False,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 
 def _sync_ransomware_live(limit: int) -> int:
-    print(json.dumps(sync_ransomware_live_victims(limit=limit), ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            sync_ransomware_live_victims(limit=limit, refresh_normalized=False),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 0
 
 

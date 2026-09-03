@@ -151,6 +151,10 @@ from darkweb_collector.remote_browser_sessions import (
 from darkweb_collector.config import get_site_config
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
+from darkweb_collector.normalization_runtime import (
+    start_normalization_worker,
+    stop_normalization_worker,
+)
 from darkweb_collector.db import (
     get_db_connection,
     list_monitoring_keyword_notifications,
@@ -451,6 +455,10 @@ def warm_payloads_on_startup() -> None:
         start_site_connectivity_monitor()
     except Exception:
         logger.exception("failed to start daily site connectivity monitor")
+    try:
+        start_normalization_worker()
+    except Exception:
+        logger.exception("failed to start normalized intelligence background refresh")
     global _warmup_started
     if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
         logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
@@ -464,6 +472,11 @@ def warm_payloads_on_startup() -> None:
             return
         _warmup_started = True
     Thread(target=_run_payload_warmup, name="api-payload-warmup", daemon=True).start()
+
+
+@app.on_event("shutdown")
+def stop_background_workers() -> None:
+    stop_normalization_worker()
 
 
 @app.get("/api/health")

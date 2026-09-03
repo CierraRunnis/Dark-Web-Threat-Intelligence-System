@@ -675,7 +675,11 @@ def _run_vulnerability_sync(limit: int, prefer_live: bool = True) -> dict[str, A
         _vulnerability_sync_last_tick_at = utc_now_iso()
         _vulnerability_sync_last_error = ""
     try:
-        result = sync_public_vulnerability_feed(limit=limit, prefer_live=prefer_live)
+        result = sync_public_vulnerability_feed(
+            limit=limit,
+            prefer_live=prefer_live,
+            refresh_normalized=False,
+        )
         with _vulnerability_sync_lock:
             _vulnerability_sync_last_success_at = utc_now_iso()
             _vulnerability_sync_last_mode = str(result.get("mode") or "")
@@ -808,7 +812,7 @@ def _run_ransomware_sync(limit: int) -> dict[str, Any]:
         _ransomware_sync_last_tick_at = utc_now_iso()
         _ransomware_sync_last_error = ""
     try:
-        result = sync_ransomware_live_victims(limit=limit, refresh_normalized=True)
+        result = sync_ransomware_live_victims(limit=limit, refresh_normalized=False)
         with _ransomware_sync_lock:
             _ransomware_sync_last_success_at = utc_now_iso()
             _ransomware_sync_last_source = str(result.get("source") or "")

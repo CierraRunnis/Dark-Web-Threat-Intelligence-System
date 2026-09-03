@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sqlite3
 import socket
+from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -54,6 +55,8 @@ from darkweb_collector.vulnerability_i18n import (
 
 
 logger = logging.getLogger(__name__)
+NORMALIZED_REFRESH_ADVISORY_LOCK_ID = int.from_bytes(b"DWTINORM", "big")
+_NORMALIZED_REFRESH_LOCK = Lock()
 DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
 WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
@@ -1913,6 +1916,20 @@ def should_refresh_normalized_intelligence(connection) -> bool:
     return False
 
 
+def _try_acquire_normalized_refresh_lock(connection) -> tuple[bool, bool]:
+    if getattr(connection, "backend_name", "") == "postgresql":
+        row = connection.execute(
+            "SELECT pg_try_advisory_xact_lock(?) AS acquired",
+            (NORMALIZED_REFRESH_ADVISORY_LOCK_ID,),
+        ).fetchone()
+        return bool(row and row["acquired"]), False
+    return _NORMALIZED_REFRESH_LOCK.acquire(blocking=False), True
+
+
+def _load_normalized_rows_without_refresh(connection) -> list[dict[str, Any]]:
+    return [_hydrate_event_row(row) for row in list_normalized_intelligence_events(connection)]
+
+
 def _forum_rows(connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
@@ -3141,9 +3158,18 @@ def ensure_normalized_intelligence(
     *,
     enrichment_budget: int | None = None,
 ) -> list[dict[str, Any]]:
-    if force or should_refresh_normalized_intelligence(connection):
+    if not force and not should_refresh_normalized_intelligence(connection):
+        return load_normalized_events(connection, refresh=False)
+    acquired, release_local = _try_acquire_normalized_refresh_lock(connection)
+    if not acquired:
+        return _load_normalized_rows_without_refresh(connection)
+    try:
+        if not force and not should_refresh_normalized_intelligence(connection):
+            return _load_normalized_rows_without_refresh(connection)
         return refresh_normalized_intelligence(connection, enrichment_budget=enrichment_budget)
-    return load_normalized_events(connection, refresh=False)
+    finally:
+        if release_local:
+            _NORMALIZED_REFRESH_LOCK.release()
 
 
 def load_normalized_events(connection, refresh: bool = False) -> list[dict[str, Any]]:

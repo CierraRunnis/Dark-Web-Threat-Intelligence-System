@@ -2336,13 +2336,13 @@ export function initializePrototype() {
         const cells = [
           [item.display_name || item.site_name || '未知站点', `${moduleLabel} · ${needsLogin(item) ? '需要登录' : item.auth_required ? '会话站点' : '公开站点'}`],
           [statusLabel(item.overall_status), ''],
-          [item.running_jobs || 0, ''],
+          [`${item.running_jobs || 0} / ${item.enqueued_jobs || 0}`, ''],
           [item.failed_jobs_24h || 0, ''],
           [`${item.consecutive_failures || 0}/${item.failure_threshold || 3}`, ''],
           [item.circuit_breaker_open ? '冷却中' : '关闭', ''],
           [formatDate(item.last_success_at), '']
         ]
-        const labels = ['站点', '状态', '运行中', '24h 失败', '连续失败', '熔断', '最近成功']
+        const labels = ['站点', '状态', '执行 / 排队', '24h 失败', '连续失败', '熔断', '最近成功']
         cells.forEach(([primary, secondary], index) => {
           const cell = document.createElement('td')
           cell.dataset.label = labels[index]
@@ -2687,6 +2687,72 @@ export function initializePrototype() {
       refreshTable(list)
     }
 
+    function renderFailureHistory(payload = {}) {
+      const history = Array.isArray(payload.failed_job_history) ? payload.failed_job_history : []
+      const total = Number(payload.failed_job_history_total ?? history.length)
+      const limit = Number(payload.failed_job_history_limit || history.length)
+      bindText('failure-history-count', total > history.length ? `最近 ${history.length} 条` : `${total} 条`)
+
+      const list = $('[data-failure-history-list]', root)
+      if (!list) return
+      list.replaceChildren()
+      list.dataset.page = '1'
+
+      const note = $('[data-failure-history-note]', root)
+      if (note) {
+        note.textContent = total > history.length
+          ? `数据库共有 ${total} 条真实失败任务，当前展示最近 ${Math.min(limit, history.length)} 条。`
+          : `共 ${total} 条真实失败任务；不受 24 小时窗口和后续成功影响。`
+      }
+
+      history.forEach((item) => {
+        const article = document.createElement('article')
+        article.className = 'task-list-item'
+        article.dataset.tableRow = ''
+        article.dataset.status = 'failed'
+        article.dataset.type = item.job_type || ''
+
+        const state = document.createElement('div')
+        state.className = 'task-state'
+        const status = document.createElement('span')
+        status.className = 'task-status-dot failed'
+        status.textContent = '失败'
+        state.appendChild(status)
+
+        const identity = document.createElement('div')
+        identity.className = 'task-identity'
+        const title = document.createElement('h3')
+        title.textContent = item.display_name || item.site_name || '未知站点'
+        const type = document.createElement('p')
+        const jobType = { seed: '种子任务', detail: '详情任务' }[item.job_type] || item.job_type || '采集任务'
+        type.textContent = item.queue_name ? `${jobType} · ${item.queue_name}` : jobType
+        identity.append(title, type)
+
+        const context = document.createElement('div')
+        context.className = 'task-context'
+        const target = document.createElement('strong')
+        target.textContent = item.target || '—'
+        const message = document.createElement('p')
+        message.textContent = item.error_message || '任务执行失败'
+        context.append(target, message)
+
+        const meta = document.createElement('div')
+        meta.className = 'task-meta'
+        const time = document.createElement('span')
+        time.textContent = formatDate(item.finished_at || item.started_at || item.enqueued_at)
+        meta.appendChild(time)
+        if (item.duration_ms !== null && item.duration_ms !== undefined && item.duration_ms !== '' && Number.isFinite(Number(item.duration_ms))) {
+          const duration = document.createElement('span')
+          duration.textContent = `${(Number(item.duration_ms) / 1000).toFixed(1)} 秒`
+          meta.appendChild(duration)
+        }
+
+        article.append(state, identity, context, meta)
+        list.appendChild(article)
+      })
+      refreshTable(list)
+    }
+
     function renderJobs(payload = {}) {
       const overall = statusLabel(payload.overall_status)
       bindText('running-jobs', Number(payload.running_jobs || 0))
@@ -2704,6 +2770,7 @@ export function initializePrototype() {
       bindText('normalized-count', runtime.copied_counts?.normalized_intelligence_events ?? '—')
       renderSiteHealth(payload.site_health || [])
       renderTasks(payload)
+      renderFailureHistory(payload)
       setBadge('site-health-summary', overall === '正常' ? '全部正常' : '部分异常', overall === '正常' ? 'badge-success' : 'badge-high')
     }
 

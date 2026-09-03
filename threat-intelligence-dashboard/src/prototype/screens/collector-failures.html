@@ -6,7 +6,7 @@
   <title>任务列表 · 玄鉴</title>
   <link rel="stylesheet" href="styles.css">
 </head>
-<body class="page-collector">
+<body class="page-collector page-collector-failures">
   <a class="skip-link" href="#content">跳到主要内容</a>
   <div class="app-shell sidebar-collapsed">
     <aside class="app-sidebar" data-od-id="collector-failures-sidebar">
@@ -50,7 +50,19 @@
           </header>
           <div class="task-list" id="collector-task-list" data-table data-task-list data-od-id="collector-task-list"></div>
           <div class="collector-table-empty" data-table-empty="collector-task-list">暂无任务记录，连接采集服务后将显示各状态任务。</div>
-          <footer class="collector-table-foot"><span>任务状态由采集服务实时更新，失败记录保留最近 24 小时。</span><a href="collector-run-detail.html">打开运行详情 →</a></footer>
+          <footer class="collector-table-foot"><span>当前异常摘要仅展示最近 24 小时内尚未恢复的问题；完整失败记录见下方历史列表。</span><a href="collector-run-detail.html">打开运行详情 →</a></footer>
+        </section>
+
+        <section class="task-surface" data-od-id="collector-failure-history-section">
+          <header class="collector-table-toolbar">
+            <div><span>历史失败记录</span><strong data-bind="failure-history-count">0 条</strong></div>
+            <div class="collector-filter-row">
+              <label class="compact-search"><span class="sr-only">搜索历史失败记录</span><input class="input" type="search" placeholder="搜索站点、任务、目标或错误" data-table-search="collector-failure-history-list"></label>
+            </div>
+          </header>
+          <div class="task-list" id="collector-failure-history-list" data-table data-failure-history-list data-od-id="collector-failure-history-list"></div>
+          <div class="collector-table-empty" data-table-empty="collector-failure-history-list">暂无真实失败任务记录。</div>
+          <footer class="collector-table-foot"><span data-failure-history-note>仅展示数据库中状态为 failed 的真实任务，不受 24 小时窗口和后续成功影响。</span></footer>
         </section>
       </main>
     </div>
