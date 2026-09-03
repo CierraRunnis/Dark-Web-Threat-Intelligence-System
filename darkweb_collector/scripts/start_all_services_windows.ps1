@@ -53,17 +53,17 @@ $VulnSyncLimit = if ($env:VULN_SYNC_LIMIT) { [int]$env:VULN_SYNC_LIMIT } else { 
 $ConfiguredBrowserConcurrency = 3
 if ($env:DARKWEB_BROWSER_CONCURRENCY) {
     try {
-        $ConfiguredBrowserConcurrency = [Math]::Max([int]$env:DARKWEB_BROWSER_CONCURRENCY, 1)
+        $ConfiguredBrowserConcurrency = [Math]::Max([int]$env:DARKWEB_BROWSER_CONCURRENCY, 3)
     }
     catch {
         $ConfiguredBrowserConcurrency = 3
     }
 }
 $BrowserPublicConcurrency = if ($env:DARKWEB_BROWSER_PUBLIC_CONCURRENCY) {
-    [Math]::Max([int]$env:DARKWEB_BROWSER_PUBLIC_CONCURRENCY, 1)
+    [Math]::Max([int]$env:DARKWEB_BROWSER_PUBLIC_CONCURRENCY, 2)
 }
 else {
-    [Math]::Max([int][Math]::Ceiling($ConfiguredBrowserConcurrency / 2.0), 1)
+    [Math]::Max([int][Math]::Ceiling($ConfiguredBrowserConcurrency / 2.0), 2)
 }
 $BrowserOnionConcurrency = if ($env:DARKWEB_BROWSER_ONION_CONCURRENCY) {
     [Math]::Max([int]$env:DARKWEB_BROWSER_ONION_CONCURRENCY, 1)

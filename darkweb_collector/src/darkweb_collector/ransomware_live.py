@@ -268,7 +268,7 @@ def sync_ransomware_live_victims(
 
 def _background_sync_worker(limit: int) -> None:
     try:
-        sync_ransomware_live_victims(limit=limit, refresh_normalized=True)
+        sync_ransomware_live_victims(limit=limit, refresh_normalized=False)
     except Exception:
         logger.exception("ransomware.live background sync failed")
 

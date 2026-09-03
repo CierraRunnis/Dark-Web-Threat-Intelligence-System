@@ -71,6 +71,26 @@ def _slot_retry_seconds(config: SiteConfig, job_id: str) -> int:
     return config.detail_slot_retry_seconds + digest % 5
 
 
+def _mark_retry_enqueued(
+    *,
+    job_id: str,
+    site_name: str,
+    job_type: str,
+    queue_name: str,
+    target: str,
+) -> None:
+    try:
+        mark_job_enqueued(
+            job_id=job_id,
+            site_name=site_name,
+            job_type=job_type,
+            queue_name=queue_name,
+            target=target,
+        )
+    except Exception:
+        logger.exception("failed to mark retrying %s job as enqueued", job_type)
+
+
 @app.task(bind=True, name="darkweb_collector.tasks.crawl_seed")
 def crawl_seed(self, site_name: str, force: bool = False) -> dict[str, object]:
     queue_name = _queue_name_from_request(self)
@@ -113,6 +133,13 @@ def crawl_seed(self, site_name: str, force: bool = False) -> dict[str, object]:
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         if self.request.retries < MAX_RETRIES:
+            _mark_retry_enqueued(
+                job_id=self.request.id,
+                site_name=site_name,
+                job_type="seed",
+                queue_name=queue_name,
+                target=site_name,
+            )
             raise self.retry(exc=exc, countdown=retry_backoff_seconds(self.request.retries))
         mark_job_finished(
             job_id=self.request.id,
@@ -207,6 +234,13 @@ def crawl_detail(
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         if fetch_attempt < MAX_RETRIES:
+            _mark_retry_enqueued(
+                job_id=self.request.id,
+                site_name=site_name,
+                job_type="detail",
+                queue_name=queue_name,
+                target=detail_task.target_url,
+            )
             raise self.retry(
                 exc=exc,
                 countdown=retry_backoff_seconds(fetch_attempt),

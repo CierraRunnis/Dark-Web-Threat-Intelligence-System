@@ -2181,6 +2181,28 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
 .task-context strong { display: block; font-weight: 650; }
 .task-meta { display: grid; justify-items: end; gap: 4px; color: var(--muted); font: 8px var(--font-mono); text-align: right; }
 .task-meta a { color: var(--accent); font-family: var(--font-body); font-weight: 700; }
+.page-collector-failures .domain-summary span { font-size: 12px; line-height: 1.4; }
+.page-collector-failures .domain-summary strong { font-size: 16px; }
+.page-collector-failures .task-failure-alert strong { font-size: 14px; }
+.page-collector-failures .task-failure-alert > div > span { margin-top: 4px; font-size: 12px; line-height: 1.45; }
+.page-collector-failures .task-failure-alert .btn { font-size: 13px; }
+.page-collector-failures .collector-table-toolbar { min-height: 60px; padding: 10px 14px; }
+.page-collector-failures .collector-table-toolbar > div:first-child span { font: 11px/1.35 var(--font-mono); }
+.page-collector-failures .collector-table-toolbar > div:first-child strong { margin-top: 4px; font-size: 14px; }
+.page-collector-failures .collector-filter-row .input,
+.page-collector-failures .collector-filter-row .select { min-height: 36px; padding: 7px 10px; font-size: 12px; }
+.page-collector-failures .collector-filter-row .compact-search .input { width: 250px; }
+.page-collector-failures .task-failed-filter { min-height: 36px; font-size: 13px; }
+.page-collector-failures .task-failed-filter strong { font-size: 11px; }
+.page-collector-failures .task-list-item { min-height: 82px; gap: 14px; padding: 12px 14px; }
+.page-collector-failures .task-status-dot { min-height: 26px; font-size: 12px; }
+.page-collector-failures .task-identity h3,
+.page-collector-failures .task-context strong { font-size: 14px; line-height: 1.4; }
+.page-collector-failures .task-identity p,
+.page-collector-failures .task-context p { margin-top: 5px; font-size: 12px; line-height: 1.45; }
+.page-collector-failures .task-meta { gap: 5px; font: 11px/1.4 var(--font-mono); }
+.page-collector-failures .collector-table-empty { font-size: 12px; }
+.page-collector-failures .collector-table-foot { min-height: 44px; font-size: 11px; line-height: 1.5; }
 @keyframes taskStatusPulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--accent) 24%, transparent); opacity: 1; }
   50% { box-shadow: 0 0 0 4px color-mix(in oklch, var(--accent) 0%, transparent); opacity: .62; }
@@ -2337,6 +2359,9 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   .settings-bot-form { grid-template-columns: 1fr; }
   .dingtalk-endpoint-item { grid-template-columns: 1fr; }
   .dingtalk-endpoint-row-actions { justify-content: flex-start; }
+  .page-collector-failures .collector-filter-row .compact-search,
+  .page-collector-failures .collector-filter-row .compact-search .input { width: 100%; }
+  .page-collector-failures .task-list-item { gap: 10px 12px; }
 }
 
 /* Site management: open status rail and continuous operations matrix. */

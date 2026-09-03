@@ -361,9 +361,3 @@ class CrackedAdapter(SiteAdapter):
                         collected_at_utc=detail_result.payload.get("collected_at_utc", ""),
                     )
                 connection.commit()
-                try:
-                    from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
-
-                    ensure_normalized_intelligence(connection, force=True)
-                except Exception as exc:
-                    print(f"[cracked] warning: failed to refresh normalized intelligence after detail persist: {exc}")

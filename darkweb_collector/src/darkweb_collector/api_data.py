@@ -42,6 +42,7 @@ from darkweb_collector.normalized_intelligence import (
     normalized_event_to_detail,
     normalized_event_to_list_item,
 )
+from darkweb_collector.normalization_runtime import get_normalization_runtime_status
 from darkweb_collector.runtime import active_release_config, default_db_path, output_root, project_root
 from darkweb_collector.sites.darkforums import normalize_darkforums_timestamp
 from darkweb_collector.site_auth import site_auth_readiness, site_display_name
@@ -114,6 +115,7 @@ JOB_STATUS_LABELS = {
 }
 
 RECENT_FAILURE_WINDOW_HOURS = 24
+FAILED_JOB_HISTORY_LIMIT = 30
 STALE_RUNNING_MINUTES = 30
 STALE_ENQUEUED_MINUTES = 10
 RANSOMWARE_EVENT_LIMIT = 0
@@ -2198,6 +2200,7 @@ def _runtime_db_status() -> dict[str, Any]:
 
 
 def build_jobs_payload() -> dict[str, Any]:
+    failure_cutoff = _now_utc() - timedelta(hours=RECENT_FAILURE_WINDOW_HOURS)
     with get_db_connection() as connection:
         crawl_jobs = [
             dict(row)
@@ -2210,6 +2213,23 @@ def build_jobs_payload() -> dict[str, Any]:
                 """
             ).fetchall()
         ]
+        failed_job_history_total = int(
+            connection.execute("SELECT COUNT(*) FROM crawl_jobs WHERE status = 'failed'").fetchone()[0]
+        )
+        failed_job_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT job_id, site_name, job_type, queue_name, target, status,
+                       enqueued_at, started_at, finished_at, duration_ms, error_message
+                FROM crawl_jobs
+                WHERE status = 'failed'
+                ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
+                LIMIT ?
+                """,
+                (FAILED_JOB_HISTORY_LIMIT,),
+            ).fetchall()
+        ]
         forum_detail_counts = {
             row["site_name"]: int(row["count"])
             for row in connection.execute(
@@ -2220,6 +2240,19 @@ def build_jobs_payload() -> dict[str, Any]:
             row["site_name"]: int(row["count"])
             for row in connection.execute(
                 "SELECT site_name, COUNT(*) AS count FROM victims GROUP BY site_name"
+            ).fetchall()
+        }
+        failure_counts_24h = {
+            row["site_name"]: int(row["count"])
+            for row in connection.execute(
+                """
+                SELECT site_name, COUNT(*) AS count
+                FROM crawl_jobs
+                WHERE status = 'failed'
+                  AND COALESCE(finished_at, started_at, enqueued_at) >= ?
+                GROUP BY site_name
+                """,
+                (failure_cutoff.isoformat(),),
             ).fetchall()
         }
         vulnerability_count_row = connection.execute(
@@ -2242,6 +2275,29 @@ def build_jobs_payload() -> dict[str, Any]:
         configured_sites = sorted({row.get("site_name") for row in crawl_jobs if row.get("site_name")})
         enabled_map = {site_name: True for site_name in configured_sites}
         config_map = {}
+
+    failed_job_history = [
+        {
+            "job_id": row.get("job_id"),
+            "site_name": row.get("site_name"),
+            "display_name": (
+                site_display_name(config_map[row["site_name"]])
+                if row.get("site_name") in config_map
+                else row.get("site_name")
+            ),
+            "job_type": row.get("job_type"),
+            "queue_name": row.get("queue_name"),
+            "target": row.get("target"),
+            "status": "failed",
+            "enqueued_at": _format_dt(row.get("enqueued_at")),
+            "started_at": _format_dt(row.get("started_at")),
+            "finished_at": _format_dt(row.get("finished_at") or row.get("started_at")),
+            "duration_ms": row.get("duration_ms"),
+            "error_message": row.get("error_message") or "",
+            "error_category": classify_error(row.get("error_message") or ""),
+        }
+        for row in failed_job_rows
+    ]
 
     running_jobs = sum(1 for row in crawl_jobs if _effective_job_status(row) == "running")
     stale_jobs = sum(
@@ -2294,6 +2350,7 @@ def build_jobs_payload() -> dict[str, Any]:
         active_cooldown_until_dt = cooldown_until_dt if circuit_breaker_open else None
         active_running = sum(1 for row in site_rows if _effective_job_status(row) == "running")
         active_enqueued = sum(1 for row in site_rows if _effective_job_status(row) == "enqueued")
+        failed_jobs_24h = failure_counts_24h.get(site_name, 0)
         connectivity_probe = connectivity_probe_map.get(site_name) or {}
 
         latest_seed_dt = _job_event_dt(latest_seed)
@@ -2359,7 +2416,8 @@ def build_jobs_payload() -> dict[str, Any]:
                 "seed_status": _label_job_status(_effective_job_status(latest_seed)) if latest_seed else "未运行",
                 "detail_status": detail_status,
                 "running_jobs": active_running,
-                "failed_jobs_24h": 1 if latest_unresolved_problem else 0,
+                "enqueued_jobs": active_enqueued,
+                "failed_jobs_24h": failed_jobs_24h,
                 "last_success_at": _format_dt(latest_success.get("finished_at") if latest_success else None),
                 "last_error": (
                     (latest_unresolved_problem.get("error_message") if latest_unresolved_problem else "")
@@ -2405,9 +2463,9 @@ def build_jobs_payload() -> dict[str, Any]:
         }
         for row in unresolved_problem_rows[:20]
     ]
-    failed_jobs_24h = len(recent_failures)
+    failed_jobs_24h = sum(failure_counts_24h.values())
 
-    overall_status = "采集中" if running_jobs > 0 else "部分失败" if failed_jobs_24h > 0 or stale_jobs > 0 else "正常"
+    overall_status = "采集中" if running_jobs > 0 else "部分失败" if recent_failures or stale_jobs > 0 else "正常"
     vulnerability_sync = {
         **get_vulnerability_sync_status(),
         "record_count": int(vulnerability_count_row["count"]) if vulnerability_count_row else 0,
@@ -2425,8 +2483,12 @@ def build_jobs_payload() -> dict[str, Any]:
         "stale_jobs": stale_jobs,
         "failed_jobs_24h": failed_jobs_24h,
         "recent_failures": recent_failures,
+        "failed_job_history": failed_job_history,
+        "failed_job_history_total": failed_job_history_total,
+        "failed_job_history_limit": FAILED_JOB_HISTORY_LIMIT,
         "site_health": site_health,
         "browser_runtime": get_browser_runtime_status(),
+        "normalization_runtime": get_normalization_runtime_status(),
         "vulnerability_sync": vulnerability_sync,
         "ransomware_sync": ransomware_sync,
         "runtime_db": _runtime_db_status(),

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import logging
 from pathlib import Path
 import time
 import uuid
@@ -24,9 +23,6 @@ from darkweb_collector.queueing import queue_for_detail, queue_for_seed
 from darkweb_collector.site_auth import SiteAuthenticationRequired, site_auth_readiness
 from darkweb_collector.state_store import StateStore
 from darkweb_collector.utils import utc_now_iso
-
-
-logger = logging.getLogger(__name__)
 
 
 def new_job_id(job_type: str, site_name: str) -> str:
@@ -96,16 +92,6 @@ def mark_job_finished(
         connection.commit()
 
 
-def refresh_normalized_after_source_change(site_name: str) -> None:
-    try:
-        from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
-
-        with get_db_connection() as connection:
-            ensure_normalized_intelligence(connection, force=False, enrichment_budget=0)
-    except Exception:
-        logger.exception("failed to refresh normalized intelligence after source change")
-
-
 def is_site_due(config: SiteConfig, finished_at_utc: str | None) -> bool:
     if not finished_at_utc:
         return True
@@ -165,7 +151,6 @@ def execute_seed_job(
     seed_result = adapter.collect_seed(config, run_ctx)
     detail_tasks = adapter.plan_details(seed_result, config)
     adapter.persist(config=config, run_ctx=run_ctx, seed_result=seed_result)
-    refresh_normalized_after_source_change(site_name)
     dispatched_job_ids, failed_detail_jobs = _dispatch_detail_jobs(
         config, detail_tasks, state_store, detail_dispatcher
     )
@@ -200,7 +185,6 @@ def execute_detail_job(
     detail_result = adapter.collect_detail(detail_task, config, run_ctx)
     if detail_result is not None:
         adapter.persist(config=config, run_ctx=run_ctx, detail_results=[detail_result])
-        refresh_normalized_after_source_change(site_name)
     return {
         "site_name": site_name,
         "detail_job_id": run_ctx.job_id,
