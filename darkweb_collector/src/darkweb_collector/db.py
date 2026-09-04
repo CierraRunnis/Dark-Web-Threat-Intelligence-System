@@ -1325,7 +1325,12 @@ def replace_vulnerability_records(connection: sqlite3.Connection, rows: list[dic
         upsert_vulnerability_record(connection, row)
 
 
-def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict) -> int:
+def upsert_ransomware_live_victim(
+    connection: sqlite3.Connection,
+    payload: dict,
+    *,
+    return_outcome: bool = False,
+) -> int | tuple[int, str]:
     raw_json = payload.get("raw_json")
     if isinstance(raw_json, str):
         raw_json_text = raw_json
@@ -1334,7 +1339,7 @@ def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict)
 
     cursor = connection.execute(
         """
-        SELECT id
+        SELECT id, raw_json
         FROM ransomware_live_victims
         WHERE victim_id = ?
         """,
@@ -1343,6 +1348,12 @@ def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict)
     row = cursor.fetchone()
     if row:
         record_id = int(row[0])
+        existing_raw_json = str(row["raw_json"] or "")
+        try:
+            unchanged = json.loads(existing_raw_json) == json.loads(raw_json_text)
+        except (TypeError, ValueError):
+            unchanged = existing_raw_json == raw_json_text
+        outcome = "unchanged" if unchanged else "updated"
         connection.execute(
             """
             UPDATE ransomware_live_victims
@@ -1369,7 +1380,7 @@ def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict)
                 record_id,
             ),
         )
-        return record_id
+        return (record_id, outcome) if return_outcome else record_id
 
     cursor = connection.execute(
         """
@@ -1397,7 +1408,8 @@ def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict)
             payload.get("last_seen_at", ""),
         ),
     )
-    return int(cursor.lastrowid)
+    record_id = int(cursor.lastrowid)
+    return (record_id, "new") if return_outcome else record_id
 
 
 def list_ransomware_live_victims(connection: sqlite3.Connection) -> list[dict]:
@@ -1438,6 +1450,22 @@ def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str
         FROM crawl_jobs
         WHERE site_name = ? AND job_type = ? AND status = 'succeeded'
         ORDER BY datetime(finished_at) DESC
+        LIMIT 1
+        """,
+        (site_name, job_type),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_latest_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
+    cursor = connection.execute(
+        """
+        SELECT job_id, status, queue_name, target, enqueued_at, started_at, finished_at,
+               duration_ms, error_message
+        FROM crawl_jobs
+        WHERE site_name = ? AND job_type = ?
+        ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
         LIMIT 1
         """,
         (site_name, job_type),

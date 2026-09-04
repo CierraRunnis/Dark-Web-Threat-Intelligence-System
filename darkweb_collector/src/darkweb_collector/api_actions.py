@@ -16,6 +16,8 @@ from darkweb_collector.config import get_site_config, load_site_configs, set_sit
 from darkweb_collector.db import (
     get_active_crawl_job,
     get_db_connection,
+    get_last_successful_crawl_job,
+    get_latest_crawl_job,
     get_ransomware_live_sync_state,
     get_site_connectivity_probe_map,
     upsert_site_connectivity_probe,
@@ -33,7 +35,12 @@ from darkweb_collector.queueing import (
     browser_queue_concurrency,
     queue_for_seed,
 )
-from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
+from darkweb_collector.ransomware_live import (
+    get_ransomware_live_api_key,
+    get_ransomware_live_sync_config,
+    get_ransomware_live_sync_status_snapshot,
+    set_ransomware_live_sync_config,
+)
 from darkweb_collector.site_auth import site_auth_readiness
 from darkweb_collector.tor_fetch import fetch_url, is_onion_url
 from darkweb_collector.utils import utc_now_iso
@@ -81,20 +88,6 @@ _vulnerability_sync_limit = DEFAULT_VULNERABILITY_SYNC_LIMIT
 _vulnerability_sync_running = False
 _vulnerability_sync_stop_event: Event | None = None
 _vulnerability_sync_thread: Thread | None = None
-
-_ransomware_sync_lock = Lock()
-_ransomware_sync_enabled = False
-_ransomware_sync_started_at = ""
-_ransomware_sync_last_tick_at = ""
-_ransomware_sync_last_success_at = ""
-_ransomware_sync_last_error = ""
-_ransomware_sync_last_source = ""
-_ransomware_sync_last_ingested = 0
-_ransomware_sync_interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
-_ransomware_sync_limit = DEFAULT_RANSOMWARE_SYNC_LIMIT
-_ransomware_sync_running = False
-_ransomware_sync_stop_event: Event | None = None
-_ransomware_sync_thread: Thread | None = None
 
 _code_monitoring_lock = Lock()
 _code_monitoring_enabled = False
@@ -800,137 +793,105 @@ def get_vulnerability_sync_status() -> dict[str, Any]:
     }
 
 
-def _run_ransomware_sync(limit: int) -> dict[str, Any]:
-    global _ransomware_sync_running
-    global _ransomware_sync_last_tick_at
-    global _ransomware_sync_last_success_at
-    global _ransomware_sync_last_error
-    global _ransomware_sync_last_source
-    global _ransomware_sync_last_ingested
-    with _ransomware_sync_lock:
-        _ransomware_sync_running = True
-        _ransomware_sync_last_tick_at = utc_now_iso()
-        _ransomware_sync_last_error = ""
-    try:
-        result = sync_ransomware_live_victims(limit=limit, refresh_normalized=False)
-        with _ransomware_sync_lock:
-            _ransomware_sync_last_success_at = utc_now_iso()
-            _ransomware_sync_last_source = str(result.get("source") or "")
-            _ransomware_sync_last_ingested = int(result.get("ingested") or 0)
-            _ransomware_sync_last_error = ""
-        return result
-    except Exception as exc:
-        with _ransomware_sync_lock:
-            _ransomware_sync_last_error = str(exc)
-        raise
-    finally:
-        with _ransomware_sync_lock:
-            _ransomware_sync_running = False
-
-
-def _run_ransomware_sync_once_in_thread(limit: int) -> None:
-    try:
-        _run_ransomware_sync(limit=limit)
-    except Exception:
-        return
-
-
 def dispatch_run_ransomware_sync_once(limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT) -> dict[str, Any]:
-    global _ransomware_sync_thread
-    with _ransomware_sync_lock:
-        if _ransomware_sync_running:
-            return {
-                **get_ransomware_sync_status(),
-                "message": "ransomware.live 同步任务已在运行中",
-            }
-        thread = Thread(target=_run_ransomware_sync_once_in_thread, args=(limit,), daemon=True)
-        _ransomware_sync_thread = thread
-        thread.start()
+    from darkweb_collector.tasks import enqueue_ransomware_live_sync
+
+    job_id = enqueue_ransomware_live_sync(limit=max(0, int(limit)), force=True)
+    if not job_id:
+        return {
+            **get_ransomware_sync_status(),
+            "message": "ransomware.live 同步任务已在运行或等待执行",
+        }
     return {
         **get_ransomware_sync_status(),
         "message": "已触发一次 ransomware.live 同步",
+        "job_id": job_id,
     }
-
-
-def _ransomware_sync_loop(stop_event: Event) -> None:
-    global _ransomware_sync_enabled
-    while not stop_event.is_set():
-        try:
-            _run_ransomware_sync(limit=_ransomware_sync_limit)
-        except Exception:
-            pass
-        if stop_event.wait(_ransomware_sync_interval_seconds):
-            break
-    _ransomware_sync_enabled = False
 
 
 def start_ransomware_sync_dispatch(
     interval_seconds: int = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS,
     limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT,
 ) -> dict[str, Any]:
-    global _ransomware_sync_enabled
-    global _ransomware_sync_started_at
-    global _ransomware_sync_stop_event
-    global _ransomware_sync_thread
-    global _ransomware_sync_interval_seconds
-    global _ransomware_sync_limit
-    if interval_seconds <= 0:
-        interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
-    with _ransomware_sync_lock:
-        if _ransomware_sync_enabled and _ransomware_sync_thread and _ransomware_sync_thread.is_alive():
-            return {
-                **get_ransomware_sync_status(),
-                "message": "ransomware.live 自动同步已在运行",
-            }
-        stop_event = Event()
-        thread = Thread(target=_ransomware_sync_loop, args=(stop_event,), daemon=True)
-        _ransomware_sync_enabled = True
-        _ransomware_sync_started_at = utc_now_iso()
-        _ransomware_sync_interval_seconds = interval_seconds
-        _ransomware_sync_limit = limit
-        _ransomware_sync_stop_event = stop_event
-        _ransomware_sync_thread = thread
-        thread.start()
+    if not get_ransomware_live_api_key():
+        raise RuntimeError("RANSOMWARE_LIVE_API_KEY is not set")
+    sync_config = set_ransomware_live_sync_config(
+        enabled=True,
+        interval_seconds=interval_seconds,
+        limit=limit,
+    )
+    from darkweb_collector.tasks import enqueue_ransomware_live_sync
+
+    job_id = enqueue_ransomware_live_sync(limit=int(sync_config["limit"]), force=True)
     return {
         **get_ransomware_sync_status(),
         "message": "已开始 ransomware.live 自动同步",
+        "job_id": job_id or "",
     }
 
 
 def stop_ransomware_sync_dispatch() -> dict[str, Any]:
-    global _ransomware_sync_enabled
-    with _ransomware_sync_lock:
-        if not _ransomware_sync_enabled or _ransomware_sync_stop_event is None:
-            return {
-                **get_ransomware_sync_status(),
-                "message": "ransomware.live 自动同步当前未运行",
-            }
-        _ransomware_sync_stop_event.set()
-        _ransomware_sync_enabled = False
+    sync_config = get_ransomware_live_sync_config()
+    if not sync_config["enabled"]:
+        return {
+            **get_ransomware_sync_status(),
+            "message": "ransomware.live 自动同步当前未开启",
+        }
+    set_ransomware_live_sync_config(
+        enabled=False,
+        interval_seconds=int(sync_config["interval_seconds"]),
+        limit=int(sync_config["limit"]),
+    )
     return {
         **get_ransomware_sync_status(),
-        "message": "已停止 ransomware.live 自动同步",
+        "message": "已停止 ransomware.live 后续自动同步；正在执行的任务不会被强制中断",
     }
 
 
 def get_ransomware_sync_status() -> dict[str, Any]:
-    thread_alive = bool(_ransomware_sync_thread and _ransomware_sync_thread.is_alive())
+    sync_config = get_ransomware_live_sync_config()
+    snapshot = get_ransomware_live_sync_status_snapshot()
     with get_db_connection() as connection:
         sync_state = get_ransomware_live_sync_state(connection)
-    last_error = _ransomware_sync_last_error
+        active_job = get_active_crawl_job(connection, "ransomware_live", "ransomware_sync")
+        latest_job = get_latest_crawl_job(connection, "ransomware_live", "ransomware_sync")
+        latest_success = get_last_successful_crawl_job(connection, "ransomware_live", "ransomware_sync")
+
+    latest_status = str((latest_job or {}).get("status") or "")
+    last_error = str(snapshot.get("last_error") or "")
+    if latest_status == "failed":
+        last_error = str((latest_job or {}).get("error_message") or last_error)
+    elif latest_status == "succeeded":
+        last_error = ""
     if get_ransomware_live_api_key() and "RANSOMWARE_LIVE_API_KEY" in last_error and "not set" in last_error.lower():
         last_error = ""
+    last_tick_at = str(
+        (active_job or {}).get("started_at")
+        or (active_job or {}).get("enqueued_at")
+        or snapshot.get("last_tick_at")
+        or (latest_job or {}).get("started_at")
+        or (latest_job or {}).get("enqueued_at")
+        or ""
+    )
+    last_success_at = str((latest_success or {}).get("finished_at") or snapshot.get("last_success_at") or "")
     return {
-        "enabled": bool(_ransomware_sync_enabled and thread_alive),
-        "running": bool(_ransomware_sync_running),
-        "started_at": _ransomware_sync_started_at,
-        "last_tick_at": _ransomware_sync_last_tick_at,
-        "last_success_at": _ransomware_sync_last_success_at,
+        "enabled": bool(sync_config["enabled"]),
+        "running": bool(active_job and active_job.get("status") == "running"),
+        "pending": bool(active_job and active_job.get("status") == "enqueued"),
+        "started_at": str(sync_config.get("started_at") or ""),
+        "last_tick_at": last_tick_at,
+        "last_success_at": last_success_at,
         "last_error": last_error,
-        "last_source": _ransomware_sync_last_source,
-        "last_ingested": _ransomware_sync_last_ingested,
-        "interval_seconds": _ransomware_sync_interval_seconds,
-        "limit": _ransomware_sync_limit,
+        "last_source": str(snapshot.get("last_source") or ""),
+        "last_fetched": int(snapshot.get("last_fetched") or 0),
+        "last_ingested": int(snapshot.get("last_ingested") or 0),
+        "last_new": int(snapshot.get("last_new") or 0),
+        "last_updated": int(snapshot.get("last_updated") or 0),
+        "last_unchanged": int(snapshot.get("last_unchanged") or 0),
+        "interval_seconds": int(sync_config["interval_seconds"]),
+        "limit": int(sync_config["limit"]),
+        "last_job_id": str((latest_job or {}).get("job_id") or snapshot.get("last_job_id") or ""),
+        "last_job_status": latest_status,
         "record_count": int(sync_state.get("count") or 0),
         "latest_disclosure_time": str(sync_state.get("latest_disclosure_time") or ""),
     }
