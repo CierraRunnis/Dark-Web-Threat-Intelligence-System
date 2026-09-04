@@ -225,8 +225,8 @@
             <strong class="metric-card__value metric-card__value--small metric-card__value--break">{{ ransomwareLastSourceLabel }}</strong>
           </div>
           <div class="metric-card">
-            <span>最近入库</span>
-            <strong>{{ ransomwareSync.last_ingested || 0 }}</strong>
+            <span>最近新增 / 更新</span>
+            <strong>{{ ransomwareSync.last_new || 0 }} / {{ ransomwareSync.last_updated || 0 }}</strong>
           </div>
           <div class="metric-card">
             <span>配置来源</span>
@@ -246,6 +246,12 @@
         <div class="panel-note-block">
           <p class="panel-note">当前 Key：{{ ransomwareConfig.masked_api_key || '未保存' }}</p>
           <p class="panel-note panel-note--mono">配置文件：{{ ransomwareConfig.settings_path || ransomwareConfig.env_var }}</p>
+          <p class="panel-note">
+            最近一轮：获取 {{ ransomwareSync.last_fetched || 0 }} 条，新增 {{ ransomwareSync.last_new || 0 }} 条，更新 {{ ransomwareSync.last_updated || 0 }} 条，重复 {{ ransomwareSync.last_unchanged || 0 }} 条。
+          </p>
+          <p v-if="ransomwareSync.pending || ransomwareSync.running" class="panel-note">
+            当前任务：{{ ransomwareSync.running ? '同步中' : '排队中' }}
+          </p>
           <p v-if="ransomwareSync.last_error" class="panel-note panel-note--danger">最近错误：{{ ransomwareSync.last_error }}</p>
         </div>
       </div>
@@ -847,6 +853,7 @@ const ransomwareConfig = ref({
   settings_path: '',
   updated_at: '',
 })
+let jobsPollTimer = null
 const botConfigLoading = ref(false)
 const botSaveLoading = ref(false)
 const botTestLoading = ref(false)
@@ -1779,10 +1786,14 @@ onMounted(async () => {
   updateViewportWidth()
   window.addEventListener('resize', updateViewportWidth)
   await refreshAllPanels()
+  const storedIntervalSeconds = Number(ransomwareSync.value.interval_seconds || 0)
+  if (storedIntervalSeconds > 0) ransomwareIntervalHours.value = storedIntervalSeconds / 3600
+  jobsPollTimer = window.setInterval(() => refreshJobs(), 30000)
 })
 
 onBeforeUnmount(() => {
   clearTorBridgePoll()
+  if (jobsPollTimer) window.clearInterval(jobsPollTimer)
   window.removeEventListener('resize', updateViewportWidth)
 })
 </script>
