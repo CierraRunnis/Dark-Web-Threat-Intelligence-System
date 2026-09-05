@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from contextlib import contextmanager
 import hmac
 import json
 import os
@@ -9,16 +8,17 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Iterator
 
-from darkweb_collector.runtime import default_db_path
+from darkweb_collector.runtime import project_root
 
 
 ASSIGNABLE_MODULES = (
     "intelligence_search",
+    "ai_aggregation",
     "ransomware",
     "data_leak",
     "vulnerability_alerts",
+    "threat_situation",
     "collector_control",
     "file_monitoring",
 )
@@ -31,7 +31,7 @@ def auth_accounts_db_path() -> Path:
     configured_path = os.environ.get("DARKWEB_AUTH_ACCOUNTS_DB", "").strip()
     if configured_path:
         return Path(configured_path).expanduser().resolve()
-    return default_db_path().with_name("auth_accounts.db").resolve()
+    return (project_root() / "data" / "auth_accounts.db").resolve()
 
 
 def normalize_modules(modules: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -69,8 +69,7 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-@contextmanager
-def _connect() -> Iterator[sqlite3.Connection]:
+def _connect() -> sqlite3.Connection:
     db_path = auth_accounts_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path, timeout=10)
@@ -89,10 +88,7 @@ def _connect() -> Iterator[sqlite3.Connection]:
         """
     )
     connection.commit()
-    try:
-        yield connection
-    finally:
-        connection.close()
+    return connection
 
 
 def _row_payload(row: sqlite3.Row | None, *, include_password: bool = False) -> dict[str, object] | None:

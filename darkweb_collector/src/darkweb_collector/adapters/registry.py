@@ -1,25 +1,27 @@
 from __future__ import annotations
 
 from darkweb_collector.adapters.base import SiteAdapter
-from darkweb_collector.adapters.changan import ChanganAdapter
+from darkweb_collector.adapters.breached import BreachedAdapter
 from darkweb_collector.adapters.chaos import ChaosAdapter
 from darkweb_collector.adapters.cracked import CrackedAdapter
 from darkweb_collector.adapters.darkforums import DarkforumsAdapter
 from darkweb_collector.adapters.dragonforce import DragonforceAdapter
+from darkweb_collector.adapters.dragonforceblog import DragonforceblogAdapter
 from darkweb_collector.adapters.lynx import LynxAdapter
 from darkweb_collector.adapters.pwnfrm import PwnfrmAdapter
-from darkweb_collector.adapters.raidforums import RaidforumsAdapter
+from darkweb_collector.adapters.updap import UpdapAdapter
 
 
 ADAPTERS: dict[str, SiteAdapter] = {
-    ChanganAdapter.site_name: ChanganAdapter(),
     DragonforceAdapter.site_name: DragonforceAdapter(),
     DarkforumsAdapter.site_name: DarkforumsAdapter(),
+    BreachedAdapter.site_name: BreachedAdapter(),
     CrackedAdapter.site_name: CrackedAdapter(),
-    PwnfrmAdapter.site_name: PwnfrmAdapter(),
-    RaidforumsAdapter.site_name: RaidforumsAdapter(),
     ChaosAdapter.site_name: ChaosAdapter(),
     LynxAdapter.site_name: LynxAdapter(),
+    DragonforceblogAdapter.site_name: DragonforceblogAdapter(),
+    PwnfrmAdapter.site_name: PwnfrmAdapter(),
+    UpdapAdapter.site_name: UpdapAdapter(),
 }
 
 

@@ -10,16 +10,18 @@ from threading import Lock
 from typing import Any
 
 from darkweb_collector.db import (
+    get_analysis_snapshot,
     get_db_connection,
     get_normalized_intelligence_cache_state,
+    get_readonly_db_connection,
     list_monitoring_keywords,
     replace_monitoring_keywords,
+    upsert_analysis_snapshot,
 )
 from darkweb_collector.normalized_intelligence import load_normalized_events
 from darkweb_collector.utils import utc_now_iso
 
 
-logger = logging.getLogger(__name__)
 DEFAULT_MONITORING_KEYWORDS = [
     {"keyword": "中国", "category": "geo_keywords", "weight": 10, "enabled": True, "match_mode": "contains"},
     {"keyword": "china", "category": "geo_keywords", "weight": 8, "enabled": True, "match_mode": "word_boundary"},
@@ -42,7 +44,11 @@ ASSET_PATTERNS = {
     "金融数据": (r"\bbank\b", r"\bcredit\b", r"\bbanking\b", r"\bfinance\b", "金融", "银行卡"),
 }
 
+logger = logging.getLogger(__name__)
+MONITORING_SNAPSHOT_NAMESPACE = "monitoring-rules-v1"
+
 _MONITORING_CACHE_LOCK = Lock()
+_MONITORING_SNAPSHOT_LOCK = Lock()
 _MONITORING_CACHE_KEY = ""
 _MONITORING_CACHE_EVENTS: list[dict[str, Any]] = []
 _MONITORING_CACHE_PAYLOAD: dict[str, Any] = {}
@@ -78,19 +84,26 @@ def _event_text(event: dict[str, Any]) -> str:
     return "\n".join(_normalize_text(item) for item in parts if _normalize_text(item))
 
 
-def _seed_keywords(connection) -> list[dict[str, Any]]:
+def _seed_keywords(connection, *, persist_defaults: bool = True) -> list[dict[str, Any]]:
     current = list_monitoring_keywords(connection)
     if current:
         return current
+    if not persist_defaults:
+        rows = [
+            {"id": index, **item, "updated_at": ""}
+            for index, item in enumerate(DEFAULT_MONITORING_KEYWORDS, start=1)
+        ]
+        return sorted(rows, key=lambda item: (str(item["category"]), str(item["keyword"])))
     rows = [{**item, "updated_at": utc_now_iso()} for item in DEFAULT_MONITORING_KEYWORDS]
     replace_monitoring_keywords(connection, rows)
     connection.commit()
     return list_monitoring_keywords(connection)
 
 
-def get_monitoring_keywords() -> list[dict[str, Any]]:
-    with get_db_connection() as connection:
-        return _seed_keywords(connection)
+def get_monitoring_keywords(*, persist_defaults: bool = True) -> list[dict[str, Any]]:
+    connection_factory = get_db_connection if persist_defaults else get_readonly_db_connection
+    with connection_factory() as connection:
+        return _seed_keywords(connection, persist_defaults=persist_defaults)
 
 
 def save_monitoring_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -113,7 +126,22 @@ def save_monitoring_keywords(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         replace_monitoring_keywords(connection, normalized_rows)
         connection.commit()
         _invalidate_monitoring_cache()
-        return list_monitoring_keywords(connection)
+        saved_keywords = list_monitoring_keywords(connection)
+        normalized_events = load_normalized_events(connection, allow_refresh=False)
+        try:
+            with _MONITORING_SNAPSHOT_LOCK:
+                persist_monitoring_snapshot(connection, normalized_events)
+                connection.commit()
+        except Exception:
+            connection.rollback()
+            logger.exception("failed to persist monitoring analysis snapshot after keyword update")
+        try:
+            from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_events
+
+            notify_keyword_matches_for_events(connection, normalized_events)
+        except Exception:
+            logger.exception("failed to send monitoring keyword notifications after keyword update")
+        return saved_keywords
 
 
 def _invalidate_monitoring_cache() -> None:
@@ -142,11 +170,62 @@ def _keywords_cache_key(keywords: list[dict[str, Any]]) -> str:
 def _monitoring_cache_key(connection, keywords: list[dict[str, Any]]) -> str:
     cache_state = get_normalized_intelligence_cache_state(connection) or {}
     payload = {
+        "applied_revision": int(cache_state.get("applied_revision") or 0),
         "source_signature": cache_state.get("source_signature") or "",
         "event_count": int(cache_state.get("event_count") or 0),
         "keywords_signature": _keywords_cache_key(keywords),
     }
     return sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def load_monitoring_snapshot(connection) -> dict[str, Any] | None:
+    keywords = _seed_keywords(connection, persist_defaults=False)
+    revision_key = _monitoring_cache_key(connection, keywords)
+    row = get_analysis_snapshot(connection, MONITORING_SNAPSHOT_NAMESPACE)
+    if row is None or str(row.get("revision_key") or "") != revision_key:
+        return None
+    try:
+        payload = json.loads(str(row.get("payload_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        **payload,
+        "analysisSnapshot": {
+            "revisionKey": revision_key,
+            "appliedRevision": int(row.get("applied_revision") or 0),
+            "generatedAt": str(row.get("generated_at") or ""),
+        },
+    }
+
+
+def persist_monitoring_snapshot(
+    connection,
+    normalized_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    keywords = _seed_keywords(connection)
+    revision_key = _monitoring_cache_key(connection, keywords)
+    cache_state = get_normalized_intelligence_cache_state(connection) or {}
+    _, payload = build_monitoring_payload(connection, normalized_events)
+    generated_at = utc_now_iso()
+    upsert_analysis_snapshot(
+        connection,
+        namespace=MONITORING_SNAPSHOT_NAMESPACE,
+        revision_key=revision_key,
+        applied_revision=int(cache_state.get("applied_revision") or 0),
+        config_signature=_keywords_cache_key(keywords),
+        payload=payload,
+        generated_at=generated_at,
+    )
+    return {
+        **payload,
+        "analysisSnapshot": {
+            "revisionKey": revision_key,
+            "appliedRevision": int(cache_state.get("applied_revision") or 0),
+            "generatedAt": generated_at,
+        },
+    }
 
 
 def _can_use_global_monitoring_cache(connection, normalized_events: list[dict[str, Any]]) -> bool:
@@ -155,8 +234,12 @@ def _can_use_global_monitoring_cache(connection, normalized_events: list[dict[st
     return bool(event_count > 0 and len(normalized_events) == event_count)
 
 
-def _cached_monitoring_summary(connection) -> dict[str, Any] | None:
-    keywords = _seed_keywords(connection)
+def _cached_monitoring_summary(
+    connection,
+    *,
+    persist_default_keywords: bool = True,
+) -> dict[str, Any] | None:
+    keywords = _seed_keywords(connection, persist_defaults=persist_default_keywords)
     cache_key = _monitoring_cache_key(connection, keywords)
     with _MONITORING_CACHE_LOCK:
         if _MONITORING_CACHE_KEY != cache_key:
@@ -377,13 +460,6 @@ def _with_monitoring(event: dict[str, Any], keywords: list[dict[str, Any]]) -> d
 
 def enrich_events(connection, normalized_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keywords = _seed_keywords(connection)
-    return enrich_events_with_keywords(normalized_events, keywords)
-
-
-def enrich_events_with_keywords(
-    normalized_events: list[dict[str, Any]],
-    keywords: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
     return [_with_monitoring(event, keywords) for event in normalized_events]
 
 
@@ -492,9 +568,14 @@ def _priority_alert_stream(enriched_events: list[dict[str, Any]], limit: int = 8
     ]
 
 
-def build_monitoring_payload(connection, normalized_events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def build_monitoring_payload(
+    connection,
+    normalized_events: list[dict[str, Any]],
+    *,
+    persist_default_keywords: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     global _MONITORING_CACHE_KEY, _MONITORING_CACHE_EVENTS, _MONITORING_CACHE_PAYLOAD
-    keywords = _seed_keywords(connection)
+    keywords = _seed_keywords(connection, persist_defaults=persist_default_keywords)
     use_global_cache = _can_use_global_monitoring_cache(connection, normalized_events)
     cache_key = _monitoring_cache_key(connection, keywords) if use_global_cache else ""
     if use_global_cache:
@@ -523,12 +604,29 @@ def build_monitoring_payload(connection, normalized_events: list[dict[str, Any]]
     return enriched_events, payload
 
 
-def build_monitoring_status() -> dict[str, Any]:
-    with get_db_connection() as connection:
-        cached = _cached_monitoring_summary(connection)
-        if cached is not None:
-            return cached
-        enriched_events, payload = build_monitoring_payload(connection, load_normalized_events(connection))
+def build_monitoring_status(*, persist_default_keywords: bool = True) -> dict[str, Any]:
+    connection_factory = get_db_connection if persist_default_keywords else get_readonly_db_connection
+    with connection_factory() as connection:
+        if not persist_default_keywords:
+            connection.execute("BEGIN")
+        try:
+            cached = _cached_monitoring_summary(
+                connection,
+                persist_default_keywords=persist_default_keywords,
+            )
+            if cached is not None:
+                return cached
+            enriched_events, payload = build_monitoring_payload(
+                connection,
+                load_normalized_events(
+                    connection,
+                    allow_refresh=persist_default_keywords,
+                ),
+                persist_default_keywords=persist_default_keywords,
+            )
+        finally:
+            if not persist_default_keywords:
+                connection.rollback()
     summary = payload.get("monitoringConfigurationSummary") or {}
     return {
         "keywordCount": int(summary.get("keywordCount") or 0),

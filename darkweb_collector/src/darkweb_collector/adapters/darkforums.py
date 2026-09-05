@@ -4,7 +4,7 @@ import hashlib
 from urllib.parse import urlparse
 
 from darkweb_collector.adapters.base import SiteAdapter
-from darkweb_collector.browser_client import close_browser_client, screenshot_html_with_browser
+from darkweb_collector.browser_client import close_browser_client
 from darkweb_collector.db import (
     get_db_connection,
     get_forum_detail_snapshot,
@@ -14,7 +14,7 @@ from darkweb_collector.db import (
 )
 from darkweb_collector.models import DetailResult, DetailTask, RunContext, SeedResult, SiteConfig
 from darkweb_collector.sites.darkforums import parse_darkforums_detail, parse_darkforums_list
-from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url, fetch_via_http_proxy
+from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url
 from darkweb_collector.utils import dump_json, dump_text, safe_stem, utc_now_iso
 
 
@@ -42,39 +42,15 @@ def _detail_artifacts_exist(output_dir, section_name: str, topic_url: str) -> bo
 
 class DarkforumsAdapter(SiteAdapter):
     site_name = "darkforums"
-    list_parser = staticmethod(parse_darkforums_list)
-    detail_parser = staticmethod(parse_darkforums_detail)
-    detail_screenshot_selectors = ("#thread-info", ".post.classic")
-
-    @staticmethod
-    def _is_valid_seed_html(html: str) -> bool:
-        lowered = str(html or "").lower()
-        if not lowered or any(marker in lowered for marker in ("checking your browser", "cf-browser-verification", "verify you are human")):
-            return False
-        return "forum-" in lowered and ("thread-" in lowered or "subject_new" in lowered)
 
     def _fetch_html(self, url: str, config: SiteConfig, mode: str) -> str:
-        try:
-            direct_html = fetch_via_http_proxy(
-                url,
-                timeout=config.fetch_timeout_seconds,
-                retries=0,
-                bypass_proxy=True,
-            )
-            if self._is_valid_seed_html(direct_html):
-                return direct_html
-        except Exception:
-            pass
-        fallback_html = fetch_url(
+        return fetch_url(
             url=url,
             mode=mode,
             timeout_seconds=config.fetch_timeout_seconds,
             render_wait_seconds=config.render_wait_seconds,
             retries=1,
         )
-        if not self._is_valid_seed_html(fallback_html):
-            raise RuntimeError(f"{self.site_name} list page did not contain forum topics: {url}")
-        return fallback_html
 
     @staticmethod
     def _is_valid_detail_html(html: str) -> bool:
@@ -98,7 +74,7 @@ class DarkforumsAdapter(SiteAdapter):
         collected_at_utc = utc_now_iso()
         for url in config.seed_urls:
             html = self._fetch_html(url, config, config.seed_fetch_mode)
-            parsed = self.list_parser(url, html, max_topics=config.max_topics_per_run)
+            parsed = parse_darkforums_list(url, html, max_topics=config.max_topics_per_run)
             section = _section_name(url)
             parsed["section"] = section
             for topic in parsed["topics"]:
@@ -108,7 +84,7 @@ class DarkforumsAdapter(SiteAdapter):
 
         payload = {
             "site_name": self.site_name,
-            "source_url": self.site_name,
+            "source_url": "darkforums",
             "collected_at_utc": collected_at_utc,
             "section_count": len(sections),
             "topic_count": sum(int(section["topic_count"]) for section in sections),
@@ -180,44 +156,17 @@ class DarkforumsAdapter(SiteAdapter):
     def collect_detail(self, detail_task: DetailTask, config: SiteConfig, run_ctx: RunContext) -> DetailResult | None:
         html = ""
         screenshot_png = None
-        try:
-            direct_html = fetch_via_http_proxy(
-                detail_task.target_url,
-                timeout=config.fetch_timeout_seconds,
-                retries=0,
-                bypass_proxy=True,
-            )
-            if self._is_valid_detail_html(direct_html):
-                direct_detail = self.detail_parser(detail_task.target_url, direct_html)
-                if self._is_valid_detail_payload(direct_detail):
-                    try:
-                        screenshot_png = screenshot_html_with_browser(
-                            direct_html,
-                            detail_task.target_url,
-                            wait_seconds=config.render_wait_seconds,
-                            timeout_seconds=config.fetch_timeout_seconds,
-                            screenshot_selectors=self.detail_screenshot_selectors,
-                            hide_selectors=("header", "#panel", "#quick-search", ".bam_wrapper", ".footer", "footer"),
-                        )
-                    except Exception:
-                        screenshot_png = None
-                    return DetailResult(
-                        site_name=self.site_name,
-                        target_url=detail_task.target_url,
-                        payload=direct_detail,
-                        raw_html=direct_html,
-                        screenshot_png=screenshot_png,
-                        metadata=detail_task.metadata,
-                    )
-        except Exception:
-            pass
+        last_html = ""
         for attempt in range(3):
             html, screenshot_png = fetch_page_artifacts(
                 url=detail_task.target_url,
                 mode=config.detail_fetch_mode,
                 timeout_seconds=config.fetch_timeout_seconds,
                 render_wait_seconds=config.render_wait_seconds,
-                screenshot_selectors=self.detail_screenshot_selectors,
+                screenshot_selectors=(
+                    "#thread-info",
+                    ".post.classic",
+                ),
                 hide_selectors=(
                     "header",
                     "#panel",
@@ -228,8 +177,9 @@ class DarkforumsAdapter(SiteAdapter):
                 ),
                 render_html_for_screenshot=True,
             )
+            last_html = html
             if self._is_valid_detail_html(html):
-                detail = self.detail_parser(detail_task.target_url, html)
+                detail = parse_darkforums_detail(detail_task.target_url, html)
                 if self._is_valid_detail_payload(detail):
                     return DetailResult(
                         site_name=self.site_name,
@@ -240,11 +190,10 @@ class DarkforumsAdapter(SiteAdapter):
                         metadata=detail_task.metadata,
                     )
             print(
-                f"[{self.site_name}] invalid detail html on attempt {attempt + 1} for "
-                f"{detail_task.target_url}; retrying"
+                f"[darkforums] invalid detail html on attempt {attempt + 1} for {detail_task.target_url}; retrying"
             )
             close_browser_client()
-        print(f"[{self.site_name}] skipping invalid detail persist for {detail_task.target_url}")
+        print(f"[darkforums] skipping invalid detail persist for {detail_task.target_url}")
         return None
 
     def persist(

@@ -1,138 +1,184 @@
-# 数据库与镜像文件一体化迁移
+# SQLite → PostgreSQL 16 数据迁移
 
-该功能不依赖 AI。外部命令行工具把旧 SQLite 数据库和镜像目录打包为一个 `.dwti` 文件；管理员在项目的“数据迁移”页面上传后，后端完成预检、PostgreSQL 隔离导入、数据校验和受控切换。
+本项目采用离线全量迁移：把活动 collector.db 和完整 output 证据目录打成一个 .dwti，导入 PostgreSQL 独立 Schema，完成数据、文件、功能和性能验收后再激活。auth_accounts.db、样本库和遗留库不在迁移范围内。
 
-## 1. 准备目标 PostgreSQL
+迁移不会删除 SQLite、原证据目录、.dwti、旧 PostgreSQL Schema 或旧 release。系统不做双写、CDC、增量同步或两个数据库之间的数据合并。
 
-先创建一个持久化 PostgreSQL 数据库和专用账号。该账号需要连接目标数据库并创建 schema、表、索引、外键和函数的权限。导入器不会使用或覆盖 `public` schema，而是为每个迁移包创建独立的 `dwti_<批次编号>` schema。
+## 1. 准备 PostgreSQL 16
 
-Windows 首次启动时，如果尚未配置目标 PostgreSQL，启动脚本会调用项目内置的 `scripts\setup_postgresql_windows.ps1` 自动安装或复用 PostgreSQL 16，并创建项目数据库和账号。已有目标配置或已激活 PostgreSQL 时不会重复安装或重置密码。该步骤只准备迁移目标，不会自动切换或覆盖已有 SQLite 数据。可以用 `plan` 和 `status` 子命令分别预览或检查，不执行导入：
+Ubuntu、Debian 和 WSL 使用：
 
-```powershell
-.\scripts\setup_postgresql_windows.ps1 plan
-.\scripts\setup_postgresql_windows.ps1 status
-```
-
-Windows 新环境可在首次启动前把运行数据放到非系统盘：
-
-```powershell
-.\configure-data-root.cmd plan -DataRoot D:\DarkWebThreatIntel
-.\configure-data-root.cmd apply -DataRoot D:\DarkWebThreatIntel
-```
-
-已有数据使用 `migrate` 替代 `apply`。工具会停止项目，只复制数据库、输出、迁移批次、配置、凭据和受管运行数据，逐文件执行 SHA-256 校验，定点改写 `installation.json` 中的数据路径并健康检查；控制根中的安装指针、更新状态和锁不会复制，当前应用版本目录也会留在旧应用根，下一次更新才切入新的 `DARKWEB_APP_ROOT`。失败时恢复旧配置，成功后也保留旧目录。必须完成列表、详情、镜像和新写入复测后，再运行 `.\configure-data-root.cmd cleanup`；清理器会重新核对全部哈希并只删除已复制成功的旧数据，不得手工删除整个 C 盘控制目录或旧应用根。全新 PostgreSQL 的集群会创建在 `<数据根目录>\postgresql\16\data`；已有 PostgreSQL 集群不会被文件复制方式迁移，避免破坏运行中的数据库服务。
-
-Debian / Ubuntu / WSL / Codespaces 使用 `scripts/setup_postgresql_linux.sh` 完成同样的首次安装和幂等检查。脚本从 PostgreSQL 官方 PGDG 仓库安装 PostgreSQL 16，校验官方签名指纹，使用本机 `postgres` 系统账号创建项目角色和数据库，并把应用口令保存到当前用户私有的 `postgresql-target.json`（权限 `600`）：
-
-当 Debian / Ubuntu 版本已从 PGDG 主仓库下线时，脚本会验证主仓库的发行版 `Release` 文件并自动切换至 `apt-archive.postgresql.org` 官方归档；显式配置的仓库不可用时不会静默回退。
-
-```bash
+~~~bash
 bash ./scripts/setup_postgresql_linux.sh plan
+bash ./scripts/setup_postgresql_linux.sh install
 bash ./scripts/setup_postgresql_linux.sh status
-```
+~~~
 
-使用外部 PostgreSQL 时，在启动项目前显式设置目标连接；此时启动脚本不会安装本机 PostgreSQL。连接串属于服务端机密，不要写入源码、前端或 Git：
+安装脚本固定 PostgreSQL 16，并创建两个不同角色：
 
-Windows PowerShell：
+- darkweb_migrator：创建每批次 dwti_<bundle-id> Schema、表、函数、索引和授权。
+- darkweb_app：只获得活动 Schema 的 USAGE、表 DML 和序列权限；没有 Schema DDL 权限。
 
-```powershell
-$env:DARKWEB_MIGRATION_TARGET_DATABASE_URL = 'postgresql://<user>:<password>@127.0.0.1:5432/<database>'
-.\scripts\start_all_services_windows.ps1 start
-```
+脚本撤销 PUBLIC 在 public Schema 上的 CREATE 权限。私有配置默认写入：
 
-WSL / Linux：
+~~~text
+$HOME/.local/share/darkweb-threat-intel/postgresql-target.json
+~~~
 
-```bash
-export DARKWEB_MIGRATION_TARGET_DATABASE_URL='postgresql://<user>:<password>@127.0.0.1:5432/<database>'
-./scripts/start_all_services_wsl.sh start
-```
+配置格式为 2，权限为 0600，包含 migration_database_url 与 runtime_database_url。前者只用于导入和清理新 Schema，后者才写入 active-release.json。口令不得进入源码、前端、日志或工单。
 
-自动安装仅支持 Windows 以及使用 `apt-get` 的 Debian / Ubuntu / WSL / Codespaces；其他 Linux 发行版必须显式提供外部目标。设置 `DARKWEB_POSTGRESQL_AUTO_INSTALL=0` 可以关闭 Linux 自动安装。所有自动安装的都是本机单节点 PostgreSQL，不会形成跨主机高可用；目标服务必须在项目重启后仍可访问。
+外部 PostgreSQL 需要分别提供：
 
-## 2. 在旧系统生成迁移包
+~~~bash
+export DARKWEB_MIGRATION_TARGET_DATABASE_URL='postgresql://migrator:...@host:5432/database'
+export DARKWEB_MIGRATION_RUNTIME_DATABASE_URL='postgresql://runtime:...@host:5432/database'
+~~~
 
-停止会产生大量新写入的采集任务后执行：
+两个 URL 的用户名必须不同。运行角色还需要目标数据库的 CONNECT、TEMPORARY 权限；迁移角色需要 CONNECT、CREATE 和 TEMPORARY。
 
-```bat
-D:\path\to\database-migration-kit\tools\migration-export.cmd pack ^
-  --database "C:\path\to\collector.db" ^
-  --artifacts "C:\path\to\output" ^
-  --output "D:\backup\darkweb-20260812.dwti"
-```
+## 2. 停机导出 .dwti
 
-Windows 图形工具可以直接选择 `\\wsl.localhost\<发行版>\...\collector.db` 和同一 WSL 发行版内的 `output` 目录。工具会把数据库及稳定的 `-wal`、`-shm`、`-journal` 侧文件复制到 Windows 临时目录，再通过 SQLite Backup API 创建快照；复制前后文件大小或修改时间发生变化时会中止，因此仍必须先停止 WSL 中的 API、worker、scheduler 和其他写库进程。
+必须先停止 API、Celery worker、scheduler 和 normalizer，然后执行：
 
-也可以先把数据库快照和完整 `output` 目录复制到 Windows 再打包，但必须保留 `output` 下全部相对目录和文件名，不能只复制单个站点、拍平目录或形成额外的 `output/output` 层级。
+~~~bash
+PYTHONPATH=src ./venv/bin/python scripts/export_migration_bundle.py \
+  --database "$HOME/.local/share/bishe/collector.db" \
+  --artifacts "/absolute/path/to/darkweb_collector/output" \
+  --output "/absolute/backup/darkweb-final.dwti"
+~~~
 
-导出器执行以下固定流程：
+CLI 没有跳过停机检查的参数。它会枚举已知写库进程，并尝试取得 SQLite 独占事务；检测到服务或数据库锁后直接拒绝导出。
 
-1. 通过 SQLite Backup API 创建一致性快照，源数据库保持不变。
-2. 只在快照上补齐当前版本的数据库结构，并执行 `PRAGMA quick_check`。
-3. 将每张表导出为数据库无关的 JSONL 数据。
-4. 把 `html_path`、`screenshot_path`、`raw_artifact_path` 中的 WSL/Linux/Windows 绝对路径转换为 `dwti-artifact://` 可移植相对路径；任一非空路径在所选镜像目录中找不到对应文件都会中止打包。
-5. 将镜像目录写入同一个 ZIP64 容器，并逐条核对数据库路径引用确实存在于包内。代码/文库镜像遇到 Windows 保留设备名、非法字符、末尾点或空格、Unicode 等价名、超长组件及大小写冲突时，会迁入稳定哈希命名的兼容目录并同步数据库引用；没有显式路径字段的暗网核心镜像遇到这些情况时会拒绝打包。
-6. 记录每张表的行数、空值计数、XOR256 和 SUM256 摘要，并为每个载荷生成 SHA-256。
+导出固定执行：
 
-SQLite 索引的列顺序、唯一性、部分索引条件以及每列 `ASC` / `DESC` 方向会写入结构清单，并在 PostgreSQL 中按相同方向创建。表达式索引和非 `BINARY` 自定义排序规则仍会安全阻断，避免静默改变查询语义。
+1. 使用 SQLite Backup API 创建一致性快照，而不是直接复制 WAL 数据库文件。
+2. 只在快照中执行当前 _ensure_schema，并补齐 site_connectivity_probes；本地 38 张源表因此形成 39 张目标业务表。
+3. 执行 PRAGMA quick_check，枚举字段、PK/FK、唯一约束、部分索引和排序方向。
+4. 每张表写入独立 JSONL，记录行数、空值数、XOR256 和 SUM256。
+5. 将完整证据目录写入 ZIP64，并为每个载荷记录 SHA-256。
+6. 把代码监测、文库监测和 ai_aggregation_reports.file_path 改写为 dwti-artifact:// 可移植路径。
+7. 排除会话、Cookie、凭据和敏感目录；清空平台会话。
+8. 清空 AI 投递目标及历史尝试的配置 JSON、禁用全部 AI 投递目标，并清除相关错误文本。迁移后必须重新录入 callback/企业微信等投递配置。
 
-平台会话、Cookie、令牌、凭据目录不会打包；`platform_sessions` 中的会话路径、会话元数据和错误文本会被清空。迁移后需要重新登录这些外部平台。
+任一数据库文件路径找不到对应证据、存在越界路径、符号链接、不可安全改名的跨平台文件名或大小写冲突时，导出会失败且不会留下半成品。
 
-## 3. 在项目中导入
+## 3. 上传、导入与任务状态
 
-登录管理员账号，打开：
+管理员迁移 API：
 
-```text
-系统设置 -> 数据迁移
-```
+~~~text
+GET  /api/migrations/config
+GET  /api/migrations
+POST /api/migrations/upload
+GET  /api/migrations/{job_id}
+POST /api/migrations/{job_id}/performance
+POST /api/migrations/{job_id}/activate
+~~~
 
-选择 `.dwti` 文件并点击“上传并开始校验”。后端依次执行：
+上传接口接收原始请求体，文件名放在 X-DWTI-Filename。只有 request.state.current_user.role == "admin" 可以调用；不能用固定用户名代替角色鉴权。
 
-- 文件名、路径穿越、符号链接、重复路径、数量、体积和压缩炸弹检查；
-- 全部载荷 SHA-256 校验；
-- 数据库镜像路径与包内文件逐项对应校验；
-- PostgreSQL 独立 schema 建表和分批导入；
-- 可移植镜像路径重写为当前迁移批次的新镜像根目录；
-- 数据库逐表联合摘要复核；
-- 镜像文件释放到独立批次目录。
+导入由脱离 API 生命周期的独立子进程执行，状态原子写入磁盘。系统级文件锁与 PostgreSQL advisory lock 阻止并发导入或激活。
 
-只有数据库和镜像文件全部校验一致，任务才会进入“等待切换”状态。导入失败不会修改当前活动数据库，也不会覆盖当前镜像目录。
+~~~text
+queued → preflight → importing → verifying → analyzing → ready
+                                                    ↘ failed
+ready → activating → active
+                  ↘ rolled_back / rollback_failed
+~~~
 
-## 4. 确认切换与回退
+预检覆盖路径穿越、符号链接、重复路径、大小写冲突、条目数、体积、压缩炸弹、Schema 指纹、39 张必需表与关键字段、全部载荷 SHA-256，以及数据库文件路径与包内证据的一一对应。
 
-确认切换后，项目写入新的活动版本配置，并调用现有启动脚本停止和重启服务。重启后会检查 PostgreSQL schema 指纹、迁移版本、数据库可查询性和 API 健康状态；任一步失败都会恢复旧活动版本并再次启动。
+导入覆盖：
 
-激活控制器会先清除旧进程继承的 `DARKWEB_COLLECTOR_DATABASE_URL`、`DARKWEB_COLLECTOR_DATABASE_SCHEMA` 和 `DARKWEB_COLLECTOR_OUTPUT_ROOT`，再由活动版本文件重新选择数据库与镜像目录，避免文件存在但 `/collector-output` 仍指向旧目录。
+- 每个 bundle 建立独立 dwti_<bundle-id> Schema。
+- 500 行一批导入并重置 identity。
+- 从 PostgreSQL 重读每张表，比较行数、空值数、XOR256 和 SUM256。
+- 从释放目录重新计算全部证据 SHA-256。
+- 安装 0001_baseline、0002_sqlite_compat、0003_local_postgres_compat、0004_performance_indexes。
+- 安装受限兼容函数 datetime(text)、datetime(text,text)、json_extract(text,text)；无效输入返回 NULL。
+- 建立情报、任务、文库、代码、漏洞和 AI 热路径索引，并执行 ANALYZE。
+- 用运行账号检查 39 张表、关键字段、四个版本、Schema 指纹、代表性读取、identity 写入和强制回滚 canary。
 
-活动版本配置默认位于数据根目录：
+## 4. 性能与语义门禁
 
-- Windows：`<数据根目录>\active-release.json`
-- WSL / Linux：`$HOME/.local/share/darkweb-threat-intel/active-release.json`
+默认 DARKWEB_MIGRATION_REQUIRE_BENCHMARK=1。导入完成后任务停在 analyzing，必须向 performance 接口提交报告才会转为 ready。
 
-Linux PostgreSQL 目标配置默认位于 `$HOME/.local/share/darkweb-threat-intel/postgresql-target.json`，目录权限为 `700`、文件权限为 `600`；其中包含应用数据库口令，不要复制到源码仓库、日志或工单。
+每个读取场景必须同时包含并发 1 和并发 8：
 
-迁移批次、导入报告和镜像目录保存在同一用户数据根目录下的 `migrations` 目录。当前活动版本仍引用的批次目录不能删除；只有确认数据库、列表、详情、镜像下载和新采集写入均正常，且该批次不再是当前或回退版本后，才可清理对应旧批次。第一次从 SQLite 切换时，原 SQLite 文件不会删除；后续迁移时，上一活动 PostgreSQL schema 和镜像目录也会保留。
+~~~text
+dashboard_overview
+intelligence_search
+data_leak
+ransomware_vulnerability
+crawl_jobs
+code_document_monitoring
+ai_aggregation
+~~~
 
-如果新 PostgreSQL 已产生业务写入，回退到旧 SQLite 或旧 schema 会丢失这部分新写入，不能把自动启动回退当作长期双写或数据库合并方案。
+报告格式：
 
-## 5. 配置项与边界
+~~~json
+{
+  "read_results": [
+    {
+      "scenario": "dashboard_overview",
+      "concurrency": 1,
+      "sqlite_p95_ms": 100.0,
+      "postgres_p95_ms": 105.0,
+      "errors": 0
+    }
+  ],
+  "write_result": {
+    "sqlite_tps": 100.0,
+    "postgres_tps": 210.0,
+    "transactions": 800,
+    "errors": 0
+  },
+  "semantic_equivalence": {"passed": true, "mismatches": 0}
+}
+~~~
 
-- `DARKWEB_MIGRATION_AUTO_RESTART=0`：导入后只写活动配置，不自动调用启动脚本。
-- `DARKWEB_DATA_ROOT`：Windows 统一数据根目录，建议使用容量充足的非系统盘专用目录。
-- `DARKWEB_MIGRATION_MAX_BUNDLE_BYTES`：上传文件上限，默认 20 GiB。
-- `DARKWEB_MIGRATION_MAX_UNCOMPRESSED_BYTES`：解压后总量上限，默认 100 GiB。
-- `DARKWEB_MIGRATION_MAX_ENTRIES`：迁移包条目上限，默认 250,000。
-- `DARKWEB_MIGRATION_MAX_ROW_BYTES`：单条数据库记录的 JSONL 上限，默认 64 MiB。
-- Windows 最终镜像路径按传统运行时兼容边界限制为 259 个 UTF-16 单元；目录过深会在释放文件前中止并清理批次，请缩短 `DARKWEB_MIGRATION_ROOT` 或用户数据目录。
-- 当前是完整替换迁移，不做两个数据库之间的数据合并或增量同步。
-- 旧版工具生成且不含 `portable_path_fields` 元数据的迁移包仍可校验和导入，但不会自动重写既有绝对路径；涉及代码监测或文库监测镜像时应使用新版工具重新生成迁移包。
-- SHA-256 用于发现损坏和篡改，不代表发布者身份认证；只导入来源可信的迁移包。
+强制条件：
 
-## 已完成验证
+- 并发 8：每个场景 PostgreSQL P95 ≤ SQLite P95 的 80%。
+- 并发 1：每个场景 PostgreSQL P95 ≤ SQLite P95 的 110%。
+- 写入：至少 800 个复合事务，PostgreSQL 吞吐 ≥ SQLite 的 2 倍。
+- 所有读写错误数为 0。
+- 规范化结果、分页总数、排序、大小写、JSON 国家字段和上海时区语义一致。
 
-2026-08-12 在隔离 PostgreSQL 环境中使用当前真实数据完成全量验证：33 张业务表、25,197 行记录和 6,937 个镜像文件全部导入，镜像总量为 897,376,770 字节，最长 Windows 路径为 294 字符；另有 416 个会话或敏感文件按规则排除。逐表行数、空值计数、XOR256 和 SUM256 全部一致，释放后的镜像数量和字节数也与清单一致。项目数据库适配层能够读取主要 API 数据，并完成一次带 `lastrowid` 的写入及事务回滚。前端生产构建、迁移 API 鉴权、Windows 启动脚本解析和 WSL Shell 语法检查均通过。
+仅自动化单元测试可以设置 DARKWEB_MIGRATION_REQUIRE_BENCHMARK=0。生产环境不应关闭门禁。
 
-2026-08-18 追加验证 Windows 通过 `\\wsl.localhost\Ubuntu\...` 对 WSL SQLite 执行本地暂存和只读快照；使用包含 5 个 WSL 绝对镜像路径字段的小型迁移包完成导出、包内路径核对、真实 PostgreSQL 导入、目标根目录重写和逐表摘要复核，缺失镜像文件会在导出阶段被拒绝。验证创建的临时 PostgreSQL Schema 和镜像释放目录已清理。
+## 5. 激活与回退
 
-2026-08-19 使用 WSL ext4 中两个仅大小写不同且内容不同的 `code_monitoring` HTML 镜像完成回归：迁移包为两个文件生成不同的稳定归档名，数据库路径同步更新；在 Windows 释放并导入 PostgreSQL 后两份内容均保留、路径均位于新镜像根目录，摘要复核通过。随后追加 Windows 文件名兼容回归，覆盖保留设备名、冒号、末尾点或空格、Unicode NFC 等价冲突及超长组件；可显式重写的代码/文库路径全部转为安全归档名，暗网核心不兼容路径按安全边界拒绝打包。
+激活接口只启动独立控制器，不会在仍运行的 API 进程内提前改连接。控制器顺序固定为：
 
-2026-08-19 使用用户提供的真实 SQLite 与 `output.zip` 完成最终回归：源库 `quick_check=ok`、外键错误为 0，共 38 张原始表和 222,642 行；快照升级后生成 39 张表，两个 `ai_aggregation_runs` 降序索引在 PostgreSQL 中保留为 `DESC`。ZIP 的 29,556 个文件和 2,830,679,096 字节通过 CRC，排除 9 个会话或敏感文件后，29,547 个镜像、2,830,630,704 字节进入迁移包；两组 Windows 路径冲突涉及的 4 个文件完成安全重命名。PostgreSQL 逐表摘要、29,547 个释放文件的全量 SHA-256、各 30 个 JSON/HTML/PNG 样本、DragonForce/Lynx 列表详情镜像及重命名代码详情全部通过。深目录测试会在释放文件前明确拒绝并清理，短的默认运行目录完成导入。
+~~~text
+取得文件锁和 PostgreSQL advisory lock
+→ 停止全部服务
+→ 用运行账号执行 Schema/读取/写入回滚 canary
+→ 原子写 active-release.json（仅 runtime URL）
+→ 启动完整服务
+→ 再次执行强数据库校验
+→ 校验 /api/health 的 PostgreSQL engine、Schema、0004 版本和 database_ready
+~~~
+
+任一步失败：
+
+- 若尚未写活动版本：直接重启原服务，配置不变。
+- 若已写活动版本：恢复 previous-active-release.json，停止新服务并启动旧版本。
+- 回退失败时任务进入 rollback_failed，需要人工检查。
+
+原 SQLite 和证据目录始终保留。不过 PostgreSQL 激活后产生的新写入不会自动同步回旧库，因此回退会丢失切换后的新增数据。
+
+## 6. 配置边界
+
+- DARKWEB_MIGRATION_MAX_BUNDLE_BYTES：上传包上限，默认 20 GiB。
+- DARKWEB_MIGRATION_MAX_UNCOMPRESSED_BYTES：解压后总量上限，默认 100 GiB。
+- DARKWEB_MIGRATION_MAX_ENTRIES：包内条目上限，默认 250,000。
+- DARKWEB_MIGRATION_MAX_ROW_BYTES：单条 JSONL 上限，默认 64 MiB。
+- DARKWEB_POSTGRES_CONNECT_TIMEOUT_SECONDS：PostgreSQL 建连超时，默认 5 秒。
+- DARKWEB_MIGRATION_ROOT：任务、release、锁和报告根目录。
+- DARKWEB_MIGRATION_AUTO_RESTART=0：禁止激活；不会降级成先写配置再人工重启。
+- Windows 释放路径按 259 个 UTF-16 单元的传统运行边界预检。
+- SHA-256 用于发现损坏和篡改，不证明迁移包发布者身份；只导入可信来源的包。
+

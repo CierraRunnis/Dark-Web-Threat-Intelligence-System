@@ -13,10 +13,24 @@ if str(SRC) not in sys.path:
 import uvicorn
 
 
+def _default_runtime_db_path() -> Path:
+    shared_db_path = Path.home() / ".local" / "share" / "bishe" / "collector.db"
+    if shared_db_path.exists():
+        return shared_db_path.resolve()
+    return (ROOT / "data" / "collector.db").resolve()
+
+
 if __name__ == "__main__":
     os.chdir(ROOT)
-    os.environ.setdefault("DARKWEB_COLLECTOR_DB_PATH", str((ROOT / "data" / "collector.db").resolve()))
+    runtime_db_path = _default_runtime_db_path()
+    os.environ.setdefault("DARKWEB_COLLECTOR_DB_PATH", str(runtime_db_path))
+    os.environ.setdefault("DARKWEB_COLLECTOR_SOURCE_DB_PATH", str(runtime_db_path))
+    os.environ.setdefault("DARKWEB_RUNTIME_DB_META_PATH", f"{runtime_db_path}.meta.json")
     os.environ.setdefault("DARKWEB_COLLECTOR_SITES_FILE", str((ROOT / "sites.yaml").resolve()))
-    host = os.environ.get("DARKWEB_API_HOST", "0.0.0.0")
-    port = int(os.environ.get("DARKWEB_API_PORT", "8000"))
-    uvicorn.run("darkweb_collector.api_app:app", host=host, port=port, reload=False)
+    uvicorn.run(
+        "darkweb_collector.basic_auth_app:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        proxy_headers=False,
+    )

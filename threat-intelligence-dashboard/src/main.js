@@ -1,26 +1,32 @@
 import { createApp } from 'vue'
-import * as XLSX from 'xlsx'
+import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import 'element-plus/dist/index.css'
+
 import App from './App.vue'
 import router from './router'
 import { AUTH_UNAUTHORIZED_EVENT, installAuthFetch } from './composables/useAuth'
-import './prototype/styles.css'
-import './prototype/integration.css'
+import './styles/xuanjian-visual-sync.scss'
 
-window.XLSX = XLSX
+
 installAuthFetch()
 
 window.addEventListener(AUTH_UNAUTHORIZED_EVENT, () => {
-  if (router.currentRoute.value.name === 'Login') return
-  router.replace({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } })
+  const route = router.currentRoute.value
+  if (route.name === 'Login') return
+  router.replace({ path: '/login', query: { redirect: route.fullPath } })
 })
 
 const app = createApp(App)
-for (const [name, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(name, component)
+
+// Register all Element Plus icons
+for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
+  app.component(key, component)
 }
+
+app.use(createPinia())
 app.use(router)
 app.use(ElementPlus)
+
 app.mount('#app')

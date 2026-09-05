@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -14,16 +15,107 @@ import shutil
 import sqlite3
 from typing import Any, Callable, Iterator, Sequence
 import unicodedata
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 import uuid
 import zipfile
 
+from darkweb_collector.business_composite_gate import evaluate_business_composite_v2
+from darkweb_collector.postgres_write_gate import evaluate_postgres_write_paths
 from darkweb_collector.runtime import active_release_path, user_data_root
 
 
 BUNDLE_FORMAT = "dwti-migration-bundle"
 BUNDLE_VERSION = 1
-SCHEMA_VERSION = "0002_sqlite_compat"
+PERFORMANCE_SCHEMA_VERSION = "0004_performance_indexes"
+WRITE_SCHEMA_VERSION = "0005_postgres_write_paths"
+SCHEMA_VERSION = "0006_postgres_read_paths"
+SCHEMA_VERSIONS = (
+    "0001_baseline",
+    "0002_sqlite_compat",
+    "0003_local_postgres_compat",
+    PERFORMANCE_SCHEMA_VERSION,
+    WRITE_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+)
+EXPECTED_BUSINESS_TABLES = frozenset(
+    {
+        "ai_aggregation_delivery_attempts",
+        "ai_aggregation_delivery_targets",
+        "ai_aggregation_flocks_profile_schedulers",
+        "ai_aggregation_imported_flocks_executions",
+        "ai_aggregation_profiles",
+        "ai_aggregation_reports",
+        "ai_aggregation_runs",
+        "ai_aggregation_schedule_claims",
+        "analysis_snapshots",
+        "code_hit_reviews",
+        "code_hit_snapshots",
+        "code_hits",
+        "code_scan_runs",
+        "code_search_states",
+        "code_watch_terms",
+        "code_watchlists",
+        "collection_runs",
+        "crawl_jobs",
+        "document_hit_reviews",
+        "document_hit_snapshots",
+        "document_hits",
+        "exposure_scan_runs",
+        "exposure_watch_terms",
+        "exposure_watchlists",
+        "forum_details",
+        "forum_topics",
+        "forum_victims",
+        "monitoring_keyword_notifications",
+        "monitoring_keywords",
+        "netdisk_source_health",
+        "netdisk_source_states",
+        "normalized_intelligence_cache_state",
+        "normalized_intelligence_events",
+        "platform_sessions",
+        "ransomware_live_victims",
+        "site_connectivity_probes",
+        "victim_details",
+        "victims",
+        "vulnerability_records",
+    }
+)
+REQUIRED_SCHEMA_COLUMNS = {
+    "crawl_jobs": {"id", "job_id", "site_name", "job_type", "status", "finished_at"},
+    "normalized_intelligence_events": {
+        "event_id",
+        "event_type",
+        "severity",
+        "risk_score",
+        "disclosure_time",
+        "event_metadata_json",
+    },
+    "document_hits": {"id", "risk_score", "severity", "last_seen_at"},
+    "code_hits": {"id", "risk_score", "severity", "last_seen_at"},
+    "ai_aggregation_reports": {"id", "run_id", "file_path", "sha256", "generated_at"},
+    "site_connectivity_probes": {
+        "site_name",
+        "url",
+        "available",
+        "status",
+        "checked_at",
+        "last_success_at",
+        "failure_reason",
+        "error",
+    },
+}
+PERFORMANCE_READ_SCENARIOS = frozenset(
+    {
+        "dashboard_overview",
+        "intelligence_search",
+        "data_leak",
+        "ransomware_vulnerability",
+        "crawl_jobs",
+        "code_document_monitoring",
+        "ai_aggregation",
+    }
+)
+POSTGRES_MIGRATION_ADVISORY_LOCK_KEY = 0x445754494D494752
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_BUNDLE_BYTES = 20 * 1024 * 1024 * 1024
@@ -42,8 +134,14 @@ PORTABLE_ARTIFACT_PATH_PREFIX = "dwti-artifact://"
 PORTABLE_ARTIFACT_PATH_COLUMNS = {
     "document_hit_snapshots": {"html_path", "screenshot_path"},
     "code_hit_snapshots": {"html_path", "screenshot_path", "raw_artifact_path"},
+    "ai_aggregation_reports": {"file_path"},
 }
-PORTABLE_ARTIFACT_RENAME_ROOTS = {"code_monitoring", "document_exposure"}
+PORTABLE_ARTIFACT_RENAME_ROOTS = {
+    "ai-aggregation",
+    "ai_aggregation",
+    "code_monitoring",
+    "document_exposure",
+}
 PORTABLE_ARTIFACT_RENAME_DIRECTORY = "_dwti_portable"
 WINDOWS_INVALID_COMPONENT_CHARACTERS = frozenset('<>:"/\\|?*')
 WINDOWS_RESERVED_COMPONENT_NAMES = {
@@ -189,8 +287,23 @@ def _upgrade_snapshot_schema(snapshot_path: Path) -> None:
     from darkweb_collector.db import _ensure_schema
 
     connection = sqlite3.connect(snapshot_path)
+    connection.row_factory = sqlite3.Row
     try:
         _ensure_schema(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS site_connectivity_probes (
+                site_name TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                available INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                last_success_at TEXT,
+                failure_reason TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         connection.commit()
         result = str(connection.execute("PRAGMA quick_check").fetchone()[0])
         if result.lower() != "ok":
@@ -432,6 +545,16 @@ def _decode_json_value(value: Any) -> Any:
 def _sanitized_row(table: str, columns: Sequence[str], values: Sequence[Any]) -> tuple[list[Any], list[str]]:
     result = list(values)
     sanitized: list[str] = []
+
+    def replace(field: str, value: Any) -> None:
+        if field not in columns:
+            return
+        index = columns.index(field)
+        result[index] = value
+        marker = f"{table}.{field}"
+        if marker not in sanitized:
+            sanitized.append(marker)
+
     for index, column in enumerate(columns):
         lowered = column.lower()
         if any(marker in lowered for marker in SENSITIVE_COLUMN_MARKERS):
@@ -439,9 +562,13 @@ def _sanitized_row(table: str, columns: Sequence[str], values: Sequence[Any]) ->
             sanitized.append(f"{table}.{column}")
     if table == "platform_sessions":
         for field, replacement in (("storage_state_path", ""), ("metadata_json", "{}"), ("last_error", "")):
-            if field in columns:
-                result[columns.index(field)] = replacement
-                sanitized.append(f"{table}.{field}")
+            replace(field, replacement)
+    elif table == "ai_aggregation_delivery_targets":
+        replace("enabled", 0)
+        replace("config_json", "{}")
+    elif table == "ai_aggregation_delivery_attempts":
+        replace("target_config_json", "{}")
+        replace("last_error", "")
     return result, sanitized
 
 
@@ -1102,6 +1229,21 @@ def _validate_schema_manifest(manifest: dict[str, Any]) -> None:
     expected = str(manifest.get("source", {}).get("schema_fingerprint") or "")
     if actual != expected:
         raise MigrationBundleError("迁移包数据库结构指纹不一致")
+    table_names = {str(table.get("name") or "") for table in spec["tables"] if isinstance(table, dict)}
+    missing_tables = sorted(EXPECTED_BUSINESS_TABLES - table_names)
+    if missing_tables:
+        raise MigrationBundleError("迁移包缺少当前应用必需表：" + ", ".join(missing_tables))
+    for table in spec["tables"]:
+        name = str(table.get("name") or "")
+        expected_columns = REQUIRED_SCHEMA_COLUMNS.get(name)
+        if not expected_columns:
+            continue
+        actual_columns = {str(column.get("name") or "") for column in table.get("columns", [])}
+        missing_columns = sorted(expected_columns - actual_columns)
+        if missing_columns:
+            raise MigrationBundleError(
+                f"迁移包表 {name} 缺少当前应用必需字段：" + ", ".join(missing_columns)
+            )
     table_payload = manifest.get("tables")
     if not isinstance(table_payload, dict) or set(table_payload) != {table["name"] for table in spec["tables"]}:
         raise MigrationBundleError("迁移包表清单与数据库结构不一致")
@@ -1403,7 +1545,7 @@ def _create_schema(connection, schema_name: str, spec: dict[str, Any], fingerpri
             "INSERT INTO schema_migrations(version, checksum, source_schema_fingerprint) VALUES (%s, %s, %s)",
             [
                 ("0001_baseline", hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest(), fingerprint),
-                (SCHEMA_VERSION, hashlib.sha256(b"sqlite datetime compatibility v1").hexdigest(), None),
+                ("0002_sqlite_compat", hashlib.sha256(b"sqlite datetime compatibility v2").hexdigest(), None),
             ],
         )
         cursor.execute(
@@ -1518,7 +1660,7 @@ def _materialize_portable_artifact_row(
     return result
 
 
-def import_bundle(
+def _import_bundle_core(
     bundle_path: Path,
     target_database_url: str,
     job_id: str,
@@ -1554,7 +1696,11 @@ def import_bundle(
                 from psycopg2.extras import execute_values  # type: ignore
             except ImportError as exc:
                 raise MigrationBundleError("未安装 PostgreSQL 驱动 psycopg2") from exc
-            connection = psycopg2.connect(target_database_url, application_name="dwti-migration-import")
+            connection = psycopg2.connect(
+                target_database_url,
+                application_name="dwti-migration-import",
+                connect_timeout=int(os.environ.get("DARKWEB_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")),
+            )
             _create_schema(connection, schema_name, manifest["schema"], summary["schema_fingerprint"])
             schema_created = True
             with connection.cursor() as cursor:
@@ -1696,7 +1842,7 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def activate_import(report: dict[str, Any], target_database_url: str) -> dict[str, Any]:
+def _activate_import_core(report: dict[str, Any], target_database_url: str) -> dict[str, Any]:
     release_root = migration_root() / "releases" / str(report["job_id"])
     expected_output = (release_root / "artifacts").resolve(strict=True)
     if expected_output != Path(report["output_root"]).resolve(strict=True):
@@ -1737,8 +1883,13 @@ def restore_previous_active(job_id: str) -> None:
     previous = release_root / "previous-active-release.json"
     current = active_release_path()
     if previous.exists():
-        current.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(previous, current)
+        try:
+            payload = json.loads(previous.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise MigrationBundleError("上一活动版本配置损坏，无法自动回退") from exc
+        if not isinstance(payload, dict):
+            raise MigrationBundleError("上一活动版本配置损坏，无法自动回退")
+        _atomic_json(current, payload)
     else:
         current.unlink(missing_ok=True)
 
@@ -1754,3 +1905,1411 @@ def public_active_release() -> dict[str, Any]:
     payload.pop("database_url", None)
     payload["active"] = True
     return payload
+
+def benchmark_required() -> bool:
+    return os.environ.get("DARKWEB_MIGRATION_REQUIRE_BENCHMARK", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+@contextmanager
+def exclusive_file_lock(path: Path, *, blocking: bool = False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        try:
+            if os.name == "nt":
+                path.chmod(0o600)
+            else:
+                os.fchmod(handle.fileno(), 0o600)
+        except OSError:
+            pass
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+                msvcrt.locking(handle.fileno(), mode, 1)
+            else:
+                import fcntl
+
+                mode = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+                fcntl.flock(handle.fileno(), mode)
+        except (OSError, BlockingIOError) as exc:
+            raise MigrationBundleError("已有数据迁移或激活操作正在运行") from exc
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
+@contextmanager
+def migration_operation_lock(database_url: str):
+    if not database_url.lower().startswith(("postgres://", "postgresql://")):
+        raise MigrationBundleError("迁移锁要求 PostgreSQL URL")
+    try:
+        import psycopg2  # type: ignore
+    except ImportError as exc:
+        raise MigrationBundleError("未安装 PostgreSQL 驱动 psycopg2") from exc
+    with exclusive_file_lock(migration_root() / ".operation.lock"):
+        lock_connection = psycopg2.connect(
+            database_url,
+            application_name="dwti-migration-lock",
+            connect_timeout=int(os.environ.get("DARKWEB_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")),
+        )
+        lock_connection.autocommit = True
+        acquired = False
+        try:
+            with lock_connection.cursor() as cursor:
+                cursor.execute("SELECT pg_try_advisory_lock(%s)", (POSTGRES_MIGRATION_ADVISORY_LOCK_KEY,))
+                acquired = bool(cursor.fetchone()[0])
+            if not acquired:
+                raise MigrationBundleError("目标 PostgreSQL 上已有迁移或激活操作正在运行")
+            yield
+        finally:
+            if acquired:
+                try:
+                    with lock_connection.cursor() as cursor:
+                        cursor.execute("SELECT pg_advisory_unlock(%s)", (POSTGRES_MIGRATION_ADVISORY_LOCK_KEY,))
+                except Exception:
+                    pass
+            lock_connection.close()
+
+
+def _runtime_role_from_url(database_url: str) -> str:
+    try:
+        role = unquote(urlsplit(database_url).username or "")
+    except ValueError as exc:
+        raise MigrationBundleError("运行账号 PostgreSQL URL 无效") from exc
+    if not role:
+        raise MigrationBundleError("运行账号 PostgreSQL URL 缺少用户名")
+    return _safe_identifier(role)
+
+
+def _install_compatibility_functions(connection) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION dwti_safe_timestamp(input_value TEXT)
+            RETURNS TIMESTAMP WITHOUT TIME ZONE
+            LANGUAGE plpgsql IMMUTABLE AS $dwti$
+            DECLARE
+                normalized TEXT := BTRIM(COALESCE(input_value, ''));
+            BEGIN
+                IF normalized = '' THEN
+                    RETURN NULL;
+                ELSIF normalized ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN
+                    RETURN normalized::DATE::TIMESTAMP WITHOUT TIME ZONE;
+                ELSIF normalized ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]{1,6})?)?$' THEN
+                    RETURN DATE_TRUNC('second', REPLACE(normalized, 'T', ' ')::TIMESTAMP WITHOUT TIME ZONE);
+                ELSIF normalized ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]{1,6})?)?(Z|[+-][0-9]{2}:?[0-9]{2})$' THEN
+                    RETURN DATE_TRUNC('second', normalized::TIMESTAMPTZ AT TIME ZONE 'UTC');
+                END IF;
+                RETURN NULL;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NULL;
+            END;
+            $dwti$
+            """
+        )
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION datetime(value TEXT)
+            RETURNS TIMESTAMP WITHOUT TIME ZONE
+            LANGUAGE plpgsql IMMUTABLE AS $dwti$
+            BEGIN
+                RETURN dwti_safe_timestamp(value);
+            END;
+            $dwti$
+            """
+        )
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION datetime(input_value TEXT, modifier TEXT)
+            RETURNS TIMESTAMP WITHOUT TIME ZONE
+            LANGUAGE plpgsql STABLE AS $dwti_modifier$
+            DECLARE
+                base_value TIMESTAMP WITHOUT TIME ZONE;
+                normalized_modifier TEXT := LOWER(BTRIM(COALESCE(modifier, '')));
+                amount INTEGER;
+            BEGIN
+                IF LOWER(BTRIM(COALESCE(input_value, ''))) = 'now' THEN
+                    base_value := DATE_TRUNC('second', LOCALTIMESTAMP);
+                ELSE
+                    base_value := datetime(input_value);
+                END IF;
+                IF base_value IS NULL THEN
+                    RETURN NULL;
+                END IF;
+                IF normalized_modifier = '' THEN
+                    RETURN base_value;
+                ELSIF normalized_modifier = 'start of day' THEN
+                    RETURN DATE_TRUNC('day', base_value);
+                ELSIF normalized_modifier ~ '^[+-]?[0-9]+[ ]+hours?$' THEN
+                    amount := SUBSTRING(normalized_modifier FROM '^([+-]?[0-9]+)')::INTEGER;
+                    RETURN base_value + MAKE_INTERVAL(hours => amount);
+                ELSIF normalized_modifier ~ '^[+-]?[0-9]+[ ]+days?$' THEN
+                    amount := SUBSTRING(normalized_modifier FROM '^([+-]?[0-9]+)')::INTEGER;
+                    RETURN base_value + MAKE_INTERVAL(days => amount);
+                ELSIF normalized_modifier ~ '^[+-]?[0-9]+[ ]+minutes?$' THEN
+                    amount := SUBSTRING(normalized_modifier FROM '^([+-]?[0-9]+)')::INTEGER;
+                    RETURN base_value + MAKE_INTERVAL(mins => amount);
+                END IF;
+                RETURN NULL;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NULL;
+            END;
+            $dwti_modifier$
+            """
+        )
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION json_extract(input_value TEXT, json_path TEXT)
+            RETURNS TEXT
+            LANGUAGE plpgsql IMMUTABLE AS $dwti_json$
+            DECLARE
+                current_value JSONB;
+                remaining TEXT;
+                token TEXT;
+                match_value TEXT[];
+            BEGIN
+                IF input_value IS NULL OR json_path IS NULL OR LEFT(json_path, 1) <> '$' THEN
+                    RETURN NULL;
+                END IF;
+                current_value := input_value::JSONB;
+                remaining := SUBSTRING(json_path FROM 2);
+                WHILE remaining <> '' LOOP
+                    IF LEFT(remaining, 1) = '.' THEN
+                        match_value := REGEXP_MATCH(remaining, '^[.]([A-Za-z_][A-Za-z0-9_]*)');
+                        IF match_value IS NULL THEN
+                            RETURN NULL;
+                        END IF;
+                        token := match_value[1];
+                        current_value := current_value -> token;
+                        remaining := SUBSTRING(remaining FROM LENGTH(token) + 2);
+                    ELSIF LEFT(remaining, 1) = '[' THEN
+                        match_value := REGEXP_MATCH(remaining, '^[[]([0-9]+)[]]');
+                        IF match_value IS NULL THEN
+                            RETURN NULL;
+                        END IF;
+                        token := match_value[1];
+                        current_value := current_value -> token::INTEGER;
+                        remaining := SUBSTRING(remaining FROM LENGTH(token) + 3);
+                    ELSE
+                        RETURN NULL;
+                    END IF;
+                    IF current_value IS NULL THEN
+                        RETURN NULL;
+                    END IF;
+                END LOOP;
+                IF JSONB_TYPEOF(current_value) = 'null' THEN
+                    RETURN NULL;
+                ELSIF JSONB_TYPEOF(current_value) = 'string' THEN
+                    RETURN current_value #>> '{}';
+                END IF;
+                RETURN current_value::TEXT;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NULL;
+            END;
+            $dwti_json$
+            """
+        )
+
+def _apply_performance_indexes(connection, schema_name: str) -> dict[str, Any]:
+    from psycopg2 import sql  # type: ignore
+
+    extension_statement = "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"
+    statements = (
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_type_time "
+        "ON normalized_intelligence_events("
+        "event_type, datetime(COALESCE(NULLIF(disclosure_time, ''), updated_at)) DESC, event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_type_severity_time "
+        "ON normalized_intelligence_events("
+        "event_type, severity, datetime(COALESCE(NULLIF(disclosure_time, ''), updated_at)) DESC, event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_type_risk_time "
+        "ON normalized_intelligence_events("
+        "event_type, risk_score DESC, datetime(COALESCE(NULLIF(disclosure_time, ''), updated_at)) DESC, event_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_search_trgm "
+        "ON normalized_intelligence_events USING GIN ("
+        "(LOWER(COALESCE(title, '') || ' ' || COALESCE(victim, '') || ' ' || "
+        "COALESCE(attacker, '') || ' ' || COALESCE(detail_text, ''))) "
+        "public.gin_trgm_ops"
+        ")",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_attacker_lower "
+        "ON normalized_intelligence_events(LOWER(attacker))",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_industry_lower "
+        "ON normalized_intelligence_events(LOWER(industry))",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_region_lower "
+        "ON normalized_intelligence_events(LOWER(region))",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_country "
+        "ON normalized_intelligence_events(json_extract(event_metadata_json, '$.country'))",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_events_country_code "
+        "ON normalized_intelligence_events(json_extract(event_metadata_json, '$.country_code'))",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_jobs_status_queue "
+        "ON crawl_jobs(status, enqueued_at, id) WHERE status IN ('queued', 'running')",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_jobs_site_status_finished "
+        "ON crawl_jobs(site_name, status, finished_at DESC, id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_document_risk_time "
+        "ON document_hits("
+        "risk_score DESC, datetime(COALESCE(NULLIF(disclosure_time, ''), last_seen_at)) DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_document_severity_time "
+        "ON document_hits("
+        "severity, datetime(COALESCE(NULLIF(disclosure_time, ''), last_seen_at)) DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_code_risk_time "
+        "ON code_hits(risk_score DESC, datetime(last_seen_at) DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_code_severity_time "
+        "ON code_hits(severity, datetime(last_seen_at) DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_ai_runs_status_time "
+        "ON ai_aggregation_runs(analysis_status, queued_at DESC, id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_ai_reports_time "
+        "ON ai_aggregation_reports(generated_at DESC, id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_vulnerability_severity_time "
+        "ON vulnerability_records("
+        "severity, datetime(COALESCE(NULLIF(disclosure_time, ''), last_seen_at)) DESC, id)",
+        "CREATE INDEX IF NOT EXISTS idx_pgperf_vulnerability_cve_time "
+        "ON vulnerability_records("
+        "UPPER(cve_id), datetime(COALESCE(NULLIF(disclosure_time, ''), last_seen_at)) DESC, id)",
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(schema_name)))
+        cursor.execute(extension_statement)
+        cursor.execute(
+            "SELECT n.nspname FROM pg_extension e "
+            "JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname=%s",
+            ("pg_trgm",),
+        )
+        extension_row = cursor.fetchone()
+        if not extension_row or str(extension_row[0]) != "public":
+            raise MigrationBundleError("pg_trgm 扩展必须安装在 public schema")
+        for statement in statements:
+            cursor.execute(statement)
+        cursor.execute(
+            """
+            INSERT INTO schema_migrations(version, checksum, source_schema_fingerprint)
+            VALUES (%s, %s, NULL)
+            ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum
+            """,
+            (
+                PERFORMANCE_SCHEMA_VERSION,
+                hashlib.sha256((extension_statement + "\n" + "\n".join(statements) + "\nANALYZE").encode("utf-8")).hexdigest(),
+            ),
+        )
+        cursor.execute(sql.SQL("ANALYZE"))
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname=%s AND indexname LIKE %s",
+            (schema_name, "idx_pgperf_%"),
+        )
+        index_count = int(cursor.fetchone()[0])
+    return {
+        "version": PERFORMANCE_SCHEMA_VERSION,
+        "extensions": ["public.pg_trgm"],
+        "performance_indexes": index_count,
+        "analyzed": True,
+    }
+
+
+
+def _apply_postgres_write_paths(connection, schema_name: str) -> dict[str, Any]:
+    from psycopg2 import sql  # type: ignore
+
+    _safe_identifier(schema_name)
+    schema = sql.Identifier(schema_name)
+    migration_signature = "\n".join(
+        (
+            "dwti_mark_normalized_dirty(text)-security-invoker-v1",
+            "victims(site_name,source_url,name,coalesce(domain,''),status)-unique-v1",
+            "forum_victims(forum_detail_id)-index-v1",
+            "drop-rejected-idx_pgwrite_jobs_active_site_type_time-v1",
+            "restore-idx_pgperf_jobs_status_queue-where-queued-running-v1",
+            "dwti_upsert_victim(bigint,text...)-v1",
+            "dwti_upsert_forum_topic(text...)-v1",
+            "dwti_upsert_forum_detail(text...,victims_json,text)-v1",
+        )
+    )
+    function_statement = sql.SQL(
+        """
+        CREATE OR REPLACE FUNCTION {}.dwti_mark_normalized_dirty(changed_at TEXT)
+        RETURNS BIGINT
+        LANGUAGE plpgsql
+        SECURITY INVOKER
+        SET search_path = pg_catalog
+        AS $dwti_write$
+        DECLARE
+            effective_changed_at TEXT :=
+                COALESCE(NULLIF(changed_at, ''), CURRENT_TIMESTAMP::TEXT);
+            next_revision BIGINT;
+        BEGIN
+            INSERT INTO {}.normalized_intelligence_cache_state AS cache_state (
+                id, source_signature, event_count, refreshed_at,
+                source_revision, applied_revision, dirty_since, dirty_at
+            ) VALUES (1, '', 0, '', 1, 0, effective_changed_at, effective_changed_at)
+            ON CONFLICT (id) DO UPDATE SET
+                dirty_since = CASE
+                    WHEN cache_state.source_revision <= cache_state.applied_revision
+                      OR cache_state.dirty_since = ''
+                    THEN EXCLUDED.dirty_since
+                    ELSE cache_state.dirty_since
+                END,
+                source_revision = cache_state.source_revision + 1,
+                dirty_at = EXCLUDED.dirty_at
+            RETURNING cache_state.source_revision INTO next_revision;
+            RETURN next_revision;
+        END;
+        $dwti_write$
+        """
+    ).format(schema, schema)
+
+    business_function_statements = (
+        sql.SQL(
+            """
+            CREATE OR REPLACE FUNCTION {}.dwti_upsert_victim(
+                p_run_id BIGINT,
+                p_site_name TEXT,
+                p_source_url TEXT,
+                p_detail_url TEXT,
+                p_name TEXT,
+                p_display_label TEXT,
+                p_domain TEXT,
+                p_status TEXT,
+                p_published_at_utc TEXT,
+                p_claimed_size TEXT,
+                p_claimed_size_gb DOUBLE PRECISION,
+                p_content_hash TEXT,
+                p_last_detail_fetch_status TEXT,
+                p_raw_json TEXT,
+                p_changed_at TEXT
+            )
+            RETURNS BIGINT
+            LANGUAGE plpgsql
+            SECURITY INVOKER
+            SET search_path = pg_catalog
+            AS $dwti_victim$
+            DECLARE
+                victim_id BIGINT;
+            BEGIN
+                INSERT INTO {}.victims AS victim_row (
+                    site_name, source_url, detail_url, name, display_label,
+                    domain, status, published_at_utc, claimed_size,
+                    claimed_size_gb, content_hash, first_seen_run_id,
+                    last_seen_run_id, last_detail_fetch_status, raw_json
+                ) VALUES (
+                    p_site_name, p_source_url, p_detail_url, p_name,
+                    p_display_label, p_domain, p_status, p_published_at_utc,
+                    p_claimed_size, p_claimed_size_gb, p_content_hash,
+                    p_run_id, p_run_id, p_last_detail_fetch_status, p_raw_json
+                )
+                ON CONFLICT (
+                    site_name, source_url, name, (COALESCE(domain, '')), status
+                )
+                DO UPDATE SET
+                    detail_url = EXCLUDED.detail_url,
+                    display_label = EXCLUDED.display_label,
+                    published_at_utc = EXCLUDED.published_at_utc,
+                    claimed_size = EXCLUDED.claimed_size,
+                    claimed_size_gb = EXCLUDED.claimed_size_gb,
+                    content_hash = EXCLUDED.content_hash,
+                    last_seen_run_id = EXCLUDED.last_seen_run_id,
+                    last_detail_fetch_status = COALESCE(
+                        EXCLUDED.last_detail_fetch_status,
+                        victim_row.last_detail_fetch_status
+                    ),
+                    raw_json = EXCLUDED.raw_json
+                RETURNING victim_row.id INTO victim_id;
+
+                PERFORM {}.dwti_mark_normalized_dirty(p_changed_at);
+                RETURN victim_id;
+            END;
+            $dwti_victim$
+            """
+        ).format(schema, schema, schema),
+        sql.SQL(
+            """
+            CREATE OR REPLACE FUNCTION {}.dwti_upsert_forum_topic(
+                p_site_name TEXT,
+                p_section TEXT,
+                p_title TEXT,
+                p_url TEXT,
+                p_author TEXT,
+                p_replies TEXT,
+                p_views TEXT,
+                p_published_at TEXT,
+                p_last_reply_at TEXT,
+                p_content_hash TEXT,
+                p_collected_at_utc TEXT,
+                p_raw_json TEXT,
+                p_changed_at TEXT
+            )
+            RETURNS TABLE(topic_id BIGINT, materially_changed BOOLEAN)
+            LANGUAGE plpgsql
+            SECURITY INVOKER
+            SET search_path = pg_catalog
+            AS $dwti_topic$
+            DECLARE
+                existing_title TEXT;
+                existing_content_hash TEXT;
+                resolved_topic_id BIGINT;
+                changed BOOLEAN := FALSE;
+            BEGIN
+                LOOP
+                    SELECT topic_row.id, topic_row.title, topic_row.content_hash
+                    INTO resolved_topic_id, existing_title, existing_content_hash
+                    FROM {}.forum_topics AS topic_row
+                    WHERE topic_row.site_name = p_site_name
+                      AND topic_row.section = p_section
+                      AND topic_row.url = p_url
+                    FOR UPDATE;
+
+                    IF FOUND THEN
+                        changed := (
+                            existing_title IS DISTINCT FROM p_title
+                            OR existing_content_hash IS DISTINCT FROM p_content_hash
+                        );
+                        UPDATE {}.forum_topics AS topic_row
+                        SET title = p_title,
+                            author = p_author,
+                            replies = p_replies,
+                            views = p_views,
+                            published_at = p_published_at,
+                            last_reply_at = p_last_reply_at,
+                            content_hash = p_content_hash,
+                            last_seen_at = p_collected_at_utc,
+                            raw_json = p_raw_json
+                        WHERE topic_row.id = resolved_topic_id;
+                        EXIT;
+                    END IF;
+
+                    resolved_topic_id := NULL;
+                    INSERT INTO {}.forum_topics AS topic_row (
+                        site_name, section, title, url, author, replies, views,
+                        published_at, last_reply_at, content_hash,
+                        first_seen_at, last_seen_at, raw_json
+                    ) VALUES (
+                        p_site_name, p_section, p_title, p_url, p_author,
+                        p_replies, p_views, p_published_at, p_last_reply_at,
+                        p_content_hash, p_collected_at_utc, p_collected_at_utc,
+                        p_raw_json
+                    )
+                    ON CONFLICT (site_name, section, url) DO NOTHING
+                    RETURNING topic_row.id INTO resolved_topic_id;
+                    IF resolved_topic_id IS NOT NULL THEN
+                        changed := TRUE;
+                        EXIT;
+                    END IF;
+                END LOOP;
+
+                IF changed THEN
+                    PERFORM {}.dwti_mark_normalized_dirty(p_changed_at);
+                END IF;
+                RETURN QUERY SELECT resolved_topic_id, changed;
+            END;
+            $dwti_topic$
+            """
+        ).format(schema, schema, schema, schema, schema),
+        sql.SQL(
+            """
+            CREATE OR REPLACE FUNCTION {}.dwti_upsert_forum_detail(
+                p_site_name TEXT,
+                p_section TEXT,
+                p_topic_url TEXT,
+                p_content TEXT,
+                p_authors TEXT,
+                p_timestamps TEXT,
+                p_attachments TEXT,
+                p_victims_summary TEXT,
+                p_attackers_summary TEXT,
+                p_content_hash TEXT,
+                p_collected_at_utc TEXT,
+                p_raw_json TEXT,
+                p_victims_json TEXT,
+                p_changed_at TEXT
+            )
+            RETURNS BIGINT
+            LANGUAGE plpgsql
+            SECURITY INVOKER
+            SET search_path = pg_catalog
+            AS $dwti_detail$
+            DECLARE
+                detail_id BIGINT;
+                parsed_victims JSONB;
+            BEGIN
+                parsed_victims := COALESCE(
+                    NULLIF(BTRIM(p_victims_json), ''),
+                    '[]'
+                )::JSONB;
+                IF JSONB_TYPEOF(parsed_victims) <> 'array' THEN
+                    RAISE EXCEPTION USING
+                        ERRCODE = '22023',
+                        MESSAGE = 'victims_json must be a JSON array';
+                END IF;
+
+                INSERT INTO {}.forum_details AS detail_row (
+                    site_name, section, topic_url, content, authors, timestamps,
+                    attachments, victims, attackers, content_hash, fetched_at,
+                    raw_json
+                ) VALUES (
+                    p_site_name, p_section, p_topic_url, p_content, p_authors,
+                    p_timestamps, p_attachments, p_victims_summary,
+                    p_attackers_summary, p_content_hash, p_collected_at_utc,
+                    p_raw_json
+                )
+                ON CONFLICT (site_name, section, topic_url)
+                DO UPDATE SET
+                    content = EXCLUDED.content,
+                    authors = EXCLUDED.authors,
+                    timestamps = EXCLUDED.timestamps,
+                    attachments = EXCLUDED.attachments,
+                    victims = EXCLUDED.victims,
+                    attackers = EXCLUDED.attackers,
+                    content_hash = EXCLUDED.content_hash,
+                    fetched_at = EXCLUDED.fetched_at,
+                    raw_json = EXCLUDED.raw_json
+                RETURNING detail_row.id INTO detail_id;
+
+                DELETE FROM {}.forum_victims
+                WHERE forum_detail_id = detail_id;
+                INSERT INTO {}.forum_victims (
+                    forum_detail_id, victim_name, industry, region
+                )
+                SELECT
+                    detail_id,
+                    victim_item.value ->> 'name',
+                    victim_item.value ->> 'industry',
+                    victim_item.value ->> 'region'
+                FROM JSONB_ARRAY_ELEMENTS(parsed_victims)
+                     WITH ORDINALITY AS victim_item(value, ordinality)
+                ORDER BY victim_item.ordinality;
+
+                PERFORM {}.dwti_mark_normalized_dirty(p_changed_at);
+                RETURN detail_id;
+            END;
+            $dwti_detail$
+            """
+        ).format(schema, schema, schema, schema, schema),
+    )
+
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(schema))
+        # Lock writes while proving that NULL and an empty domain can share the
+        # stronger PostgreSQL business key without merging or deleting any rows.
+        cursor.execute(sql.SQL("LOCK TABLE {}.victims IN SHARE ROW EXCLUSIVE MODE").format(schema))
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT 1
+                FROM {}.victims
+                GROUP BY site_name, source_url, name, COALESCE(domain, ''), status
+                HAVING COUNT(*) > 1
+                LIMIT 1
+                """
+            ).format(schema)
+        )
+        if cursor.fetchone() is not None:
+            raise MigrationBundleError(
+                "victims contains duplicate business keys after normalizing NULL/empty domains; "
+                "refusing 0005 without merging or deleting source data"
+            )
+
+        cursor.execute(
+            sql.SQL(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_pgwrite_victims_business_key
+                ON {}.victims (
+                    site_name, source_url, name, COALESCE(domain, ''), status
+                )
+                """
+            ).format(schema)
+        )
+        cursor.execute(
+            """
+            SELECT index_relation.relname, constraint_relation.conname
+            FROM pg_index AS index_metadata
+            JOIN pg_class AS table_relation
+              ON table_relation.oid = index_metadata.indrelid
+            JOIN pg_namespace AS table_schema
+              ON table_schema.oid = table_relation.relnamespace
+            JOIN pg_class AS index_relation
+              ON index_relation.oid = index_metadata.indexrelid
+            LEFT JOIN pg_constraint AS constraint_relation
+              ON constraint_relation.conindid = index_metadata.indexrelid
+            WHERE table_schema.nspname = %s
+              AND table_relation.relname = 'victims'
+              AND index_metadata.indisunique
+              AND index_metadata.indexprs IS NULL
+              AND index_metadata.indpred IS NULL
+              AND index_metadata.indnkeyatts = 5
+              AND (
+                  SELECT ARRAY_AGG(attribute.attname ORDER BY key_position.ordinality)
+                  FROM UNNEST(index_metadata.indkey::SMALLINT[])
+                       WITH ORDINALITY AS key_position(attnum, ordinality)
+                  JOIN pg_attribute AS attribute
+                    ON attribute.attrelid = index_metadata.indrelid
+                   AND attribute.attnum = key_position.attnum
+                  WHERE key_position.ordinality <= index_metadata.indnkeyatts
+              ) = ARRAY['site_name', 'source_url', 'name', 'domain', 'status']::NAME[]
+            """,
+            (schema_name,),
+        )
+        legacy_unique_indexes = list(cursor.fetchall())
+        for index_name, constraint_name in legacy_unique_indexes:
+            if constraint_name:
+                cursor.execute(
+                    sql.SQL("ALTER TABLE {}.victims DROP CONSTRAINT IF EXISTS {}").format(
+                        schema, sql.Identifier(str(constraint_name))
+                    )
+                )
+            else:
+                cursor.execute(
+                    sql.SQL("DROP INDEX IF EXISTS {}.{}").format(
+                        schema, sql.Identifier(str(index_name))
+                    )
+                )
+
+        cursor.execute(
+            sql.SQL(
+                "CREATE INDEX IF NOT EXISTS idx_pgwrite_forum_victims_detail "
+                "ON {}.forum_victims(forum_detail_id)"
+            ).format(schema)
+        )
+        cursor.execute(
+            sql.SQL(
+                "DROP INDEX IF EXISTS {}.idx_pgwrite_jobs_active_site_type_time"
+            ).format(schema)
+        )
+        cursor.execute(
+            sql.SQL(
+                "CREATE INDEX IF NOT EXISTS idx_pgperf_jobs_status_queue "
+                "ON {}.crawl_jobs(status, enqueued_at, id) "
+                "WHERE status IN ('queued', 'running')"
+            ).format(schema)
+        )
+        cursor.execute(function_statement)
+        for business_function_statement in business_function_statements:
+            cursor.execute(business_function_statement)
+        cursor.execute(
+            sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC").format(schema)
+        )
+        cursor.execute(
+            sql.SQL(
+                """
+                INSERT INTO {}.schema_migrations(
+                    version, checksum, source_schema_fingerprint
+                )
+                VALUES (%s, %s, NULL)
+                ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum
+                """
+            ).format(schema),
+            (WRITE_SCHEMA_VERSION, hashlib.sha256(migration_signature.encode("utf-8")).hexdigest()),
+        )
+        for table_name in (
+            "victims",
+            "forum_victims",
+            "crawl_jobs",
+            "normalized_intelligence_cache_state",
+        ):
+            cursor.execute(
+                sql.SQL("ANALYZE {}.{}").format(schema, sql.Identifier(table_name))
+            )
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname=%s AND indexname LIKE %s",
+            (schema_name, "idx_pgwrite_%"),
+        )
+        write_index_count = int(cursor.fetchone()[0])
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname=%s AND indexname LIKE %s",
+            (schema_name, "idx_pgperf_%"),
+        )
+        performance_index_count = int(cursor.fetchone()[0])
+    return {
+        "version": WRITE_SCHEMA_VERSION,
+        "write_path_indexes": write_index_count,
+        "performance_indexes": performance_index_count,
+        "victim_legacy_unique_indexes_removed": len(legacy_unique_indexes),
+        "analyzed": True,
+    }
+
+
+def _apply_postgres_read_paths(connection, schema_name: str) -> dict[str, Any]:
+    """Install the PostgreSQL-only read paths and SQLite time parity."""
+
+    from psycopg2 import sql  # type: ignore
+
+    _safe_identifier(schema_name)
+    schema = sql.Identifier(schema_name)
+    index_name = "idx_pgread_jobs_recency_expr"
+    expected_definition = (
+        "USING btree (COALESCE(finished_at, started_at, enqueued_at) DESC)"
+    )
+    migration_signature = "\n".join(
+        (
+            "sqlite-datetime-second-precision-v1",
+            "idx_pgread_jobs_recency_expr-btree-coalesce-finished-started-enqueued-desc-v1",
+            "analyze-crawl_jobs-v1",
+        )
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(schema)
+        )
+    _install_compatibility_functions(connection)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                "CREATE INDEX IF NOT EXISTS idx_pgread_jobs_recency_expr "
+                "ON {}.crawl_jobs "
+                "((COALESCE(finished_at, started_at, enqueued_at)) DESC)"
+            ).format(schema)
+        )
+        cursor.execute(
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname=%s AND tablename='crawl_jobs' AND indexname=%s
+            """,
+            (schema_name, index_name),
+        )
+        definition_row = cursor.fetchone()
+        definition = str(definition_row[0]) if definition_row else ""
+        if expected_definition not in definition or " INCLUDE " in definition.upper():
+            raise MigrationBundleError(
+                "0006 crawl_jobs recency index definition does not match the validated candidate"
+            )
+        cursor.execute(
+            sql.SQL(
+                """
+                INSERT INTO {}.schema_migrations(
+                    version, checksum, source_schema_fingerprint
+                )
+                VALUES (%s, %s, NULL)
+                ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum
+                """
+            ).format(schema),
+            (
+                SCHEMA_VERSION,
+                hashlib.sha256(migration_signature.encode("utf-8")).hexdigest(),
+            ),
+        )
+        cursor.execute(sql.SQL("ANALYZE {}.crawl_jobs").format(schema))
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_indexes WHERE schemaname=%s AND indexname LIKE %s",
+            (schema_name, "idx_pgread_%"),
+        )
+        read_index_count = int(cursor.fetchone()[0])
+    return {
+        "version": SCHEMA_VERSION,
+        "read_path_indexes": read_index_count,
+        "crawl_jobs_recency_index": index_name,
+        "analyzed": True,
+    }
+
+
+def _grant_runtime_permissions(connection, schema_name: str, runtime_role: str) -> None:
+    from psycopg2 import sql  # type: ignore
+
+    identifier = sql.Identifier(runtime_role)
+    schema = sql.Identifier(schema_name)
+    with connection.cursor() as cursor:
+        cursor.execute(sql.SQL("REVOKE ALL ON SCHEMA {} FROM PUBLIC").format(schema))
+        cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(schema, identifier))
+        cursor.execute(
+            sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {} TO {}").format(
+                schema, identifier
+            )
+        )
+        cursor.execute(
+            sql.SQL("GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA {} TO {}").format(
+                schema, identifier
+            )
+        )
+        cursor.execute(sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC").format(schema))
+        cursor.execute(
+            sql.SQL("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {} TO {}").format(schema, identifier)
+        )
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA {} "
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {}"
+            ).format(schema, identifier)
+        )
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA {} "
+                "GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {}"
+            ).format(schema, identifier)
+        )
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA {} GRANT EXECUTE ON FUNCTIONS TO {}"
+            ).format(schema, identifier)
+        )
+
+
+def _finalize_postgres_release(
+    database_url: str,
+    runtime_database_url: str,
+    schema_name: str,
+) -> dict[str, Any]:
+    try:
+        import psycopg2  # type: ignore
+        from psycopg2 import sql  # type: ignore
+    except ImportError as exc:
+        raise MigrationBundleError("未安装 PostgreSQL 驱动 psycopg2") from exc
+    connection = psycopg2.connect(
+        database_url,
+        application_name="dwti-migration-finalize",
+        connect_timeout=int(os.environ.get("DARKWEB_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")),
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(schema_name)))
+        _install_compatibility_functions(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO schema_migrations(version, checksum, source_schema_fingerprint)
+                VALUES (%s, %s, NULL)
+                ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum
+                """,
+                (
+                    "0002_sqlite_compat",
+                    hashlib.sha256(b"datetime(text), datetime(text,text), json_extract(text,text)").hexdigest(),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO schema_migrations(version, checksum, source_schema_fingerprint)
+                VALUES (%s, %s, NULL)
+                ON CONFLICT(version) DO UPDATE SET checksum=EXCLUDED.checksum
+                """,
+                (
+                    "0003_local_postgres_compat",
+                    hashlib.sha256(b"local 39-table postgres compatibility").hexdigest(),
+                ),
+            )
+        performance = _apply_performance_indexes(connection, schema_name)
+        write_paths = _apply_postgres_write_paths(connection, schema_name)
+        read_paths = _apply_postgres_read_paths(connection, schema_name)
+        runtime_role = _runtime_role_from_url(runtime_database_url)
+        _grant_runtime_permissions(connection, schema_name, runtime_role)
+        connection.commit()
+        return {**performance, **write_paths, **read_paths, "runtime_role": runtime_role}
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _verify_release_artifacts(bundle_path: Path, output_root: Path) -> dict[str, Any]:
+    count = 0
+    total_bytes = 0
+    with zipfile.ZipFile(bundle_path, "r", allowZip64=True) as archive:
+        checksums = _parse_checksums(_read_limited(archive, "checksums.sha256", MAX_CHECKSUM_BYTES))
+        for info in archive.infolist():
+            if info.is_dir() or not info.filename.startswith("artifacts/"):
+                continue
+            relative = PurePosixPath(_validate_member_name(info.filename)).relative_to("artifacts")
+            target = output_root.joinpath(*relative.parts).resolve(strict=True)
+            resolved_root = output_root.resolve(strict=True)
+            if resolved_root not in target.parents:
+                raise MigrationBundleError("释放后的镜像文件路径越界")
+            expected = checksums.get(info.filename)
+            if expected is None or _sha256_file(target) != expected[0]:
+                raise MigrationBundleError(f"释放后的镜像文件校验失败：{info.filename}")
+            if target.stat().st_size != info.file_size:
+                raise MigrationBundleError(f"释放后的镜像文件大小不一致：{info.filename}")
+            count += 1
+            total_bytes += info.file_size
+    return {"sha256_verified": True, "count": count, "bytes": total_bytes}
+
+
+def _business_source_binding_failures(
+    payload: dict[str, Any],
+    composite_section: dict[str, Any],
+) -> list[str]:
+    """Bind v2 cycles to the same frozen sources as the 0005 path gate."""
+
+    failures: list[str] = []
+    binding = composite_section.get("source_binding")
+    paths = payload.get("postgres_write_paths")
+    if not isinstance(binding, dict) or not isinstance(paths, dict):
+        return ["business_composite_v2.source_binding"]
+    sqlite_binding = binding.get("sqlite")
+    postgres_binding = binding.get("postgresql")
+    integrity = paths.get("source_integrity")
+    if (
+        not isinstance(sqlite_binding, dict)
+        or not isinstance(postgres_binding, dict)
+        or not isinstance(integrity, dict)
+    ):
+        return ["business_composite_v2.source_binding"]
+    paths_sqlite = integrity.get("sqlite")
+    paths_postgres = integrity.get("postgresql")
+    paths_candidate = (
+        paths_postgres.get("candidate")
+        if isinstance(paths_postgres, dict)
+        else None
+    )
+    if (
+        not isinstance(paths_sqlite, dict)
+        or str(sqlite_binding.get("sha256") or "")
+        != str(paths_sqlite.get("sha256_before") or "")
+    ):
+        failures.append("business_composite_v2.sqlite_source_mismatch")
+    if (
+        not isinstance(paths_candidate, dict)
+        or str(postgres_binding.get("schema_snapshot_sha256") or "")
+        != str(paths_candidate.get("sha256_before") or "")
+    ):
+        failures.append("business_composite_v2.postgresql_source_mismatch")
+
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        sqlite_path = str(parameters.get("sqlite_database") or "")
+        postgres_schema = str(parameters.get("postgres_schema") or "")
+        if sqlite_path and sqlite_path != str(sqlite_binding.get("path") or ""):
+            failures.append("business_composite_v2.sqlite_path_mismatch")
+        if (
+            postgres_schema
+            and postgres_schema != str(postgres_binding.get("schema") or "")
+        ):
+            failures.append("business_composite_v2.postgresql_schema_mismatch")
+    return failures
+
+
+def evaluate_performance_report(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise MigrationBundleError("性能报告必须是 JSON 对象")
+    write_paths_section = payload.get("postgres_write_paths")
+    if not isinstance(write_paths_section, dict):
+        raise MigrationBundleError(
+            "性能报告缺少 postgres_write_paths；旧版报告不能用于 0005 迁移验收"
+        )
+    composite_section = payload.get("business_composite_v2")
+    if not isinstance(composite_section, dict):
+        raise MigrationBundleError(
+            "性能报告缺少 business_composite_v2；旧 composite write 不能用于 0005 迁移验收"
+        )
+    write_paths_gate = evaluate_postgres_write_paths(write_paths_section)
+    composite_gate = evaluate_business_composite_v2(composite_section)
+    failures: list[str] = _business_source_binding_failures(
+        payload, composite_section
+    )
+    read_results = payload.get("read_results")
+    if not isinstance(read_results, list):
+        raise MigrationBundleError("性能报告缺少 read_results")
+    observed: dict[tuple[str, int], dict[str, Any]] = {}
+    normalized_reads: list[dict[str, Any]] = []
+    for item in read_results:
+        if not isinstance(item, dict):
+            raise MigrationBundleError("性能读取结果格式错误")
+        scenario = str(item.get("scenario") or "")
+        try:
+            concurrency = int(item.get("concurrency"))
+            sqlite_p95 = float(item.get("sqlite_p95_ms"))
+            postgres_p95 = float(item.get("postgres_p95_ms"))
+            errors = int(item.get("errors", 0))
+        except (TypeError, ValueError) as exc:
+            raise MigrationBundleError(f"性能读取结果数值无效：{scenario}") from exc
+        key = (scenario, concurrency)
+        if scenario not in PERFORMANCE_READ_SCENARIOS or concurrency not in {1, 8} or key in observed:
+            raise MigrationBundleError(f"性能读取场景无效或重复：{scenario}/{concurrency}")
+        if sqlite_p95 <= 0 or postgres_p95 < 0 or errors < 0:
+            raise MigrationBundleError(f"性能读取结果数值越界：{scenario}/{concurrency}")
+        ratio = postgres_p95 / sqlite_p95
+        limit = 1.10 if concurrency == 1 else 0.80
+        passed = errors == 0 and ratio <= limit
+        if not passed:
+            failures.append(f"{scenario}/{concurrency}: ratio={ratio:.4f}, errors={errors}")
+        normalized = {
+            "scenario": scenario,
+            "concurrency": concurrency,
+            "sqlite_p95_ms": sqlite_p95,
+            "postgres_p95_ms": postgres_p95,
+            "ratio": ratio,
+            "limit": limit,
+            "errors": errors,
+            "passed": passed,
+        }
+        observed[key] = normalized
+        normalized_reads.append(normalized)
+    expected = {(scenario, concurrency) for scenario in PERFORMANCE_READ_SCENARIOS for concurrency in (1, 8)}
+    missing = sorted(expected - set(observed))
+    if missing:
+        raise MigrationBundleError(
+            "性能报告缺少读取场景：" + ", ".join(f"{scenario}/{concurrency}" for scenario, concurrency in missing)
+        )
+
+    semantic = payload.get("semantic_equivalence")
+    semantic_passed = isinstance(semantic, dict) and semantic.get("passed") is True
+    if not semantic_passed:
+        failures.append("semantic_equivalence")
+    if write_paths_gate.get("passed") is not True:
+        gate_failures = write_paths_gate.get("failures")
+        detail = (
+            ", ".join(str(item) for item in gate_failures[:3])
+            if isinstance(gate_failures, list) else "invalid"
+        )
+        failures.append(f"postgres_write_paths: {detail}")
+    if composite_gate.get("passed") is not True:
+        gate_failures = composite_gate.get("failures")
+        detail = (
+            ", ".join(str(item) for item in gate_failures[:3])
+            if isinstance(gate_failures, list) else "invalid"
+        )
+        failures.append(f"business_composite_v2: {detail}")
+    if failures:
+        raise MigrationBundleError("性能或语义验收未通过：" + "; ".join(failures[:10]))
+    legacy = payload.get("legacy_diagnostic")
+    if not isinstance(legacy, dict):
+        old_write = payload.get("write_result")
+        legacy = (
+            {
+                "format": "dwti-legacy-composite-v1",
+                "acceptance_eligible": False,
+                "write_result": dict(old_write),
+            }
+            if isinstance(old_write, dict)
+            else {}
+        )
+    return {
+        "required": True,
+        "passed": True,
+        "evaluated_at": _utc_now(),
+        "read_results": sorted(normalized_reads, key=lambda item: (item["scenario"], item["concurrency"])),
+        "write_result": dict(composite_gate["write_result"]),
+        "legacy_diagnostic": dict(legacy),
+        "semantic_equivalence": dict(semantic),
+        "postgres_write_paths": write_paths_gate,
+        "business_composite_v2": composite_gate,
+    }
+
+
+def performance_acceptance_passed(acceptance: Any) -> bool:
+    if not isinstance(acceptance, dict) or acceptance.get("passed") is not True:
+        return False
+    if acceptance.get("required") is False:
+        return True
+    write_paths = acceptance.get("postgres_write_paths")
+    composite = acceptance.get("business_composite_v2")
+    return (
+        acceptance.get("required") is True
+        and isinstance(write_paths, dict)
+        and write_paths.get("passed") is True
+        and isinstance(composite, dict)
+        and composite.get("passed") is True
+    )
+
+
+def record_performance_acceptance(report: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    if str(report.get("status") or "") not in {"analyzing", "ready"}:
+        raise MigrationBundleError("迁移任务尚未进入性能验收阶段")
+    acceptance = evaluate_performance_report(payload)
+    updated = dict(report)
+    updated["performance_acceptance"] = acceptance
+    updated["status"] = "ready"
+    updated["ready_at"] = _utc_now()
+    write_import_report(updated)
+    return updated
+
+
+def write_import_report(report: dict[str, Any]) -> None:
+    release_root = migration_root() / "releases" / str(report["job_id"])
+    _atomic_json(release_root / "import-report.json", report)
+
+
+def validate_postgres_schema(
+    database_url: str,
+    schema_name: str,
+    *,
+    expected_fingerprint: str | None = None,
+    run_canary: bool = False,
+) -> dict[str, Any]:
+    try:
+        import psycopg2  # type: ignore
+        from psycopg2 import sql  # type: ignore
+    except ImportError as exc:
+        raise MigrationBundleError("未安装 PostgreSQL 驱动 psycopg2") from exc
+    _safe_identifier(schema_name)
+    connection = psycopg2.connect(
+        database_url,
+        application_name="dwti-migration-health",
+        connect_timeout=int(os.environ.get("DARKWEB_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")),
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(schema_name)))
+            cursor.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=%s AND table_type='BASE TABLE'",
+                (schema_name,),
+            )
+            table_names = {str(row[0]) for row in cursor.fetchall()}
+            missing_tables = sorted(EXPECTED_BUSINESS_TABLES - table_names)
+            if missing_tables:
+                raise MigrationBundleError("PostgreSQL 缺少当前应用必需表：" + ", ".join(missing_tables))
+            for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items():
+                cursor.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema=%s AND table_name=%s",
+                    (schema_name, table_name),
+                )
+                actual_columns = {str(row[0]) for row in cursor.fetchall()}
+                missing_columns = sorted(required_columns - actual_columns)
+                if missing_columns:
+                    raise MigrationBundleError(
+                        f"PostgreSQL 表 {table_name} 缺少字段：" + ", ".join(missing_columns)
+                    )
+            cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
+            versions = tuple(str(row[0]) for row in cursor.fetchall())
+            missing_versions = [version for version in SCHEMA_VERSIONS if version not in versions]
+            if missing_versions:
+                raise MigrationBundleError("PostgreSQL 缺少迁移版本：" + ", ".join(missing_versions))
+            cursor.execute(
+                "SELECT source_schema_fingerprint FROM schema_migrations WHERE version='0001_baseline'"
+            )
+            row = cursor.fetchone()
+            fingerprint = str(row[0] or "") if row else ""
+            if expected_fingerprint and fingerprint != expected_fingerprint:
+                raise MigrationBundleError("活动 PostgreSQL Schema 指纹与导入报告不一致")
+            for table_name in (
+                "normalized_intelligence_events",
+                "crawl_jobs",
+                "document_hits",
+                "code_hits",
+                "ai_aggregation_profiles",
+            ):
+                cursor.execute(sql.SQL("SELECT 1 FROM {} LIMIT 1").format(sql.Identifier(table_name)))
+                cursor.fetchone()
+            cursor.execute("SELECT current_database(), current_user")
+            database_name, current_user = cursor.fetchone()
+        connection.rollback()
+
+        canary = {"executed": False, "rolled_back": False}
+        if run_canary:
+            marker = "dwti-canary-" + uuid.uuid4().hex
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(schema_name)))
+                cursor.execute(
+                    """
+                    INSERT INTO collection_runs(
+                        site_name, source_url, collected_at_utc, victim_count, run_metadata_json
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    ("__dwti_canary__", marker, _utc_now(), 0, "{}"),
+                )
+                canary_id = int(cursor.fetchone()[0])
+                if canary_id < 1:
+                    raise MigrationBundleError("PostgreSQL 真实表 identity 写入 canary 失败")
+                cursor.execute(
+                    """
+                    INSERT INTO ai_aggregation_schedule_claims(profile_id, scheduled_for, created_at)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (marker, marker, _utc_now()),
+                )
+            connection.rollback()
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL("SET search_path TO {}, pg_catalog").format(sql.Identifier(schema_name)))
+                cursor.execute("SELECT COUNT(*) FROM collection_runs WHERE source_url=%s", (marker,))
+                if int(cursor.fetchone()[0]) != 0:
+                    raise MigrationBundleError("PostgreSQL 真实表 canary 回滚后仍有残留")
+                cursor.execute(
+                    "SELECT COUNT(*) FROM ai_aggregation_schedule_claims "
+                    "WHERE profile_id=%s AND scheduled_for=%s",
+                    (marker, marker),
+                )
+                if int(cursor.fetchone()[0]) != 0:
+                    raise MigrationBundleError("PostgreSQL AI 事务 canary 回滚后仍有残留")
+            connection.rollback()
+            canary = {
+                "executed": True,
+                "rolled_back": True,
+                "table": "collection_runs",
+                "identity_verified": True,
+                "ai_transaction_verified": True,
+            }
+        return {
+            "database_engine": "postgresql",
+            "database_name": str(database_name),
+            "database_user": str(current_user),
+            "database_schema": schema_name,
+            "business_table_count": len(table_names - {"schema_migrations"}),
+            "schema_versions": list(versions),
+            "schema_fingerprint": fingerprint,
+            "canary": canary,
+            "healthy": True,
+        }
+    finally:
+        connection.close()
+
+
+def validate_active_schema(*, run_canary: bool = False) -> dict[str, Any]:
+    path = active_release_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise MigrationBundleError("活动版本配置不存在或损坏") from exc
+    if not isinstance(payload, dict) or payload.get("database_engine") != "postgresql":
+        raise MigrationBundleError("当前活动数据库不是 PostgreSQL")
+    return validate_postgres_schema(
+        str(payload.get("database_url") or ""),
+        str(payload.get("database_schema") or ""),
+        expected_fingerprint=str(payload.get("schema_fingerprint") or ""),
+        run_canary=run_canary,
+    )
+
+
+def _cleanup_import_release(database_url: str, report: dict[str, Any]) -> None:
+    schema_name = str(report.get("database_schema") or "")
+    if schema_name:
+        try:
+            import psycopg2  # type: ignore
+            from psycopg2 import sql  # type: ignore
+
+            connection = psycopg2.connect(
+                database_url,
+                application_name="dwti-migration-cleanup",
+                connect_timeout=int(os.environ.get("DARKWEB_POSTGRES_CONNECT_TIMEOUT_SECONDS", "5")),
+            )
+            connection.autocommit = True
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(_safe_identifier(schema_name)))
+                    )
+            finally:
+                connection.close()
+        except Exception:
+            pass
+    job_id = str(report.get("job_id") or "")
+    if re.fullmatch(r"[0-9a-f]{32}", job_id):
+        _remove_tree(migration_root() / "releases" / job_id)
+
+
+def import_bundle(
+    bundle_path: Path,
+    target_database_url: str,
+    job_id: str,
+    *,
+    runtime_database_url: str | None = None,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    runtime_url = (
+        str(runtime_database_url or "").strip()
+        or os.environ.get("DARKWEB_MIGRATION_RUNTIME_DATABASE_URL", "").strip()
+    )
+    if not runtime_url:
+        raise MigrationBundleError("未配置独立的 PostgreSQL 运行账号 URL")
+    migration_role = _runtime_role_from_url(target_database_url)
+    runtime_role = _runtime_role_from_url(runtime_url)
+    if migration_role == runtime_role:
+        raise MigrationBundleError("PostgreSQL 迁移账号与运行账号必须分离")
+
+    def forwarded(phase: str, percent: int, message: str) -> None:
+        if phase != "ready":
+            _progress(progress, phase, percent, message)
+
+    with migration_operation_lock(target_database_url):
+        report = _import_bundle_core(
+            bundle_path,
+            target_database_url,
+            job_id,
+            progress=forwarded,
+        )
+        try:
+            _progress(progress, "analyzing", 96, "正在安装兼容函数、性能索引并执行 ANALYZE")
+            database_analysis = _finalize_postgres_release(
+                target_database_url,
+                runtime_url,
+                str(report["database_schema"]),
+            )
+            artifact_verification = _verify_release_artifacts(
+                bundle_path.expanduser().resolve(strict=True),
+                Path(report["output_root"]),
+            )
+            database_health = validate_postgres_schema(
+                runtime_url,
+                str(report["database_schema"]),
+                expected_fingerprint=str(report["schema_fingerprint"]),
+                run_canary=True,
+            )
+            required = benchmark_required()
+            acceptance = (
+                {
+                    "required": True,
+                    "passed": False,
+                    "status": "pending",
+                    "criteria": {
+                        "concurrency_8_read_p95_ratio_max": 0.80,
+                        "concurrency_1_read_p95_ratio_max": 1.10,
+                        "write_model": "business_supercycle_v2",
+                        "write_report_version": 2,
+                        "write_rounds_per_backend": 3,
+                        "write_throughput_ratio_min": 2.0,
+                        "write_measured_cycles_min": 800,
+                        "write_transactions_min": 800,
+                        "errors": 0,
+                        "semantic_equivalence": True,
+                    },
+                }
+                if required
+                else {
+                    "required": False,
+                    "passed": True,
+                    "status": "disabled_by_environment",
+                    "evaluated_at": _utc_now(),
+                }
+            )
+            report.update(
+                {
+                    "status": "analyzing" if required else "ready",
+                    "schema_version": SCHEMA_VERSION,
+                    "database_analysis": database_analysis,
+                    "database_health": database_health,
+                    "artifact_verification": artifact_verification,
+                    "performance_acceptance": acceptance,
+                }
+            )
+            write_import_report(report)
+            if required:
+                _progress(progress, "analyzing", 99, "导入已完成，等待提交性能与语义一致性报告")
+            else:
+                _progress(progress, "ready", 100, "迁移包已导入并通过联合校验，等待激活")
+            return report
+        except Exception:
+            _cleanup_import_release(target_database_url, report)
+            raise
+
+
+def activate_import(report: dict[str, Any], runtime_database_url: str) -> dict[str, Any]:
+    acceptance = report.get("performance_acceptance")
+    if not performance_acceptance_passed(acceptance):
+        raise MigrationBundleError("迁移任务尚未通过性能与语义一致性验收")
+    validate_postgres_schema(
+        runtime_database_url,
+        str(report.get("database_schema") or ""),
+        expected_fingerprint=str(report.get("schema_fingerprint") or ""),
+        run_canary=True,
+    )
+    return _activate_import_core(report, runtime_database_url)

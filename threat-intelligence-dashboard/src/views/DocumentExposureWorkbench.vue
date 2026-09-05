@@ -105,7 +105,7 @@
         <div class="netdisk-table-shell">
           <el-table :data="pagedHits" table-layout="fixed" :row-class-name="tableRowClassName">
             <el-table-column
-              v-for="column in compactTableColumns"
+              v-for="column in currentConfig.columns"
               :key="column.key"
               :label="column.label"
               :min-width="column.minWidth"
@@ -150,7 +150,7 @@
                 <span v-else>{{ column.value(row) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="78">
+            <el-table-column label="操作" width="62">
               <template #default="{ row }">
                 <div class="netdisk-row-actions">
                   <el-button text @click="viewDetail(row)">
@@ -313,7 +313,7 @@
                 <span v-else>{{ column.value(row) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="104">
+            <el-table-column label="操作" width="104" fixed="right">
               <template #default="{ row }">
                 <el-button class="compact-action" type="primary" size="small" @click="viewDetail(row)">查看</el-button>
               </template>
@@ -338,7 +338,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
@@ -351,6 +351,26 @@ const router = useRouter()
 const api = useDocumentExposureApi()
 
 const FAMILY_CONFIG = {
+  search_engine: {
+    eyebrow: 'Search Engine',
+    title: '搜索引擎监测',
+    settingsRoute: '/document-exposure/search-engine/settings',
+    summary: '聚焦通过搜索引擎发现的敏感文档结果，列表页只保留摘要，详情能力下沉到独立详情页。',
+    trendTitle: '新增命中文档趋势',
+    distributionTitle: '搜索来源分布',
+    tableTitle: '搜索引擎命中列表',
+    footerHint: '详情页展示来源结果、证据快照、匹配词和处置记录。',
+    columns: [
+      { key: 'title', label: '页面标题 / 链接', minWidth: 260, value: (row) => row.title || row.canonicalUrl || '-' },
+      { key: 'discoverySourceLabel', label: '来源', width: 140, value: (row) => row.discoverySourceLabel || '-' },
+      { key: 'primaryFileType', label: '文件类型', width: 120, value: (row) => (row.primaryFileType || '-').toUpperCase() },
+      { key: 'matchedTerms', label: '匹配关键词', minWidth: 200, value: () => '' },
+      { key: 'riskScore', label: '风险级别', width: 110, value: () => '' },
+      { key: 'lastSeenAt', label: '发现时间', minWidth: 160, value: () => '' },
+      { key: 'reviewStatus', label: '处理状态', width: 120, value: () => '' },
+    ],
+    sourceLabel: (row) => row.discoverySourceLabel || row.discoverySource || '未知来源',
+  },
   netdisk_aggregator: {
     eyebrow: 'Netdisk',
     title: '网盘监测',
@@ -407,7 +427,6 @@ const riskFilter = ref('')
 const reviewFilter = ref('')
 const currentPage = ref(1)
 const pageSize = ref(10)
-const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const summary = reactive({
   totalHits: 0,
   highRiskCount: 0,
@@ -443,17 +462,9 @@ const PLATFORM_ICON_META = {
   pikpak_share: { text: 'PK', className: 'pikpak', url: 'https://mypikpak.com/favicon.ico' },
 }
 
-const sourceFamily = computed(() => route.meta.sourceFamily || 'netdisk_aggregator')
-const currentConfig = computed(() => FAMILY_CONFIG[sourceFamily.value] || FAMILY_CONFIG.netdisk_aggregator)
+const sourceFamily = computed(() => route.meta.sourceFamily || 'search_engine')
+const currentConfig = computed(() => FAMILY_CONFIG[sourceFamily.value] || FAMILY_CONFIG.search_engine)
 const isCompactBoard = computed(() => ['netdisk_aggregator', 'document_library'].includes(sourceFamily.value))
-const compactColumnBreakpoints = {
-  document_library: { accessState: 1360, matchedTerms: 1240 },
-  netdisk_aggregator: { shareCode: 1500, primaryFileSize: 1360, matchedTerms: 1240 },
-}
-const compactTableColumns = computed(() => {
-  const breakpoints = compactColumnBreakpoints[sourceFamily.value] || {}
-  return currentConfig.value.columns.filter((column) => !breakpoints[column.key] || viewportWidth.value >= breakpoints[column.key])
-})
 
 const metricCards = computed(() => {
   const base = [
@@ -482,7 +493,7 @@ const metricCards = computed(() => {
 })
 
 const sourceChips = computed(() => {
-  const rows = summary.platformDistribution
+  const rows = sourceFamily.value === 'search_engine' ? summary.discoveryDistribution : summary.platformDistribution
   return [
     { key: 'all', label: '全部' },
     ...rows.map((item) => {
@@ -802,7 +813,9 @@ const trendOption = computed(() => ({
   ],
 }))
 
-const distributionSeries = computed(() => summary.platformDistribution || [])
+const distributionSeries = computed(() => (
+  (sourceFamily.value === 'search_engine' ? summary.discoveryDistribution : summary.platformDistribution) || []
+))
 
 const distributionTotalLabel = computed(() => `${formatNumber(summary.totalHits)} 条`)
 
@@ -948,16 +961,6 @@ function platformDisplayLabel(row) {
   return normalizePlatformLabel(row?.platformLabel || row?.platform)
 }
 
-function resultHost(row) {
-  const direct = String(row?.sourceDetail || '').trim()
-  if (direct) return direct
-  try {
-    return new URL(row?.canonicalUrl || '').hostname || '-'
-  } catch {
-    return '-'
-  }
-}
-
 function platformIconMeta(row) {
   return PLATFORM_ICON_META[row?.platform] || { text: platformDisplayLabel(row).slice(0, 2).toUpperCase(), className: 'generic' }
 }
@@ -1060,35 +1063,19 @@ watch(
   },
 )
 
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth
-}
-
-onMounted(() => {
-  updateViewportWidth()
-  window.addEventListener('resize', updateViewportWidth)
-  loadData()
-})
-
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', updateViewportWidth)
-})
+onMounted(loadData)
 </script>
 
 <style scoped lang="scss">
 .netdisk-board {
   display: grid;
   gap: 10px;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
   color: var(--ti-text-primary);
 }
 
 .netdisk-toolbar {
   display: grid;
   gap: 12px;
-  min-width: 0;
 }
 
 .netdisk-title,
@@ -1102,7 +1089,6 @@ onBeforeUnmount(() => {
 
 .netdisk-title {
   gap: 6px;
-  min-width: 0;
 }
 
 .netdisk-title h2 {
@@ -1120,7 +1106,6 @@ onBeforeUnmount(() => {
 .netdisk-toolbar__controls {
   gap: 8px;
   min-width: 0;
-  max-width: 100%;
   overflow-x: auto;
   padding-bottom: 2px;
   scrollbar-width: thin;
@@ -1208,7 +1193,6 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  min-width: 0;
 }
 
 .netdisk-metric-card,
@@ -1223,7 +1207,6 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  min-width: 0;
   min-height: 86px;
   padding: 14px 16px;
 }
@@ -1367,10 +1350,7 @@ onBeforeUnmount(() => {
 }
 
 .netdisk-table-shell {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: hidden;
   margin-top: 10px;
   border: 1px solid rgba(45, 93, 255, 0.14);
@@ -1386,7 +1366,7 @@ onBeforeUnmount(() => {
   --el-table-text-color: var(--ti-text-primary);
   font-size: 12px;
   width: 100%;
-  min-width: 0;
+  min-width: 918px;
 }
 
 .netdisk-table-shell :deep(.el-table__header-wrapper th.el-table__cell) {
@@ -1399,7 +1379,7 @@ onBeforeUnmount(() => {
 
 .netdisk-table-shell :deep(.el-table .cell) {
   overflow: hidden;
-  padding: 0 8px;
+  padding: 0 6px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1419,20 +1399,17 @@ onBeforeUnmount(() => {
 }
 
 .netdisk-row-actions {
-  flex-wrap: nowrap;
-  justify-content: center;
-  gap: 4px;
+  gap: 0;
 }
 
 .netdisk-row-actions :deep(.el-button) {
-  width: 26px;
-  height: 26px;
+  width: 23px;
+  height: 23px;
   padding: 0;
   color: var(--ti-text-secondary);
 }
 
 .netdisk-pagination {
-  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   margin-top: 12px;
@@ -1443,9 +1420,6 @@ onBeforeUnmount(() => {
 .monitor-shell {
   display: grid;
   gap: 20px;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
   padding: 24px;
   border-radius: 28px;
   background: #ffffff;
@@ -1460,7 +1434,6 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
-  min-width: 0;
 }
 
 .monitor-shell__eyebrow,
@@ -1488,14 +1461,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  min-width: 0;
 }
 
 .metric-grid,
 .chart-grid {
   display: grid;
   gap: 16px;
-  min-width: 0;
 }
 
 .metric-grid {
@@ -1508,7 +1479,6 @@ onBeforeUnmount(() => {
 
 .metric-card,
 .monitor-panel {
-  min-width: 0;
   border: 1px solid rgba(116, 142, 184, 0.14);
   border-radius: 22px;
   background: rgba(255, 255, 255, 0.9);
@@ -1604,10 +1574,6 @@ onBeforeUnmount(() => {
 }
 
 .table-shell {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  overflow-x: auto;
   margin-top: 16px;
 }
 
@@ -1934,6 +1900,10 @@ onBeforeUnmount(() => {
   display: none;
 }
 
+.table-shell--netdisk :deep(.el-table__fixed-right) {
+  background: rgba(255, 255, 255, 0.94);
+}
+
 @media (max-width: 1280px) {
   .metric-grid,
   .chart-grid {
@@ -1944,28 +1914,10 @@ onBeforeUnmount(() => {
 @media (max-width: 960px) {
   .metric-grid,
   .chart-grid,
-  .netdisk-metric-grid,
-  .netdisk-chart-grid,
-  .netdisk-distribution,
   .table-footer {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .netdisk-toolbar__controls {
-    width: 100%;
-    overflow-x: hidden;
-  }
-
-  .netdisk-search {
-    flex: 1 1 auto;
-    width: 100%;
-    min-width: 0;
-  }
-
-  .netdisk-settings-btn {
-    margin-left: 0;
   }
 
   .monitor-shell__header,

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import http.client
 import json
+import logging
 import os
+import socket
+import ssl
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any
-from urllib.request import Request, urlopen
+from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from darkweb_collector.db import (
     get_db_connection,
     get_ransomware_live_sync_state,
+    mark_normalized_intelligence_dirty,
     upsert_ransomware_live_victim,
 )
 from darkweb_collector.runtime import default_db_path
@@ -20,18 +25,16 @@ RANSOMWARE_LIVE_API_URL = "https://api-pro.ransomware.live/victims/recent?order=
 RANSOMWARE_LIVE_API_KEY_ENV = "RANSOMWARE_LIVE_API_KEY"
 RANSOMWARE_LIVE_SETTINGS_PATH_ENV = "DARKWEB_RANSOMWARE_LIVE_SETTINGS_PATH"
 RANSOMWARE_LIVE_SETTINGS_FILE = "ransomware_live_settings.json"
-RANSOMWARE_LIVE_SYNC_STATUS_PATH_ENV = "DARKWEB_RANSOMWARE_LIVE_SYNC_STATUS_PATH"
-RANSOMWARE_LIVE_SYNC_STATUS_FILE = "ransomware_live_sync_status.json"
 RANSOMWARE_LIVE_SYNC_TTL_SECONDS = 3600
 RANSOMWARE_LIVE_DEFAULT_LIMIT = 0
-RANSOMWARE_LIVE_SYNC_ADVISORY_LOCK_ID = 0x44575449524C5359
 HTTP_HEADERS = {
     "Accept": "application/json",
     "User-Agent": "bishe-threat-intel/1.0",
 }
 
-_settings_lock = Lock()
+logger = logging.getLogger("darkweb_collector.ransomware_live")
 _sync_lock = Lock()
+_sync_thread: Thread | None = None
 
 
 def _settings_path() -> Path:
@@ -55,72 +58,7 @@ def _load_settings() -> dict[str, Any]:
 def _save_settings(payload: dict[str, Any]) -> None:
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
-
-
-def _sync_status_path() -> Path:
-    raw_path = str(os.environ.get(RANSOMWARE_LIVE_SYNC_STATUS_PATH_ENV) or "").strip()
-    if raw_path:
-        return Path(raw_path).expanduser().resolve()
-    return _settings_path().with_name(RANSOMWARE_LIVE_SYNC_STATUS_FILE)
-
-
-def _load_sync_status() -> dict[str, Any]:
-    path = _sync_status_path()
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def save_ransomware_live_sync_status(payload: dict[str, Any]) -> dict[str, Any]:
-    path = _sync_status_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    merged = {**_load_sync_status(), **payload}
-    normalized = {
-        "last_job_id": _normalize_text(merged.get("last_job_id")),
-        "last_tick_at": _normalize_datetime(merged.get("last_tick_at")),
-        "last_success_at": _normalize_datetime(merged.get("last_success_at")),
-        "last_error": _normalize_text(merged.get("last_error")),
-        "last_source": _normalize_text(merged.get("last_source")),
-        "last_fetched": max(0, int(merged.get("last_fetched") or 0)),
-        "last_ingested": max(0, int(merged.get("last_ingested") or 0)),
-        "last_new": max(0, int(merged.get("last_new") or 0)),
-        "last_updated": max(0, int(merged.get("last_updated") or 0)),
-        "last_unchanged": max(0, int(merged.get("last_unchanged") or 0)),
-        "updated_at": _now_utc_iso(),
-    }
-    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary_path, path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
-    return normalized
-
-
-def get_ransomware_live_sync_status_snapshot() -> dict[str, Any]:
-    payload = _load_sync_status()
-    return {
-        "last_job_id": _normalize_text(payload.get("last_job_id")),
-        "last_tick_at": _normalize_datetime(payload.get("last_tick_at")),
-        "last_success_at": _normalize_datetime(payload.get("last_success_at")),
-        "last_error": _normalize_text(payload.get("last_error")),
-        "last_source": _normalize_text(payload.get("last_source")),
-        "last_fetched": max(0, int(payload.get("last_fetched") or 0)),
-        "last_ingested": max(0, int(payload.get("last_ingested") or 0)),
-        "last_new": max(0, int(payload.get("last_new") or 0)),
-        "last_updated": max(0, int(payload.get("last_updated") or 0)),
-        "last_unchanged": max(0, int(payload.get("last_unchanged") or 0)),
-    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _mask_api_key(value: str) -> str:
@@ -147,62 +85,14 @@ def set_ransomware_live_api_key(api_key: str) -> dict[str, Any]:
     normalized = _normalize_text(api_key)
     if not normalized:
         raise RuntimeError("api_key must not be empty")
-    with _settings_lock:
-        settings = _load_settings()
-        settings.update(
-            {
-                "api_key": normalized,
-                "updated_at": _now_utc_iso(),
-            }
-        )
-        _save_settings(settings)
+    _save_settings(
+        {
+            "api_key": normalized,
+            "updated_at": _now_utc_iso(),
+        }
+    )
     os.environ[RANSOMWARE_LIVE_API_KEY_ENV] = normalized
     return get_ransomware_live_config_status()
-
-
-def get_ransomware_live_sync_config() -> dict[str, Any]:
-    settings = _load_settings()
-    try:
-        interval_seconds = max(60, int(settings.get("sync_interval_seconds") or RANSOMWARE_LIVE_SYNC_TTL_SECONDS))
-    except (TypeError, ValueError):
-        interval_seconds = RANSOMWARE_LIVE_SYNC_TTL_SECONDS
-    try:
-        limit = max(0, int(settings.get("sync_limit") or RANSOMWARE_LIVE_DEFAULT_LIMIT))
-    except (TypeError, ValueError):
-        limit = RANSOMWARE_LIVE_DEFAULT_LIMIT
-    return {
-        "enabled": bool(settings.get("sync_enabled", False)),
-        "interval_seconds": interval_seconds,
-        "limit": limit,
-        "started_at": _normalize_datetime(settings.get("sync_started_at")),
-        "updated_at": _normalize_datetime(settings.get("sync_updated_at")),
-    }
-
-
-def set_ransomware_live_sync_config(
-    *,
-    enabled: bool,
-    interval_seconds: int = RANSOMWARE_LIVE_SYNC_TTL_SECONDS,
-    limit: int = RANSOMWARE_LIVE_DEFAULT_LIMIT,
-) -> dict[str, Any]:
-    normalized_interval = max(60, int(interval_seconds or RANSOMWARE_LIVE_SYNC_TTL_SECONDS))
-    normalized_limit = max(0, int(limit or RANSOMWARE_LIVE_DEFAULT_LIMIT))
-    now = _now_utc_iso()
-    with _settings_lock:
-        settings = _load_settings()
-        previous_enabled = bool(settings.get("sync_enabled", False))
-        settings.update(
-            {
-                "sync_enabled": bool(enabled),
-                "sync_interval_seconds": normalized_interval,
-                "sync_limit": normalized_limit,
-                "sync_updated_at": now,
-            }
-        )
-        if enabled and not previous_enabled:
-            settings["sync_started_at"] = now
-        _save_settings(settings)
-    return get_ransomware_live_sync_config()
 
 
 def get_ransomware_live_config_status() -> dict[str, Any]:
@@ -218,7 +108,6 @@ def get_ransomware_live_config_status() -> dict[str, Any]:
         "env_var": RANSOMWARE_LIVE_API_KEY_ENV,
         "settings_path": str(_settings_path()),
         "updated_at": _normalize_text(settings.get("updated_at")),
-        "sync_status_path": str(_sync_status_path()),
     }
 
 
@@ -260,7 +149,81 @@ def _apply_record_limit(victims: list[dict[str, Any]], limit: int | None) -> lis
     return victims[:normalized]
 
 
-def _fetch_json(url: str, *, timeout: int = 30) -> dict[str, Any]:
+def _build_ssl_context() -> ssl.SSLContext:
+    # Python's default multi-version ClientHello (TLS 1.2+1.3) is silently dropped
+    # on the IPv4 path to api-pro.ransomware.live; pinning to TLS 1.3 shrinks the
+    # ClientHello past whatever middlebox/fingerprint is filtering it.
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    return ctx
+
+
+class _IPv6FirstHTTPSConnection(http.client.HTTPSConnection):
+    # IPv6 first, fall back to IPv4; the IPv4 path can stall during TLS handshakes.
+    def connect(self) -> None:
+        last_err: Exception | None = None
+        for family in (socket.AF_INET6, socket.AF_INET):
+            try:
+                infos = socket.getaddrinfo(self.host, self.port, family, socket.SOCK_STREAM)
+            except OSError as exc:
+                last_err = exc
+                continue
+            for _, _, _, _, sockaddr in infos:
+                raw_sock = None
+                try:
+                    raw_sock = socket.create_connection(sockaddr[:2], self.timeout, self.source_address)
+                    self.sock = raw_sock
+                    if self._tunnel_host:
+                        self._tunnel()
+                    self.sock = self._context.wrap_socket(
+                        self.sock, server_hostname=self._tunnel_host or self.host
+                    )
+                except (OSError, TimeoutError) as exc:
+                    last_err = exc
+                    if raw_sock is not None:
+                        raw_sock.close()
+                    self.sock = None
+                    continue
+                return
+        raise last_err if last_err else OSError(f"cannot connect to {self.host}")
+
+
+class _IPv6FirstHTTPSHandler(HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_IPv6FirstHTTPSConnection, req, context=self._context)
+
+
+def _proxy_host() -> str:
+    proxy_host = str(os.environ.get("PROXY_HOST") or "").strip()
+    if not proxy_host:
+        raise RuntimeError("PROXY_HOST is not set")
+    return proxy_host
+
+
+def _proxy_port() -> int:
+    raw_port = str(os.environ.get("PROXY_PORT") or "").strip()
+    if not raw_port:
+        raise RuntimeError("PROXY_PORT is not set")
+    try:
+        proxy_port = int(raw_port)
+    except ValueError as exc:
+        raise RuntimeError("PROXY_PORT must be an integer") from exc
+    if not 1 <= proxy_port <= 65535:
+        raise RuntimeError("PROXY_PORT must be between 1 and 65535")
+    return proxy_port
+
+
+def _request_json_via_proxy(request: Request, *, timeout: int, proxy_port: int) -> dict[str, Any]:
+    proxy_url = f"http://{_proxy_host()}:{proxy_port}"
+    opener = build_opener(
+        ProxyHandler({"http": proxy_url, "https": proxy_url}),
+        _IPv6FirstHTTPSHandler(context=_build_ssl_context()),
+    )
+    with opener.open(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def _fetch_json(url: str, *, timeout: int = 120) -> dict[str, Any]:
     api_key = get_ransomware_live_api_key()
     if not api_key:
         raise RuntimeError(f"{RANSOMWARE_LIVE_API_KEY_ENV} is not set")
@@ -271,8 +234,7 @@ def _fetch_json(url: str, *, timeout: int = 30) -> dict[str, Any]:
             "X-API-KEY": api_key,
         },
     )
-    with urlopen(request, timeout=timeout) as response:
-        return json.load(response)
+    return _request_json_via_proxy(request, timeout=timeout, proxy_port=_proxy_port())
 
 
 def _load_sample_payload(sample_file: str | Path) -> dict[str, Any]:
@@ -334,14 +296,20 @@ def fetch_recent_ransomware_live_victims(
     return records, payload
 
 
-def _try_acquire_sync_lock(connection) -> tuple[bool, bool]:
-    if getattr(connection, "backend_name", "") == "postgresql":
-        row = connection.execute(
-            "SELECT pg_try_advisory_xact_lock(?) AS acquired",
-            (RANSOMWARE_LIVE_SYNC_ADVISORY_LOCK_ID,),
-        ).fetchone()
-        return bool(row and row["acquired"]), False
-    return _sync_lock.acquire(blocking=False), True
+def should_refresh_ransomware_live(connection, *, ttl_seconds: int = RANSOMWARE_LIVE_SYNC_TTL_SECONDS) -> bool:
+    state = get_ransomware_live_sync_state(connection)
+    if int(state.get("count") or 0) <= 0:
+        return True
+    latest_seen_at = _normalize_text(state.get("latest_seen_at"))
+    if not latest_seen_at:
+        return True
+    try:
+        latest_seen_dt = datetime.fromisoformat(latest_seen_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if latest_seen_dt.tzinfo is None:
+        latest_seen_dt = latest_seen_dt.replace(tzinfo=timezone.utc)
+    return latest_seen_dt < (_now_utc() - timedelta(seconds=max(1, int(ttl_seconds))))
 
 
 def sync_ransomware_live_victims(
@@ -351,41 +319,54 @@ def sync_ransomware_live_victims(
     prefer_live: bool = True,
     refresh_normalized: bool = True,
 ) -> dict[str, Any]:
-    release_local_lock = False
+    records, payload = fetch_recent_ransomware_live_victims(
+        limit=limit,
+        sample_file=sample_file,
+        prefer_live=prefer_live,
+    )
     with get_db_connection() as connection:
-        acquired, release_local_lock = _try_acquire_sync_lock(connection)
-        if not acquired:
-            raise RuntimeError("ransomware.live sync is already running")
-        try:
-            records, payload = fetch_recent_ransomware_live_victims(
-                limit=limit,
-                sample_file=sample_file,
-                prefer_live=prefer_live,
-            )
-            outcome_counts = {"new": 0, "updated": 0, "unchanged": 0}
-            for record in records:
-                _, outcome = upsert_ransomware_live_victim(connection, record, return_outcome=True)
-                outcome_counts[outcome] += 1
-            if refresh_normalized:
-                from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
-
-                ensure_normalized_intelligence(connection, force=True)
-            connection.commit()
-            sync_state = get_ransomware_live_sync_state(connection)
-        finally:
-            if release_local_lock:
-                _sync_lock.release()
-                release_local_lock = False
-    ingested = outcome_counts["new"] + outcome_counts["updated"]
+        for record in records:
+            upsert_ransomware_live_victim(connection, record)
+        if records:
+            mark_normalized_intelligence_dirty(connection)
+        connection.commit()
+        sync_state = get_ransomware_live_sync_state(connection)
     return {
-        "fetched": len(records),
-        "ingested": ingested,
-        "new_count": outcome_counts["new"],
-        "updated_count": outcome_counts["updated"],
-        "unchanged_count": outcome_counts["unchanged"],
+        "ingested": len(records),
         "count": int(sync_state.get("count") or 0),
         "latest_seen_at": _normalize_text(sync_state.get("latest_seen_at")),
         "latest_disclosure_time": _normalize_text(sync_state.get("latest_disclosure_time")),
         "source": RANSOMWARE_LIVE_API_URL,
         "payload_count": int(payload.get("count") or 0),
     }
+
+
+def _background_sync_worker(limit: int) -> None:
+    try:
+        sync_ransomware_live_victims(limit=limit, refresh_normalized=True)
+    except Exception:
+        logger.exception("ransomware.live background sync failed")
+
+
+def maybe_schedule_ransomware_live_sync(
+    *,
+    ttl_seconds: int = RANSOMWARE_LIVE_SYNC_TTL_SECONDS,
+    limit: int = RANSOMWARE_LIVE_DEFAULT_LIMIT,
+) -> bool:
+    global _sync_thread
+    if not has_ransomware_live_api_key():
+        return False
+    with get_db_connection() as connection:
+        if not should_refresh_ransomware_live(connection, ttl_seconds=ttl_seconds):
+            return False
+    with _sync_lock:
+        if _sync_thread is not None and _sync_thread.is_alive():
+            return False
+        _sync_thread = Thread(
+            target=_background_sync_worker,
+            args=(limit,),
+            name="ransomware-live-sync",
+            daemon=True,
+        )
+        _sync_thread.start()
+    return True

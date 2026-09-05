@@ -9,7 +9,7 @@
           <div class="detail-shell__meta">
             <span>{{ detail.platformLabel || '-' }}</span>
             <span>{{ detail.filePath || '-' }}</span>
-            <span>{{ formatDateTime(detail.lastSeenAt) || '-' }}</span>
+            <span>发现 {{ formatDateTime(detail.lastSeenAt) || '-' }}</span>
           </div>
         </div>
         <div class="detail-shell__tags">
@@ -228,6 +228,15 @@ const enterpriseMatchLevelLabel = computed(() => {
 })
 const displayBucketLabel = computed(() => (detail.displayBucket === 'suppressed' ? '附加列表 / 已压制弱线索' : '主列表 / 高价值结果'))
 
+function platformFileTime(row) {
+  return row?.fileUpdatedAt || row?.fileCommittedAt || row?.fileUploadedAt || ''
+}
+
+function shortCommitSha(value) {
+  const text = String(value || '').trim()
+  return text ? text.slice(0, 12) : '-'
+}
+
 const infoItems = computed(() => [
   { label: '监测对象', value: detail.watchlistName || '-' },
   { label: '所属机构', value: detail.organizationName || '-' },
@@ -235,6 +244,9 @@ const infoItems = computed(() => [
   { label: '仓库地址', value: detail.repositoryUrl || '-' },
   { label: '文件路径', value: detail.filePath || '-' },
   { label: '分支', value: detail.branch || '-' },
+  { label: '上传/更新时间', value: formatDateTime(platformFileTime(detail)) || '-' },
+  { label: '最后提交时间', value: formatDateTime(detail.fileCommittedAt) || '-' },
+  { label: '提交标识', value: shortCommitSha(detail.fileCommitSha) },
   { label: '检索命中词', value: highlightText(detail.matchedTerm || '-', detail.matchedTerm), highlight: true },
   { label: '敏感类型', value: detail.sensitiveLabel || detail.sensitiveType || '-' },
   { label: '展示分组', value: displayBucketLabel.value },

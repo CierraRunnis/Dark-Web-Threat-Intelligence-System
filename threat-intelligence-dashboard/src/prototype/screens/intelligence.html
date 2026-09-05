@@ -29,7 +29,7 @@
     <div class="app-stage">
       <header class="app-header" data-od-id="intelligence-header">
         <button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-        <div class="header-actions"><span class="app-version" data-od-id="intelligence-version">版本 <strong>v20260901.1.0</strong></span><span class="avatar" data-od-id="intelligence-account">个人</span></div>
+        <div class="header-actions"><span class="app-version" data-od-id="intelligence-version">版本 <strong>v0.20.0</strong></span><span class="avatar" data-od-id="intelligence-account">个人</span></div>
       </header>
 
       <main class="app-main intelligence-search-main" id="content" data-od-id="intelligence-main">
@@ -58,7 +58,7 @@
               <label class="intel-sort-label">排序<select class="select" data-intel-sort aria-label="结果排序"><option value="latest">报告时间降序</option><option value="oldest">报告时间升序</option><option value="severity">风险等级优先</option></select></label>
             </header>
 
-            <div class="intel-result-list" id="intel-results" data-table data-server-pagination="true" data-active-tab="all">
+            <div class="intel-result-list" id="intel-results" data-table data-active-tab="all">
               <article class="intel-result-item" data-table-row data-category="vulnerability" data-severity="critical" data-industry="边界设备" data-status="exploited" data-date="202603100931" data-severity-rank="3" data-od-id="intel-result-pan-os">
                 <div class="intel-result-thumb thumb-vulnerability" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="7" y="6" width="10" height="13" rx="4"/><path d="M9 6V4m6 2V4M4 10h3m10 0h3M4 15h3m10 0h3M9 12h6m-6 3h6"/></svg></div>
                 <div class="intel-result-copy"><div class="intel-result-meta"><time class="num" datetime="2026-03-10T09:31">2026/03/10 09:31</time><span>刚刚更新</span><span class="badge badge-critical">已利用</span><span class="badge">漏洞预警</span></div><h2><a href="vulnerability-detail.html?id=CVE-2026-24001">Palo Alto PAN-OS GlobalProtect 网关未授权命令执行</a></h2><p>公开利用信号指向 GlobalProtect 网关，需优先核对互联网暴露面、设备版本与异常命令执行痕迹。</p><div class="intel-result-context"><strong>Palo Alto Networks</strong><span>CVE-2026-24001</span><span>边界设备</span><span>远程代码执行</span></div></div>
@@ -89,7 +89,7 @@
               </article>
             </div>
             <div class="intel-empty-state" data-table-empty="intel-results">没有符合当前条件的情报，尝试清空筛选或更换关键词。</div>
-            <footer class="intel-results-foot"><span>共 <b class="num" data-intel-total>7</b> 条历史情报</span><span>搜索、分类、排序与分页均覆盖完整数据库</span></footer>
+            <footer class="intel-results-foot"><span>当前显示 <b class="num" data-table-count="intel-results">7</b> 条情报</span><span>结果按公开披露时间持续更新</span></footer>
           </article>
         </section>
       </main>

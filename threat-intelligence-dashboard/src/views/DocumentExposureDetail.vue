@@ -302,13 +302,14 @@ const onlyFiles = ref(false)
 const expandedFilePaths = ref(new Set())
 
 const DETAIL_CONFIG = {
+  search_engine: { title: '搜索引擎监测', infoTitle: '来源结果信息' },
   netdisk_aggregator: { title: '网盘监测' },
   document_library: { title: '文库监测', infoTitle: '文档元信息' },
 }
 
-const sourceFamily = computed(() => route.params.sourceFamily || 'netdisk_aggregator')
+const sourceFamily = computed(() => route.params.sourceFamily || 'search_engine')
 const hitId = computed(() => route.params.hitId)
-const currentConfig = computed(() => DETAIL_CONFIG[sourceFamily.value] || DETAIL_CONFIG.netdisk_aggregator)
+const currentConfig = computed(() => DETAIL_CONFIG[sourceFamily.value] || DETAIL_CONFIG.search_engine)
 const isNetdiskDetail = computed(() => sourceFamily.value === 'netdisk_aggregator')
 const isDocumentLibraryDetail = computed(() => sourceFamily.value === 'document_library')
 const isCompactDetail = computed(() => isNetdiskDetail.value || isDocumentLibraryDetail.value)
@@ -383,6 +384,10 @@ const infoItems = computed(() => {
 
   if (sourceFamily.value === 'document_library') {
     base.splice(4, 0, { label: '主文件类型', value: detail.documentMeta?.primaryFileType || '-' })
+  }
+
+  if (sourceFamily.value === 'search_engine') {
+    base.splice(4, 0, { label: '检索关键词', value: detail.sourceResult?.query || '-' })
   }
 
   return base
@@ -665,7 +670,7 @@ function goBack() {
         ? 'DocumentExposureNetdisk'
         : sourceFamily.value === 'document_library'
           ? 'DocumentExposureDocumentLibrary'
-          : 'DocumentExposureNetdisk',
+          : 'DocumentExposureSearchEngine',
   })
 }
 

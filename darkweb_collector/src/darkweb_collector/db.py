@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import os
@@ -8,21 +8,165 @@ import sqlite3
 from threading import Lock
 import time
 
-from darkweb_collector.postgres_backend import connect_postgres
+from typing import Any
+
+from darkweb_collector.postgres_backend import (
+    PostgreSQLBackendError,
+    PostgreSQLIntegrityError,
+    PostgreSQLOperationalError,
+    connect_postgres,
+)
 from darkweb_collector.runtime import (
-    active_release_config,
     configured_database_schema,
     configured_database_url,
+    configured_schema_fingerprint,
+    configured_schema_version,
     default_db_path,
 )
 
 
+REQUIRED_POSTGRES_SCHEMA_VERSIONS = (
+    "0001_baseline",
+    "0002_sqlite_compat",
+    "0003_local_postgres_compat",
+    "0004_performance_indexes",
+    "0005_postgres_write_paths",
+    "0006_postgres_read_paths",
+)
+SOURCE_SQLITE_TABLES = (
+    "collection_runs", "victims", "victim_details", "forum_topics",
+    "forum_details", "forum_victims", "crawl_jobs",
+    "vulnerability_records", "ransomware_live_victims", "platform_sessions",
+    "exposure_watchlists", "exposure_watch_terms", "document_hits",
+    "document_hit_snapshots", "document_hit_reviews", "exposure_scan_runs",
+    "netdisk_source_states", "netdisk_source_health", "code_watchlists",
+    "code_watch_terms", "code_hits", "code_hit_snapshots", "code_hit_reviews",
+    "code_scan_runs", "code_search_states", "normalized_intelligence_events",
+    "normalized_intelligence_cache_state", "monitoring_keywords",
+    "monitoring_keyword_notifications", "analysis_snapshots",
+    "ai_aggregation_profiles", "ai_aggregation_delivery_targets",
+    "ai_aggregation_runs", "ai_aggregation_reports",
+    "ai_aggregation_delivery_attempts", "ai_aggregation_schedule_claims",
+    "ai_aggregation_flocks_profile_schedulers",
+    "ai_aggregation_imported_flocks_executions",
+)
+TARGET_POSTGRES_TABLES = (*SOURCE_SQLITE_TABLES, "site_connectivity_probes")
+REQUIRED_BUSINESS_TABLES = TARGET_POSTGRES_TABLES
+REQUIRED_TECHNICAL_TABLES = ("schema_migrations",)
+DATABASE_ERRORS = (sqlite3.DatabaseError, PostgreSQLBackendError)
+DATABASE_INTEGRITY_ERRORS = (sqlite3.IntegrityError, PostgreSQLIntegrityError)
+DATABASE_OPERATIONAL_ERRORS = (sqlite3.OperationalError, PostgreSQLOperationalError)
+
+
+def database_backend_name(connection: Any) -> str:
+    return str(getattr(connection, "backend_name", "sqlite"))
+
+
+def is_postgresql(connection: Any) -> bool:
+    return database_backend_name(connection) == "postgresql"
+
+
+def execute_insert_get_id(
+    connection: Any,
+    sql_text: str,
+    parameters: Any = (),
+) -> int:
+    """Execute one identity INSERT and return its generated primary key."""
+
+    if is_postgresql(connection):
+        cursor = connection.execute(
+            sql_text,
+            parameters,
+            return_identity=True,
+        )
+    else:
+        cursor = connection.execute(sql_text, parameters)
+    return int(cursor.lastrowid)
+
+
+def sql_case_insensitive_like(connection: Any, expression: str) -> str:
+    operator = "ILIKE" if is_postgresql(connection) else "LIKE"
+    suffix = "" if is_postgresql(connection) else " COLLATE NOCASE"
+    escape_literal = "'" + "\\" + "'"
+    return f"{expression} {operator} ? ESCAPE {escape_literal}{suffix}"
+
+
+def sql_case_insensitive_order(connection: Any, expression: str) -> str:
+    if is_postgresql(connection):
+        return f"LOWER({expression})"
+    return f"{expression} COLLATE NOCASE"
+
+
+def sql_order_with_sqlite_nulls(
+    connection: Any,
+    expression: str,
+    direction: str,
+) -> str:
+    """Render an ORDER BY term with SQLite's established NULL placement.
+
+    SQLite sorts NULL before non-NULL values for ASC and after them for DESC.
+    PostgreSQL's defaults are the inverse, so PostgreSQL queries must state the
+    placement explicitly to keep pagination and LIMIT result sets equivalent.
+    """
+
+    normalized_direction = str(direction or "").strip().upper()
+    if normalized_direction not in {"ASC", "DESC"}:
+        raise ValueError("SQL order direction must be ASC or DESC")
+    nulls = ""
+    if is_postgresql(connection):
+        nulls = " NULLS FIRST" if normalized_direction == "ASC" else " NULLS LAST"
+    return f"{expression} {normalized_direction}{nulls}"
+
+
+def sql_datetime_order(
+    connection: Any,
+    value_expression: str,
+    direction: str,
+) -> str:
+    """Order a SQLite-compatible datetime value with matching NULL semantics."""
+
+    return sql_order_with_sqlite_nulls(
+        connection,
+        f"datetime({value_expression})",
+        direction,
+    )
+
+
+def sql_scalar_min(connection: Any, left: str, right: str) -> str:
+    function = "LEAST" if is_postgresql(connection) else "MIN"
+    return f"{function}({left}, {right})"
+
+
+def begin_write_transaction(connection: Any) -> None:
+    connection.execute("BEGIN" if is_postgresql(connection) else "BEGIN IMMEDIATE")
+
+
+def enable_foreign_keys(connection: Any) -> None:
+    if not is_postgresql(connection):
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
+def database_identity(connection: Any) -> str:
+    identity = getattr(connection, "database_identity", None)
+    if callable(identity):
+        return str(identity())
+    row = connection.execute("PRAGMA database_list").fetchone()
+    return str(row[2] or "") if row else "sqlite"
+
+
 class ManagedConnection(sqlite3.Connection):
+    backend_name = "sqlite"
+    read_only = False
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             return super().__exit__(exc_type, exc_val, exc_tb)
         finally:
             self.close()
+
+
+class ReadonlyManagedConnection(ManagedConnection):
+    read_only = True
 
 
 _SCHEMA_INIT_LOCK = Lock()
@@ -158,17 +302,6 @@ ON crawl_jobs(site_name, job_type, status);
 CREATE INDEX IF NOT EXISTS idx_crawl_jobs_finished_at
 ON crawl_jobs(finished_at);
 
-CREATE TABLE IF NOT EXISTS site_connectivity_probes (
-    site_name TEXT PRIMARY KEY,
-    url TEXT NOT NULL,
-    available INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    checked_at TEXT NOT NULL,
-    last_success_at TEXT,
-    failure_reason TEXT NOT NULL DEFAULT '',
-    error TEXT NOT NULL DEFAULT ''
-);
-
 CREATE TABLE IF NOT EXISTS vulnerability_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_name TEXT NOT NULL,
@@ -199,6 +332,12 @@ ON vulnerability_records(cve_id);
 
 CREATE INDEX IF NOT EXISTS idx_vulnerability_records_time
 ON vulnerability_records(disclosure_time);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_filter
+ON vulnerability_records(severity, is_exploited, disclosure_time);
+
+CREATE INDEX IF NOT EXISTS idx_vulnerability_records_vendor_product
+ON vulnerability_records(vendor, product);
 
 CREATE TABLE IF NOT EXISTS ransomware_live_victims (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -572,6 +711,15 @@ CREATE TABLE IF NOT EXISTS normalized_intelligence_events (
 CREATE INDEX IF NOT EXISTS idx_normalized_intelligence_type_time
 ON normalized_intelligence_events(event_type, disclosure_time);
 
+CREATE INDEX IF NOT EXISTS idx_normalized_intelligence_type_filters
+ON normalized_intelligence_events(event_type, severity, industry, disclosure_time);
+
+CREATE INDEX IF NOT EXISTS idx_normalized_intelligence_category_time
+ON normalized_intelligence_events(event_type, category, disclosure_time);
+
+CREATE INDEX IF NOT EXISTS idx_normalized_intelligence_type_risk_time
+ON normalized_intelligence_events(event_type, risk_score, disclosure_time);
+
 CREATE INDEX IF NOT EXISTS idx_normalized_intelligence_attacker
 ON normalized_intelligence_events(attacker);
 
@@ -582,7 +730,16 @@ CREATE TABLE IF NOT EXISTS normalized_intelligence_cache_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     source_signature TEXT NOT NULL,
     event_count INTEGER NOT NULL,
-    refreshed_at TEXT NOT NULL
+    refreshed_at TEXT NOT NULL,
+    source_revision INTEGER NOT NULL DEFAULT 0,
+    applied_revision INTEGER NOT NULL DEFAULT 0,
+    dirty_since TEXT NOT NULL DEFAULT '',
+    dirty_at TEXT NOT NULL DEFAULT '',
+    last_started_at TEXT NOT NULL DEFAULT '',
+    last_finished_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_error_at TEXT NOT NULL DEFAULT '',
+    normalization_version TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS monitoring_keywords (
@@ -622,10 +779,152 @@ ON monitoring_keyword_notifications(status, updated_at);
 
 CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event_key
 ON monitoring_keyword_notifications(event_key, status, dry_run);
+
+CREATE TABLE IF NOT EXISTS analysis_snapshots (
+    namespace TEXT PRIMARY KEY,
+    revision_key TEXT NOT NULL,
+    applied_revision INTEGER NOT NULL DEFAULT 0,
+    config_signature TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    prompt_template TEXT NOT NULL DEFAULT '搜索 {{keywords}} {{time_range}} 的威胁情报',
+    keywords_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    search_window_days INTEGER NOT NULL,
+    sources_json TEXT NOT NULL,
+    language TEXT NOT NULL,
+    schedule_enabled INTEGER NOT NULL DEFAULT 0,
+    cron TEXT,
+    timezone TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_delivery_targets (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    config_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES ai_aggregation_profiles(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_aggregation_delivery_targets_profile
+ON ai_aggregation_delivery_targets(profile_id);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_runs (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT,
+    profile_name TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    keywords_json TEXT NOT NULL DEFAULT '[]',
+    prompt_template TEXT NOT NULL,
+    rendered_prompt TEXT NOT NULL,
+    search_window_days INTEGER NOT NULL,
+    sources_json TEXT NOT NULL,
+    language TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    scheduled_for TEXT,
+    analysis_status TEXT NOT NULL,
+    delivery_status TEXT NOT NULL,
+    source_coverage_json TEXT NOT NULL DEFAULT '{}',
+    flocks_scheduler_id TEXT,
+    flocks_execution_id TEXT,
+    error TEXT,
+    queued_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    UNIQUE(profile_id, trigger_type, scheduled_for)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_aggregation_runs_created
+ON ai_aggregation_runs(queued_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_ai_aggregation_runs_profile
+ON ai_aggregation_runs(profile_id, queued_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_reports (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    markdown TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (run_id) REFERENCES ai_aggregation_runs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_delivery_attempts (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    target_config_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_attempted_at TEXT,
+    delivered_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES ai_aggregation_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_aggregation_delivery_attempts_run
+ON ai_aggregation_delivery_attempts(run_id);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_schedule_claims (
+    profile_id TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (profile_id, scheduled_for)
+);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_flocks_profile_schedulers (
+    profile_id TEXT PRIMARY KEY,
+    scheduler_id TEXT NOT NULL,
+    config_signature TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_aggregation_imported_flocks_executions (
+    execution_id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    run_id TEXT,
+    imported_at TEXT NOT NULL
+);
+
 """
 
 
 LEGACY_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
+    "normalized_intelligence_cache_state": {
+        "source_revision": "INTEGER NOT NULL DEFAULT 0",
+        "applied_revision": "INTEGER NOT NULL DEFAULT 0",
+        "dirty_since": "TEXT NOT NULL DEFAULT ''",
+        "dirty_at": "TEXT NOT NULL DEFAULT ''",
+        "last_started_at": "TEXT NOT NULL DEFAULT ''",
+        "last_finished_at": "TEXT NOT NULL DEFAULT ''",
+        "last_error": "TEXT NOT NULL DEFAULT ''",
+        "last_error_at": "TEXT NOT NULL DEFAULT ''",
+        "normalization_version": "TEXT NOT NULL DEFAULT ''",
+    },
+    "ai_aggregation_profiles": {
+        "prompt_template": "TEXT NOT NULL DEFAULT '搜索 {{keywords}} {{time_range}} 的威胁情报'",
+        "keywords_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "ai_aggregation_runs": {
+        "keywords_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
     "exposure_watchlists": {
         "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
     },
@@ -670,6 +969,33 @@ def _ensure_legacy_columns(connection: sqlite3.Connection) -> None:
             existing_columns.add(column_name)
 
 
+def _backfill_ai_aggregation_keywords(connection: sqlite3.Connection) -> None:
+    for table_name in ("ai_aggregation_profiles", "ai_aggregation_runs"):
+        columns = _list_table_columns(connection, table_name)
+        if not {"id", "keyword", "keywords_json"}.issubset(columns):
+            continue
+        rows = connection.execute(
+            f"SELECT id, keyword, keywords_json FROM {table_name}"
+        ).fetchall()
+        for row in rows:
+            try:
+                keywords = json.loads(str(row["keywords_json"] or "[]"))
+            except (TypeError, json.JSONDecodeError):
+                keywords = []
+            if isinstance(keywords, list) and any(
+                str(item or "").strip() for item in keywords
+            ):
+                continue
+            keyword = str(row["keyword"] or "").strip()
+            connection.execute(
+                f"UPDATE {table_name} SET keywords_json = ? WHERE id = ?",
+                (
+                    json.dumps([keyword] if keyword else [], ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+
+
 def _ensure_schema(connection: sqlite3.Connection) -> None:
     for statement in [item.strip() for item in SCHEMA.split(";") if item.strip()]:
         try:
@@ -683,6 +1009,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
                 continue
             raise
     _ensure_legacy_columns(connection)
+    _backfill_ai_aggregation_keywords(connection)
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_monitoring_keyword_notifications_event_key
@@ -701,14 +1028,12 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
 def connect(db_path: Path) -> sqlite3.Connection:
     database_url = configured_database_url()
     if database_url:
-        if not database_url.lower().startswith(("postgres://", "postgresql://")):
-            raise ValueError("configured database URL must use PostgreSQL")
-        active = active_release_config()
         return connect_postgres(
             database_url,
             schema=configured_database_schema(),
-            expected_fingerprint=str(active.get("schema_fingerprint") or "").strip(),
-            expected_version=str(active.get("schema_version") or "0002_sqlite_compat").strip(),
+            expected_fingerprint=configured_schema_fingerprint(),
+            expected_version=configured_schema_version(),
+            read_only=False,
         )
     db_path.parent.mkdir(parents=True, exist_ok=True)
     resolved = db_path.resolve()
@@ -737,6 +1062,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
                 with _SCHEMA_INIT_LOCK:
                     if schema_key not in _SCHEMA_INIT_FINGERPRINTS:
                         _ensure_schema(connection)
+                        connection.commit()
                         _SCHEMA_INIT_FINGERPRINTS.add(schema_key)
             return connection
         except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
@@ -749,65 +1075,98 @@ def connect(db_path: Path) -> sqlite3.Connection:
     raise last_error
 
 
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """Open an existing database without journal changes or schema initialization."""
+    database_url = configured_database_url()
+    if database_url:
+        return connect_postgres(
+            database_url,
+            schema=configured_database_schema(),
+            expected_fingerprint=configured_schema_fingerprint(),
+            expected_version=configured_schema_version(),
+            read_only=True,
+        )
+    resolved = db_path.expanduser().resolve(strict=True)
+    connection = sqlite3.connect(
+        f"{resolved.as_uri()}?mode=ro",
+        uri=True,
+        factory=ReadonlyManagedConnection,
+        timeout=5.0,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
 def get_db_connection() -> sqlite3.Connection:
     """Get database connection"""
     return connect(default_db_path())
 
 
-def get_site_connectivity_probe_map(connection: sqlite3.Connection) -> dict[str, dict]:
-    rows = connection.execute(
-        """
-        SELECT site_name, url, available, status, checked_at, last_success_at, failure_reason, error
-        FROM site_connectivity_probes
-        """
-    ).fetchall()
-    return {
-        str(row["site_name"]): {
-            **dict(row),
-            "available": bool(row["available"]),
+def get_readonly_db_connection() -> sqlite3.Connection:
+    """Get a query-only connection to the configured runtime database."""
+    return connect_readonly(default_db_path())
+
+
+def database_health_payload(connection: Any | None = None) -> dict[str, Any]:
+    """Return backend/schema facts suitable for the API health endpoint."""
+
+    owns_connection = connection is None
+    current = connection or get_readonly_db_connection()
+    try:
+        backend = database_backend_name(current)
+        if backend == "postgresql":
+            rows = current.execute(
+                """
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'
+                """
+            ).fetchall()
+            tables = {str(row[0]) for row in rows}
+            migration_rows = current.execute(
+                "SELECT version, source_schema_fingerprint FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            migrations = [str(row[0]) for row in migration_rows]
+            fingerprint = next(
+                (str(row[1] or "") for row in migration_rows if str(row[0]) == "0001_baseline"),
+                "",
+            )
+        else:
+            rows = current.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            tables = {str(row[0]) for row in rows}
+            migrations = []
+            fingerprint = ""
+        required_tables = TARGET_POSTGRES_TABLES if backend == "postgresql" else SOURCE_SQLITE_TABLES
+        missing_tables = sorted(set(required_tables) - tables)
+        missing_versions = (
+            sorted(set(REQUIRED_POSTGRES_SCHEMA_VERSIONS) - set(migrations))
+            if backend == "postgresql" else []
+        )
+        current.execute("SELECT event_id FROM normalized_intelligence_events LIMIT 1").fetchone()
+        return {
+            "status": "ok" if not missing_tables and not missing_versions else "error",
+            "backend": backend,
+            "database": database_identity(current),
+            "schema": str(getattr(current, "schema", "") or "main"),
+            "readOnly": bool(getattr(current, "read_only", False)),
+            "businessTableCount": len(tables.intersection(required_tables)),
+            "requiredBusinessTableCount": len(required_tables),
+            "missingTables": missing_tables,
+            "schemaVersions": migrations,
+            "missingSchemaVersions": missing_versions,
+            "schemaFingerprint": fingerprint,
         }
-        for row in rows
-    }
-
-
-def upsert_site_connectivity_probe(connection: sqlite3.Connection, payload: dict) -> None:
-    site_name = str(payload.get("site_name") or "").strip()
-    checked_at = str(payload.get("checked_at") or "").strip()
-    if not site_name or not checked_at:
-        raise ValueError("site connectivity probe requires site_name and checked_at")
-    available = bool(payload.get("available"))
-    connection.execute(
-        """
-        INSERT INTO site_connectivity_probes (
-            site_name, url, available, status, checked_at, last_success_at, failure_reason, error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(site_name) DO UPDATE SET
-            url = excluded.url,
-            available = excluded.available,
-            status = excluded.status,
-            checked_at = excluded.checked_at,
-            last_success_at = CASE
-                WHEN excluded.available = 1 THEN excluded.checked_at
-                ELSE site_connectivity_probes.last_success_at
-            END,
-            failure_reason = excluded.failure_reason,
-            error = excluded.error
-        """,
-        (
-            site_name,
-            str(payload.get("url") or ""),
-            int(available),
-            str(payload.get("status") or ("available" if available else "unavailable")),
-            checked_at,
-            checked_at if available else None,
-            str(payload.get("failure_reason") or ""),
-            str(payload.get("error") or ""),
-        ),
-    )
+    finally:
+        if owns_connection:
+            current.close()
 
 
 def insert_collection_run(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO collection_runs (
             site_name, source_url, collected_at_utc, victim_count, run_metadata_json
@@ -821,10 +1180,42 @@ def insert_collection_run(connection: sqlite3.Connection, payload: dict) -> int:
             json.dumps(payload, ensure_ascii=False),
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def upsert_victim(connection: sqlite3.Connection, run_id: int, payload: dict) -> int:
+    if is_postgresql(connection):
+        raw_json = json.dumps(payload, ensure_ascii=False)
+        row = connection.execute(
+            """
+            SELECT dwti_upsert_victim(
+                ?::BIGINT, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT,
+                ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT,
+                ?::DOUBLE PRECISION, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT
+            ) AS victim_id
+            """,
+            (
+                run_id,
+                payload["site_name"],
+                payload["source_url"],
+                payload.get("detail_url"),
+                payload["name"],
+                payload["display_label"],
+                payload.get("domain"),
+                payload["status"],
+                payload.get("published_at_utc"),
+                payload.get("claimed_size"),
+                payload.get("claimed_size_gb"),
+                payload["content_hash"],
+                payload.get("last_detail_fetch_status"),
+                raw_json,
+                _normalization_state_timestamp(),
+            ),
+        ).fetchone()
+        if row is None:  # pragma: no cover - the database function always returns one row
+            raise PostgreSQLBackendError("victim upsert did not return an id")
+        return int(row["victim_id"])
+
     cursor = connection.execute(
         """
         SELECT id
@@ -864,9 +1255,11 @@ def upsert_victim(connection: sqlite3.Connection, run_id: int, payload: dict) ->
                 victim_id,
             ),
         )
+        mark_normalized_intelligence_dirty(connection)
         return victim_id
 
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO victims (
             site_name, source_url, detail_url, name, display_label, domain, status, published_at_utc,
@@ -892,7 +1285,9 @@ def upsert_victim(connection: sqlite3.Connection, run_id: int, payload: dict) ->
             raw_json,
         ),
     )
-    return int(cursor.lastrowid)
+    victim_id = inserted_id
+    mark_normalized_intelligence_dirty(connection)
+    return victim_id
 
 
 def insert_victim_detail(connection: sqlite3.Connection, victim_id: int, payload: dict) -> None:
@@ -912,6 +1307,7 @@ def insert_victim_detail(connection: sqlite3.Connection, victim_id: int, payload
             json.dumps(payload, ensure_ascii=False),
         ),
     )
+    mark_normalized_intelligence_dirty(connection)
 
 
 def get_victim_snapshot(
@@ -962,9 +1358,53 @@ def record_victim_detail(
 
 def upsert_forum_topic(connection: sqlite3.Connection, **kwargs) -> int:
     """Upsert forum topic"""
+    if is_postgresql(connection):
+        now = kwargs.get("collected_at_utc", "") or ""
+        payload = {
+            "site_name": kwargs["site_name"],
+            "section": kwargs["section"],
+            "title": kwargs["title"],
+            "url": kwargs["url"],
+            "author": kwargs.get("author", ""),
+            "replies": kwargs.get("replies", ""),
+            "views": kwargs.get("views", ""),
+            "published_at": kwargs.get("published_at", ""),
+            "last_reply_at": kwargs.get("last_reply_at", ""),
+            "content_hash": kwargs["content_hash"],
+        }
+        raw_json = json.dumps(payload, ensure_ascii=False)
+        row = connection.execute(
+            """
+            SELECT topic_id, materially_changed
+            FROM dwti_upsert_forum_topic(
+                ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT,
+                ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT,
+                ?::TEXT, ?::TEXT, ?::TEXT
+            )
+            """,
+            (
+                kwargs["site_name"],
+                kwargs["section"],
+                kwargs["title"],
+                kwargs["url"],
+                kwargs.get("author", ""),
+                kwargs.get("replies", ""),
+                kwargs.get("views", ""),
+                kwargs.get("published_at", ""),
+                kwargs.get("last_reply_at", ""),
+                kwargs["content_hash"],
+                now,
+                raw_json,
+                _normalization_state_timestamp(),
+            ),
+        ).fetchone()
+        if row is None:  # pragma: no cover - the database function always returns one row
+            raise PostgreSQLBackendError("forum topic upsert did not return an id")
+        return int(row["topic_id"])
+
     cursor = connection.execute(
         """
-        SELECT id
+        SELECT id, title, content_hash
         FROM forum_topics
         WHERE site_name = ? AND section = ? AND url = ?
         """,
@@ -994,6 +1434,12 @@ def upsert_forum_topic(connection: sqlite3.Connection, **kwargs) -> int:
     
     if row:
         topic_id = int(row[0])
+        normalized_title = str(kwargs["title"])
+        normalized_content_hash = str(kwargs["content_hash"])
+        materially_changed = (
+            str(row[1] or "") != normalized_title
+            or str(row[2] or "") != normalized_content_hash
+        )
         connection.execute(
             """
             UPDATE forum_topics
@@ -1014,9 +1460,12 @@ def upsert_forum_topic(connection: sqlite3.Connection, **kwargs) -> int:
                 topic_id,
             ),
         )
+        if materially_changed:
+            mark_normalized_intelligence_dirty(connection)
         return topic_id
 
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO forum_topics (
             site_name, section, title, url, author, replies, views, published_at, last_reply_at, content_hash,
@@ -1039,7 +1488,9 @@ def upsert_forum_topic(connection: sqlite3.Connection, **kwargs) -> int:
             raw_json,
         ),
     )
-    return int(cursor.lastrowid)
+    topic_id = inserted_id
+    mark_normalized_intelligence_dirty(connection)
+    return topic_id
 
 
 def get_forum_topic_snapshot(connection: sqlite3.Connection, site_name: str, section: str, url: str) -> dict | None:
@@ -1056,6 +1507,60 @@ def get_forum_topic_snapshot(connection: sqlite3.Connection, site_name: str, sec
 
 def upsert_forum_detail(connection: sqlite3.Connection, **kwargs) -> int:
     """Upsert forum detail"""
+    if is_postgresql(connection):
+        now = kwargs.get("collected_at_utc", "") or ""
+        victims = kwargs.get("victims", [])
+        attackers = kwargs.get("attackers", [])
+        victims_str = ", ".join([victim["name"] for victim in victims]) if victims else ""
+        attackers_str = ", ".join(attackers) if attackers else ""
+        payload = {
+            "site_name": kwargs["site_name"],
+            "section": kwargs["section"],
+            "topic_url": kwargs["topic_url"],
+            "content": kwargs.get("content", ""),
+            "authors": kwargs.get("authors", ""),
+            "timestamps": kwargs.get("timestamps", ""),
+            "published_at_utc": kwargs.get("published_at_utc", ""),
+            "attachments": kwargs.get("attachments", ""),
+            "victims": victims_str,
+            "attackers": attackers_str,
+            "content_hash": kwargs["content_hash"],
+        }
+        raw_json = json.dumps(payload, ensure_ascii=False)
+        victims_json = json.dumps(
+            victims,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        row = connection.execute(
+            """
+            SELECT dwti_upsert_forum_detail(
+                ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT,
+                ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT,
+                ?::TEXT, ?::TEXT, ?::TEXT, ?::TEXT
+            ) AS detail_id
+            """,
+            (
+                kwargs["site_name"],
+                kwargs["section"],
+                kwargs["topic_url"],
+                kwargs.get("content", ""),
+                kwargs.get("authors", ""),
+                kwargs.get("timestamps", ""),
+                kwargs.get("attachments", ""),
+                victims_str,
+                attackers_str,
+                kwargs["content_hash"],
+                now,
+                raw_json,
+                victims_json,
+                _normalization_state_timestamp(),
+            ),
+        ).fetchone()
+        if row is None:  # pragma: no cover - the database function always returns one row
+            raise PostgreSQLBackendError("forum detail upsert did not return an id")
+        return int(row["detail_id"])
+
     cursor = connection.execute(
         """
         SELECT id
@@ -1127,10 +1632,12 @@ def upsert_forum_detail(connection: sqlite3.Connection, **kwargs) -> int:
                 """,
                 (detail_id, victim['name'], victim.get('industry'), victim.get('region'))
             )
-        
+
+        mark_normalized_intelligence_dirty(connection)
         return detail_id
 
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO forum_details (
             site_name, section, topic_url, content, authors, timestamps, attachments, victims, attackers, content_hash, fetched_at, raw_json
@@ -1152,7 +1659,7 @@ def upsert_forum_detail(connection: sqlite3.Connection, **kwargs) -> int:
         ),
     )
     
-    detail_id = int(cursor.lastrowid)
+    detail_id = inserted_id
     
     # Insert victim details
     for victim in victims:
@@ -1163,7 +1670,8 @@ def upsert_forum_detail(connection: sqlite3.Connection, **kwargs) -> int:
             """,
             (detail_id, victim['name'], victim.get('industry'), victim.get('region'))
         )
-    
+
+    mark_normalized_intelligence_dirty(connection)
     return detail_id
 
 
@@ -1271,7 +1779,8 @@ def upsert_vulnerability_record(connection: sqlite3.Connection, payload: dict) -
         )
         return record_id
 
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO vulnerability_records (
             source_name, source_type, cve_id, title, vendor, product, vulnerability_type, severity,
@@ -1302,7 +1811,7 @@ def upsert_vulnerability_record(connection: sqlite3.Connection, payload: dict) -
             payload.get("last_seen_at") or payload.get("disclosure_time") or "",
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def list_vulnerability_records(connection: sqlite3.Connection) -> list[dict]:
@@ -1323,14 +1832,16 @@ def replace_vulnerability_records(connection: sqlite3.Connection, rows: list[dic
     connection.execute("DELETE FROM vulnerability_records")
     for row in rows:
         upsert_vulnerability_record(connection, row)
+    mark_normalized_intelligence_dirty(connection)
 
 
-def upsert_ransomware_live_victim(
-    connection: sqlite3.Connection,
-    payload: dict,
-    *,
-    return_outcome: bool = False,
-) -> int | tuple[int, str]:
+def upsert_vulnerability_records(connection: sqlite3.Connection, rows: list[dict]) -> None:
+    for row in rows:
+        upsert_vulnerability_record(connection, row)
+    mark_normalized_intelligence_dirty(connection)
+
+
+def upsert_ransomware_live_victim(connection: sqlite3.Connection, payload: dict) -> int:
     raw_json = payload.get("raw_json")
     if isinstance(raw_json, str):
         raw_json_text = raw_json
@@ -1339,7 +1850,7 @@ def upsert_ransomware_live_victim(
 
     cursor = connection.execute(
         """
-        SELECT id, raw_json
+        SELECT id
         FROM ransomware_live_victims
         WHERE victim_id = ?
         """,
@@ -1348,12 +1859,6 @@ def upsert_ransomware_live_victim(
     row = cursor.fetchone()
     if row:
         record_id = int(row[0])
-        existing_raw_json = str(row["raw_json"] or "")
-        try:
-            unchanged = json.loads(existing_raw_json) == json.loads(raw_json_text)
-        except (TypeError, ValueError):
-            unchanged = existing_raw_json == raw_json_text
-        outcome = "unchanged" if unchanged else "updated"
         connection.execute(
             """
             UPDATE ransomware_live_victims
@@ -1380,9 +1885,10 @@ def upsert_ransomware_live_victim(
                 record_id,
             ),
         )
-        return (record_id, outcome) if return_outcome else record_id
+        return record_id
 
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO ransomware_live_victims (
             victim_id, group_name, victim_name, website, country_code, activity,
@@ -1408,8 +1914,7 @@ def upsert_ransomware_live_victim(
             payload.get("last_seen_at", ""),
         ),
     )
-    record_id = int(cursor.lastrowid)
-    return (record_id, "new") if return_outcome else record_id
+    return inserted_id
 
 
 def list_ransomware_live_victims(connection: sqlite3.Connection) -> list[dict]:
@@ -1456,77 +1961,6 @@ def get_last_successful_crawl_job(connection: sqlite3.Connection, site_name: str
     )
     row = cursor.fetchone()
     return dict(row) if row else None
-
-
-def get_latest_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
-    cursor = connection.execute(
-        """
-        SELECT job_id, status, queue_name, target, enqueued_at, started_at, finished_at,
-               duration_ms, error_message
-        FROM crawl_jobs
-        WHERE site_name = ? AND job_type = ?
-        ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
-        LIMIT 1
-        """,
-        (site_name, job_type),
-    )
-    row = cursor.fetchone()
-    return dict(row) if row else None
-
-
-def _parse_crawl_job_timestamp(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def reconcile_stale_crawl_jobs(
-    connection: sqlite3.Connection,
-    *,
-    now: datetime | None = None,
-    running_timeout_minutes: int = 30,
-    enqueued_timeout_minutes: int = 60,
-) -> int:
-    observed_at = now or datetime.now(timezone.utc)
-    if observed_at.tzinfo is None:
-        observed_at = observed_at.replace(tzinfo=timezone.utc)
-    observed_at = observed_at.astimezone(timezone.utc)
-
-    rows = connection.execute(
-        """
-        SELECT job_id, job_type, status, enqueued_at, started_at
-        FROM crawl_jobs
-        WHERE status IN ('enqueued', 'running') AND finished_at IS NULL
-        """
-    ).fetchall()
-    stale_jobs: list[tuple[str, str, str]] = []
-    for row in rows:
-        status = str(row["status"] or "")
-        timestamp = _parse_crawl_job_timestamp(row["started_at"] if status == "running" else row["enqueued_at"])
-        timeout_minutes = running_timeout_minutes if status == "running" else enqueued_timeout_minutes
-        if timestamp is None or timestamp >= observed_at - timedelta(minutes=timeout_minutes):
-            continue
-        job_type = str(row["job_type"] or "").strip()
-        task_label = f"{job_type} task" if job_type else "task"
-        stale_jobs.append(
-            (observed_at.isoformat(), f"stale {task_label} auto-cleared", str(row["job_id"]))
-        )
-
-    connection.executemany(
-        """
-        UPDATE crawl_jobs
-        SET status = 'stale', finished_at = ?, error_message = ?
-        WHERE job_id = ? AND status IN ('enqueued', 'running') AND finished_at IS NULL
-        """,
-        stale_jobs,
-    )
-    return len(stale_jobs)
 
 
 def get_active_crawl_job(connection: sqlite3.Connection, site_name: str, job_type: str) -> dict | None:
@@ -1606,57 +2040,64 @@ def replace_normalized_intelligence_events(
     )
 
 
-_NORMALIZED_INTELLIGENCE_SEARCH_EXPRESSION = (
-    "LOWER(COALESCE(title, '') || ' ' || COALESCE(attacker, '') || ' ' || "
-    "COALESCE(victim, '') || ' ' || COALESCE(victim_key, '') || ' ' || "
-    "COALESCE(industry, '') || ' ' || "
-    "COALESCE(region, '') || ' ' || COALESCE(source_site_name, '') || ' ' || "
-    "COALESCE(category, '') || ' ' || COALESCE(detail_text, '') || ' ' || "
-    "COALESCE(source_url, '') || ' ' || COALESCE(event_metadata_json, ''))"
-)
+def list_normalized_intelligence_events(connection: sqlite3.Connection) -> list[dict]:
+    cursor = connection.execute(
+        """
+        SELECT event_id, source_kind, raw_source_type, source_site_name, source_record_id,
+               event_type, category, leak_type, title, attacker, victim, victim_key,
+               industry, region, disclosure_time, severity, risk_score, source_url,
+               detail_text, mirror_resources_json, screenshot_resources_json,
+               json_preview_url, risk_reasons_json, event_metadata_json, updated_at
+        FROM normalized_intelligence_events
+        ORDER BY COALESCE(disclosure_time, updated_at) DESC, event_id DESC
+        """
+    )
+    return [dict(row) for row in cursor.fetchall()]
 
 
-def _normalized_intelligence_filters(event_type: str = "", query: str = "") -> tuple[str, list[object]]:
-    conditions = []
-    parameters: list[object] = []
-    if event_type:
-        conditions.append("event_type = ?")
-        parameters.append(event_type)
-    for term in str(query or "").casefold().split():
-        conditions.append(f"{_NORMALIZED_INTELLIGENCE_SEARCH_EXPRESSION} LIKE ?")
-        parameters.append(f"%{term}%")
-    where = " WHERE " + " AND ".join(conditions) if conditions else ""
-    return where, parameters
-
-
-def list_normalized_intelligence_events(
+def list_normalized_intelligence_event_page(
     connection: sqlite3.Connection,
     *,
-    event_type: str = "",
-    limit: int | None = None,
-    offset: int = 0,
-    query: str = "",
-    sort: str = "latest",
-) -> list[dict]:
-    order_by = {
-        "latest": "COALESCE(NULLIF(disclosure_time, ''), updated_at) DESC, event_id DESC",
-        "oldest": "COALESCE(NULLIF(disclosure_time, ''), updated_at) ASC, event_id ASC",
-        "severity": (
-            "CASE LOWER(severity) WHEN 'critical' THEN 4 WHEN 'high' THEN 3 "
-            "WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, "
-            "risk_score DESC, COALESCE(NULLIF(disclosure_time, ''), updated_at) DESC, event_id DESC"
-        ),
-    }.get(sort)
-    if order_by is None:
-        raise ValueError(f"unsupported normalized intelligence sort: {sort}")
-    if offset < 0:
-        raise ValueError("offset must not be negative")
-    if offset and limit is None:
-        raise ValueError("offset requires limit")
-    where, parameters = _normalized_intelligence_filters(event_type, query)
-    limit_sql = " LIMIT ? OFFSET ?" if limit is not None else ""
-    if limit is not None:
-        parameters.extend((int(limit), int(offset)))
+    event_type: str,
+    page: int,
+    page_size: int,
+    keyword: str = "",
+    category: str = "",
+) -> tuple[list[dict], int, list[str], int, int, int]:
+    normalized_page_size = min(100, max(1, int(page_size)))
+    clauses = ["event_type = ?"]
+    parameters: list[object] = [event_type]
+
+    normalized_category = str(category or "").strip()
+    if normalized_category:
+        clauses.append("category = ?")
+        parameters.append(normalized_category)
+
+    normalized_keyword = str(keyword or "").strip()
+    if normalized_keyword:
+        escaped_keyword = (
+            normalized_keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped_keyword}%"
+        fields = ("title", "attacker", "victim", "region", "event_metadata_json")
+        clauses.append(
+            "(" + " OR ".join(
+                sql_case_insensitive_like(connection, field) for field in fields
+            ) + ")"
+        )
+        parameters.extend([pattern] * 5)
+
+    where_clause = " AND ".join(clauses)
+    total = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM normalized_intelligence_events WHERE {where_clause}",
+            parameters,
+        ).fetchone()[0]
+    )
+    total_pages = max(1, (total + normalized_page_size - 1) // normalized_page_size)
+    normalized_page = min(total_pages, max(1, int(page)))
+    offset = (normalized_page - 1) * normalized_page_size
+
     cursor = connection.execute(
         f"""
         SELECT event_id, source_kind, raw_source_type, source_site_name, source_record_id,
@@ -1665,43 +2106,46 @@ def list_normalized_intelligence_events(
                detail_text, mirror_resources_json, screenshot_resources_json,
                json_preview_url, risk_reasons_json, event_metadata_json, updated_at
         FROM normalized_intelligence_events
-        {where}
-        ORDER BY {order_by}
-        {limit_sql}
+        WHERE {where_clause}
+        ORDER BY COALESCE(disclosure_time, updated_at) DESC, event_id DESC
+        LIMIT ? OFFSET ?
         """,
-        tuple(parameters),
+        [*parameters, normalized_page_size, offset],
     )
-    return [dict(row) for row in cursor.fetchall()]
-
-
-def count_normalized_intelligence_events(
-    connection: sqlite3.Connection,
-    event_type: str = "",
-    query: str = "",
-) -> int:
-    where, parameters = _normalized_intelligence_filters(event_type, query)
-    row = connection.execute(
-        f"SELECT COUNT(*) FROM normalized_intelligence_events{where}",
-        tuple(parameters),
-    ).fetchone()
-    return int(row[0])
-
-
-def count_normalized_intelligence_events_by_type(
-    connection: sqlite3.Connection,
-    query: str = "",
-) -> dict[str, int]:
-    where, parameters = _normalized_intelligence_filters(query=query)
-    rows = connection.execute(
-        f"""
-        SELECT event_type, COUNT(*) AS event_count
-        FROM normalized_intelligence_events
-        {where}
-        GROUP BY event_type
-        """,
-        tuple(parameters),
-    ).fetchall()
-    return {str(row[0]): int(row[1]) for row in rows}
+    rows = [dict(row) for row in cursor.fetchall()]
+    categories = [
+        str(row["category"])
+        for row in connection.execute(
+            f"""
+            SELECT DISTINCT category
+            FROM normalized_intelligence_events
+            WHERE event_type = ? AND TRIM(category) <> ''
+            ORDER BY {sql_case_insensitive_order(connection, 'category')}
+            """,
+            (event_type,),
+        ).fetchall()
+    ]
+    victim_mentions = int(
+        connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM normalized_intelligence_events
+            WHERE event_type = ?
+              AND LENGTH(TRIM(victim)) > 0
+              AND victim <> ?
+            """,
+            (event_type, "未知实体"),
+        ).fetchone()[0]
+    )
+    all_total = total
+    if normalized_category or normalized_keyword:
+        all_total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM normalized_intelligence_events WHERE event_type = ?",
+                (event_type,),
+            ).fetchone()[0]
+        )
+    return rows, total, categories, normalized_page, victim_mentions, all_total
 
 
 def get_normalized_intelligence_event(
@@ -1727,13 +2171,166 @@ def get_normalized_intelligence_event(
 def get_normalized_intelligence_cache_state(connection: sqlite3.Connection) -> dict | None:
     cursor = connection.execute(
         """
-        SELECT id, source_signature, event_count, refreshed_at
+        SELECT id, source_signature, event_count, refreshed_at,
+               source_revision, applied_revision, dirty_since, dirty_at,
+               last_started_at, last_finished_at, last_error, last_error_at,
+               normalization_version
         FROM normalized_intelligence_cache_state
         WHERE id = 1
         """
     )
     row = cursor.fetchone()
     return dict(row) if row else None
+
+
+def _normalization_state_timestamp(value: str | None = None) -> str:
+    return value or datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_normalized_intelligence_cache_state(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO normalized_intelligence_cache_state (
+            id, source_signature, event_count, refreshed_at
+        ) VALUES (1, '', 0, '')
+        """
+    )
+
+
+def _required_normalized_intelligence_cache_state(connection: sqlite3.Connection) -> dict:
+    state = get_normalized_intelligence_cache_state(connection)
+    if state is None:  # pragma: no cover - guarded by the insert helpers
+        raise sqlite3.DatabaseError("normalized intelligence cache state is unavailable")
+    return state
+
+
+def mark_normalized_intelligence_dirty(
+    connection: sqlite3.Connection,
+    *,
+    changed_at: str | None = None,
+) -> int:
+    """Atomically advance the source revision inside the caller's transaction."""
+    timestamp = _normalization_state_timestamp(changed_at)
+    if is_postgresql(connection):
+        row = connection.execute(
+            "SELECT dwti_mark_normalized_dirty(?) AS source_revision",
+            (timestamp,),
+        ).fetchone()
+        if row is None:  # pragma: no cover - the database function always returns one row
+            raise PostgreSQLBackendError(
+                "normalized intelligence cache revision was not returned"
+            )
+        return int(row["source_revision"])
+
+    connection.execute(
+        """
+        INSERT INTO normalized_intelligence_cache_state (
+            id, source_signature, event_count, refreshed_at,
+            source_revision, applied_revision, dirty_since, dirty_at
+        ) VALUES (1, '', 0, '', 1, 0, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            dirty_since = CASE
+                WHEN normalized_intelligence_cache_state.source_revision
+                     <= normalized_intelligence_cache_state.applied_revision
+                  OR normalized_intelligence_cache_state.dirty_since = ''
+                THEN excluded.dirty_since
+                ELSE normalized_intelligence_cache_state.dirty_since
+            END,
+            source_revision = normalized_intelligence_cache_state.source_revision + 1,
+            dirty_at = excluded.dirty_at
+        """,
+        (timestamp, timestamp),
+    )
+    state = _required_normalized_intelligence_cache_state(connection)
+    return int(state["source_revision"])
+
+
+def mark_normalized_intelligence_refresh_started(
+    connection: sqlite3.Connection,
+    *,
+    target_revision: int,
+    started_at: str | None = None,
+) -> dict:
+    """Record a short-lived refresh claim without advancing applied revision."""
+    _ensure_normalized_intelligence_cache_state(connection)
+    connection.execute(
+        """
+        UPDATE normalized_intelligence_cache_state
+        SET last_started_at = ?,
+            last_error = '',
+            last_error_at = ''
+        WHERE id = 1
+        """,
+        (_normalization_state_timestamp(started_at),),
+    )
+    state = _required_normalized_intelligence_cache_state(connection)
+    state["target_revision"] = min(
+        max(0, int(target_revision)),
+        int(state["source_revision"]),
+    )
+    return state
+
+
+def mark_normalized_intelligence_applied(
+    connection: sqlite3.Connection,
+    *,
+    target_revision: int,
+    normalization_version: str,
+    finished_at: str | None = None,
+) -> dict:
+    """Advance only the revision represented by the just-built snapshot."""
+    _ensure_normalized_intelligence_cache_state(connection)
+    state = _required_normalized_intelligence_cache_state(connection)
+    source_revision = int(state["source_revision"])
+    bounded_target = min(max(0, int(target_revision)), source_revision)
+    connection.execute(
+        """
+        UPDATE normalized_intelligence_cache_state
+        SET applied_revision = CASE
+                WHEN applied_revision < ? THEN ?
+                ELSE applied_revision
+            END,
+            dirty_since = CASE WHEN source_revision <= ? THEN '' ELSE dirty_at END,
+            dirty_at = CASE WHEN source_revision <= ? THEN '' ELSE dirty_at END,
+            last_finished_at = ?,
+            last_error = '',
+            last_error_at = '',
+            normalization_version = ?
+        WHERE id = 1
+        """,
+        (
+            bounded_target,
+            bounded_target,
+            bounded_target,
+            bounded_target,
+            _normalization_state_timestamp(finished_at),
+            str(normalization_version or ""),
+        ),
+    )
+    return _required_normalized_intelligence_cache_state(connection)
+
+
+def mark_normalized_intelligence_error(
+    connection: sqlite3.Connection,
+    *,
+    error_message: str,
+    failed_at: str | None = None,
+) -> dict:
+    """Persist a failed attempt while leaving the pending revision untouched."""
+    _ensure_normalized_intelligence_cache_state(connection)
+    connection.execute(
+        """
+        UPDATE normalized_intelligence_cache_state
+        SET last_error = ?,
+            last_error_at = ?
+        WHERE id = 1
+        """,
+        (
+            str(error_message or "")[:4000],
+            _normalization_state_timestamp(failed_at),
+        ),
+    )
+    return _required_normalized_intelligence_cache_state(connection)
 
 
 def upsert_normalized_intelligence_cache_state(
@@ -1960,7 +2557,8 @@ def upsert_platform_session(connection: sqlite3.Connection, payload: dict) -> in
             (*values, platform),
         )
         return int(existing["id"])
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO platform_sessions (
             platform, account_label, login_url, homepage_url, requires_login, status,
@@ -1969,7 +2567,7 @@ def upsert_platform_session(connection: sqlite3.Connection, payload: dict) -> in
         """,
         (platform, *values),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def delete_platform_session(connection: sqlite3.Connection, platform: str) -> None:
@@ -2036,7 +2634,8 @@ def upsert_exposure_watchlist(connection: sqlite3.Connection, payload: dict) -> 
             (values[0], values[1], values[2], values[3], values[4], values[6], int(watchlist_id)),
         )
         return int(watchlist_id)
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO exposure_watchlists (
             name, organization_name, enabled, notes, metadata_json, created_at, updated_at
@@ -2044,7 +2643,7 @@ def upsert_exposure_watchlist(connection: sqlite3.Connection, payload: dict) -> 
         """,
         values,
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def delete_exposure_watchlist(connection: sqlite3.Connection, watchlist_id: int) -> None:
@@ -2256,7 +2855,8 @@ def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
             (values[0], values[1], values[2], values[2], *values[3:], int(row["id"])),
         )
         return int(row["id"])
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO document_hits (
             watchlist_id, platform, platform_type, discovery_source, canonical_url, normalized_title, resource_fingerprint, title,
@@ -2290,11 +2890,12 @@ def upsert_document_hit(connection: sqlite3.Connection, payload: dict) -> int:
             values[16],
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def insert_document_hit_snapshot(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO document_hit_snapshots (
             hit_id, fetched_at, source_query, source_url, page_url, page_title, html_path, screenshot_path,
@@ -2318,7 +2919,7 @@ def insert_document_hit_snapshot(connection: sqlite3.Connection, payload: dict) 
             str(payload.get("raw_json") or "{}"),
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def list_document_hit_snapshots(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
@@ -2354,7 +2955,8 @@ def update_document_hit_last_snapshot(connection: sqlite3.Connection, hit_id: in
 
 
 def add_document_hit_review(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO document_hit_reviews (hit_id, status, reviewer, note, created_at)
         VALUES (?, ?, ?, ?, ?)
@@ -2371,7 +2973,7 @@ def add_document_hit_review(connection: sqlite3.Connection, payload: dict) -> in
         "UPDATE document_hits SET review_status = ? WHERE id = ?",
         (str(payload.get("status") or "").strip() or "triaged", int(payload.get("hit_id") or 0)),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def list_document_hit_reviews(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
@@ -2388,7 +2990,8 @@ def list_document_hit_reviews(connection: sqlite3.Connection, hit_id: int) -> li
 
 
 def insert_exposure_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO exposure_scan_runs (
             watchlist_id, source_families_json, requested_terms_json, candidate_count,
@@ -2409,7 +3012,7 @@ def insert_exposure_scan_run(connection: sqlite3.Connection, payload: dict) -> i
             str(payload.get("finished_at") or ""),
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def list_exposure_scan_runs(connection: sqlite3.Connection, watchlist_id: int | None = None, limit: int | None = 100) -> list[dict]:
@@ -2533,7 +3136,8 @@ def upsert_netdisk_source_state(connection: sqlite3.Connection, payload: dict) -
             (*values, int(row["id"])),
         )
         return int(row["id"])
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO netdisk_source_states (
             watchlist_id, source_key, term, source_family, next_page, last_scanned_page,
@@ -2561,7 +3165,7 @@ def upsert_netdisk_source_state(connection: sqlite3.Connection, payload: dict) -
             values[10],
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def reset_netdisk_source_states(
@@ -2757,7 +3361,8 @@ def upsert_code_watchlist(connection: sqlite3.Connection, payload: dict) -> int:
             (*values, int(watchlist_id)),
         )
         return int(watchlist_id)
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO code_watchlists (
             name, organization_name, enabled, notes, metadata_json, created_at, updated_at
@@ -2765,7 +3370,7 @@ def upsert_code_watchlist(connection: sqlite3.Connection, payload: dict) -> int:
         """,
         values,
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def delete_code_watchlist(connection: sqlite3.Connection, watchlist_id: int) -> None:
@@ -2898,7 +3503,7 @@ def list_code_hits(
     return [dict(row) for row in cursor.fetchall()]
 
 
-def upsert_code_hit_with_state(connection: sqlite3.Connection, payload: dict) -> tuple[int, bool]:
+def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
     signature = (
         int(payload.get("watchlist_id") or 0),
         str(payload.get("platform") or "").strip(),
@@ -2946,8 +3551,9 @@ def upsert_code_hit_with_state(connection: sqlite3.Connection, payload: dict) ->
             """,
             (*values, int(row["id"])),
         )
-        return int(row["id"]), False
-    cursor = connection.execute(
+        return int(row["id"])
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO code_hits (
             watchlist_id, platform, repository_name, repository_owner, repository_url, file_path, branch,
@@ -2980,15 +3586,12 @@ def upsert_code_hit_with_state(connection: sqlite3.Connection, payload: dict) ->
             values[15],
         ),
     )
-    return int(cursor.lastrowid), True
-
-
-def upsert_code_hit(connection: sqlite3.Connection, payload: dict) -> int:
-    return upsert_code_hit_with_state(connection, payload)[0]
+    return inserted_id
 
 
 def insert_code_hit_snapshot(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO code_hit_snapshots (
             hit_id, fetched_at, search_url, page_url, html_path, screenshot_path, code_fragment, masked_fragment,
@@ -3012,7 +3615,7 @@ def insert_code_hit_snapshot(connection: sqlite3.Connection, payload: dict) -> i
             str(payload.get("raw_json") or "{}"),
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def list_code_hit_snapshots(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
@@ -3037,7 +3640,8 @@ def update_code_hit_last_snapshot(connection: sqlite3.Connection, hit_id: int, s
 
 
 def add_code_hit_review(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO code_hit_reviews (hit_id, status, reviewer, note, created_at)
         VALUES (?, ?, ?, ?, ?)
@@ -3054,7 +3658,7 @@ def add_code_hit_review(connection: sqlite3.Connection, payload: dict) -> int:
         "UPDATE code_hits SET review_status = ? WHERE id = ?",
         (str(payload.get("status") or "").strip() or "triaged", int(payload.get("hit_id") or 0)),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def list_code_hit_reviews(connection: sqlite3.Connection, hit_id: int) -> list[dict]:
@@ -3071,7 +3675,8 @@ def list_code_hit_reviews(connection: sqlite3.Connection, hit_id: int) -> list[d
 
 
 def insert_code_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO code_scan_runs (
             watchlist_id, platforms_json, requested_terms_json, candidate_count, hit_count,
@@ -3093,7 +3698,7 @@ def insert_code_scan_run(connection: sqlite3.Connection, payload: dict) -> int:
             str(payload.get("finished_at") or ""),
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
 
 
 def update_code_scan_run(connection: sqlite3.Connection, scan_run_id: int, payload: dict) -> int:
@@ -3234,7 +3839,8 @@ def upsert_code_search_state(connection: sqlite3.Connection, payload: dict) -> i
             (*values, int(row["id"])),
         )
         return int(row["id"])
-    cursor = connection.execute(
+    inserted_id = execute_insert_get_id(
+        connection,
         """
         INSERT INTO code_search_states (
             watchlist_id, platform, term, query_key, last_page_scanned, last_candidate_signature,
@@ -3255,4 +3861,53 @@ def upsert_code_search_state(connection: sqlite3.Connection, payload: dict) -> i
             values[6],
         ),
     )
-    return int(cursor.lastrowid)
+    return inserted_id
+
+
+def get_analysis_snapshot(connection: sqlite3.Connection, namespace: str) -> dict | None:
+    row = connection.execute(
+        """
+        SELECT namespace, revision_key, applied_revision, config_signature,
+               payload_json, generated_at
+        FROM analysis_snapshots
+        WHERE namespace = ?
+        """,
+        (str(namespace),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def upsert_analysis_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    namespace: str,
+    revision_key: str,
+    applied_revision: int,
+    config_signature: str,
+    payload: dict,
+    generated_at: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO analysis_snapshots (
+            namespace, revision_key, applied_revision, config_signature,
+            payload_json, generated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(namespace) DO UPDATE SET
+            revision_key = excluded.revision_key,
+            applied_revision = excluded.applied_revision,
+            config_signature = excluded.config_signature,
+            payload_json = excluded.payload_json,
+            generated_at = excluded.generated_at
+        """,
+        (
+            str(namespace),
+            str(revision_key),
+            max(0, int(applied_revision)),
+            str(config_signature),
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            str(generated_at),
+        ),
+    )
+
+

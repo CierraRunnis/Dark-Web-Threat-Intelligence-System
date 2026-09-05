@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+SRC = Path(__file__).resolve().parents[1] / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import darkweb_collector.api_actions as api_actions
+from darkweb_collector.api_actions import dispatch_run_site
+from darkweb_collector.api_data import build_jobs_payload
+from darkweb_collector.db import get_db_connection, upsert_crawl_job
+
+
+class ApiJobsTests(unittest.TestCase):
+    def _write_sites_config(self, path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "sites": [
+                        {
+                            "site_name": "alpha",
+                            "enabled": True,
+                            "seed_urls": ["http://alpha.onion/"],
+                            "seed_fetch_mode": "tor_http",
+                            "detail_fetch_mode": "tor_http",
+                            "profile": "hot",
+                            "max_topics_per_run": 1,
+                            "max_detail_pages_per_run": 1,
+                            "cooldown_seconds": 60,
+                            "output_dir": str(path.parent / "alpha"),
+                            "dedupe_window_minutes": 5,
+                        },
+                        {
+                            "site_name": "beta",
+                            "enabled": True,
+                            "seed_urls": ["http://beta.onion/"],
+                            "seed_fetch_mode": "tor_http",
+                            "detail_fetch_mode": "tor_http",
+                            "profile": "hot",
+                            "max_topics_per_run": 1,
+                            "max_detail_pages_per_run": 1,
+                            "cooldown_seconds": 60,
+                            "output_dir": str(path.parent / "beta"),
+                            "dedupe_window_minutes": 5,
+                        },
+                        {
+                            "site_name": "gamma",
+                            "enabled": True,
+                            "seed_urls": ["http://gamma.onion/"],
+                            "seed_fetch_mode": "tor_http",
+                            "detail_fetch_mode": "tor_http",
+                            "profile": "hot",
+                            "max_topics_per_run": 1,
+                            "max_detail_pages_per_run": 1,
+                            "cooldown_seconds": 60,
+                            "output_dir": str(path.parent / "gamma"),
+                            "dedupe_window_minutes": 5,
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_latest_success_clears_old_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="alpha-detail-failed",
+                        site_name="alpha",
+                        job_type="detail",
+                        queue_name="detail_http",
+                        target="alpha-detail",
+                        status="failed",
+                        started_at="2026-03-15T10:00:00+00:00",
+                        finished_at="2026-03-15T10:10:00+00:00",
+                        error_message="old error",
+                    )
+                    upsert_crawl_job(
+                        connection,
+                        job_id="alpha-seed-success",
+                        site_name="alpha",
+                        job_type="seed",
+                        queue_name="seed_http",
+                        target="alpha",
+                        status="succeeded",
+                        started_at="2026-03-15T10:20:00+00:00",
+                        finished_at="2026-03-15T10:30:00+00:00",
+                    )
+                    connection.commit()
+                payload = build_jobs_payload()
+
+            alpha = next(item for item in payload["site_health"] if item["site_name"] == "alpha")
+            self.assertEqual("正常", alpha["overall_status"])
+            self.assertEqual("未更新", alpha["detail_status"])
+            self.assertEqual(0, alpha["failed_jobs_24h"])
+
+    def test_latest_detail_success_clears_failure_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="beta-detail-failed",
+                        site_name="beta",
+                        job_type="detail",
+                        queue_name="detail_http",
+                        target="beta-detail",
+                        status="failed",
+                        started_at="2026-03-15T11:00:00+00:00",
+                        finished_at="2026-03-15T11:10:00+00:00",
+                        error_message="detail error",
+                    )
+                    upsert_crawl_job(
+                        connection,
+                        job_id="beta-detail-success",
+                        site_name="beta",
+                        job_type="detail",
+                        queue_name="detail_http",
+                        target="beta-detail",
+                        status="succeeded",
+                        started_at="2026-03-15T11:20:00+00:00",
+                        finished_at="2026-03-15T11:30:00+00:00",
+                    )
+                    connection.commit()
+                payload = build_jobs_payload()
+
+            beta = next(item for item in payload["site_health"] if item["site_name"] == "beta")
+            self.assertEqual("正常", beta["overall_status"])
+            self.assertEqual("成功", beta["detail_status"])
+            self.assertEqual([], [item for item in payload["recent_failures"] if item["site_name"] == "beta"])
+
+    def test_stale_running_marks_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                stale_started_at = (
+                    datetime.now(timezone.utc) - timedelta(minutes=31)
+                ).isoformat()
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="gamma-running",
+                        site_name="gamma",
+                        job_type="seed",
+                        queue_name="seed_http",
+                        target="gamma",
+                        status="running",
+                        started_at=stale_started_at,
+                    )
+                    connection.commit()
+                payload = build_jobs_payload()
+
+            gamma = next(item for item in payload["site_health"] if item["site_name"] == "gamma")
+            self.assertEqual("异常", gamma["overall_status"])
+            self.assertEqual("异常挂起", gamma["seed_status"])
+
+    def test_jobs_payload_includes_ransomware_sync_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                payload = build_jobs_payload()
+
+            self.assertIn("ransomware_sync", payload)
+            self.assertEqual(0, payload["ransomware_sync"]["record_count"])
+
+    def test_dispatch_run_site_falls_back_to_thread_when_no_worker_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            class _FakeThread:
+                def __init__(self, target=None, args=(), daemon=None):
+                    self.target = target
+                    self.args = args
+                    self.daemon = daemon
+                    self.started = False
+
+                def start(self):
+                    self.started = True
+
+            with patch.dict(os.environ, env, clear=False), patch(
+                "darkweb_collector.api_actions._has_queue_worker",
+                return_value=False,
+            ), patch(
+                "darkweb_collector.api_actions.Thread",
+                _FakeThread,
+            ):
+                payload = dispatch_run_site("alpha", force=True)
+
+            self.assertEqual("thread", payload["dispatch_mode"])
+            self.assertEqual("", payload["job_id"])
+
+    def test_enqueued_seed_waiting_on_busy_queue_is_not_marked_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                enqueued_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+                started_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="alpha-seed-enqueued",
+                        site_name="alpha",
+                        job_type="seed",
+                        queue_name="browser_render",
+                        target="alpha",
+                        status="enqueued",
+                        enqueued_at=enqueued_at,
+                    )
+                    upsert_crawl_job(
+                        connection,
+                        job_id="beta-detail-running",
+                        site_name="beta",
+                        job_type="detail",
+                        queue_name="browser_render",
+                        target="beta-detail",
+                        status="running",
+                        started_at=started_at,
+                    )
+                    connection.commit()
+                payload = build_jobs_payload()
+
+            alpha = next(item for item in payload["site_health"] if item["site_name"] == "alpha")
+            self.assertEqual("enqueued", alpha["activeSeedJobStatus"])
+            self.assertFalse(alpha["staleSeedDetected"])
+            self.assertEqual("active_seed_job", alpha["blockingReason"])
+
+    def test_dispatch_run_site_keeps_busy_enqueued_seed_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                enqueued_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+                started_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+                with get_db_connection() as connection:
+                    upsert_crawl_job(
+                        connection,
+                        job_id="alpha-seed-enqueued",
+                        site_name="alpha",
+                        job_type="seed",
+                        queue_name="seed_http",
+                        target="alpha",
+                        status="enqueued",
+                        enqueued_at=enqueued_at,
+                    )
+                    upsert_crawl_job(
+                        connection,
+                        job_id="beta-detail-running",
+                        site_name="beta",
+                        job_type="detail",
+                        queue_name="seed_http",
+                        target="beta-detail",
+                        status="running",
+                        started_at=started_at,
+                    )
+                    connection.commit()
+
+                payload = dispatch_run_site("alpha", force=True)
+
+                with get_db_connection() as connection:
+                    row = connection.execute(
+                        """
+                        SELECT status
+                        FROM crawl_jobs
+                        WHERE job_id = 'alpha-seed-enqueued'
+                        """
+                    ).fetchone()
+
+            self.assertEqual("skipped", payload["dispatch_mode"])
+            self.assertEqual("alpha-seed-enqueued", payload["job_id"])
+            self.assertIsNotNone(row)
+            self.assertEqual("enqueued", row["status"])
+
+    def test_continuous_loop_records_dispatch_error_and_keeps_running_until_stopped(self) -> None:
+        class _StopAfterTwoWaits:
+            def __init__(self) -> None:
+                self.wait_calls = 0
+
+            def is_set(self) -> bool:
+                return False
+
+            def wait(self, timeout: int) -> bool:
+                self.wait_calls += 1
+                return self.wait_calls >= 2
+
+        seen_last_errors: list[str] = []
+
+        def fake_dispatch():
+            if not seen_last_errors:
+                seen_last_errors.append("raising")
+                raise sqlite3.OperationalError("database is locked")
+            seen_last_errors.append(api_actions._continuous_last_error)
+            return {"count": 0, "results": []}
+
+        old_enabled = api_actions._continuous_enabled
+        old_last_tick = api_actions._continuous_last_tick_at
+        old_last_error = api_actions._continuous_last_error
+        try:
+            api_actions._continuous_enabled = True
+            api_actions._continuous_last_tick_at = ""
+            api_actions._continuous_last_error = ""
+
+            stop_event = _StopAfterTwoWaits()
+            with patch.object(api_actions, "dispatch_due_enabled_sites", side_effect=fake_dispatch) as mocked_dispatch:
+                api_actions._continuous_loop(stop_event)
+
+            self.assertEqual(2, mocked_dispatch.call_count)
+            self.assertEqual("OperationalError: database is locked", seen_last_errors[1])
+            self.assertEqual("", api_actions._continuous_last_error)
+            self.assertFalse(api_actions._continuous_enabled)
+        finally:
+            api_actions._continuous_enabled = old_enabled
+            api_actions._continuous_last_tick_at = old_last_tick
+            api_actions._continuous_last_error = old_last_error
+
+
+    def test_due_dispatcher_respects_recent_success_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            db_path = tmp_path / "collector.db"
+            config_path = tmp_path / "sites.yaml"
+            self._write_sites_config(config_path)
+
+            env = {
+                "DARKWEB_COLLECTOR_DB_PATH": str(db_path),
+                "DARKWEB_COLLECTOR_SITES_FILE": str(config_path),
+            }
+
+            with patch.dict(os.environ, env, clear=False):
+                finished_at = datetime.now(timezone.utc).isoformat()
+                with get_db_connection() as connection:
+                    for site_name in ("alpha", "beta", "gamma"):
+                        upsert_crawl_job(
+                            connection,
+                            job_id=f"{site_name}-recent-success",
+                            site_name=site_name,
+                            job_type="seed",
+                            queue_name="seed_http",
+                            target=site_name,
+                            status="succeeded",
+                            started_at=finished_at,
+                            finished_at=finished_at,
+                        )
+                    connection.commit()
+
+                with patch.object(
+                    api_actions,
+                    "get_state_store",
+                    return_value=object(),
+                ), patch(
+                    "darkweb_collector.tasks.crawl_seed.apply_async",
+                ) as mocked_apply_async:
+                    payload = api_actions.dispatch_due_enabled_sites()
+
+            self.assertEqual(0, payload["count"])
+            self.assertEqual([], payload["results"])
+            mocked_apply_async.assert_not_called()

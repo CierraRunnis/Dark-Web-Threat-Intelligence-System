@@ -10,7 +10,7 @@ import sys
 import time
 from typing import Any
 from urllib.parse import quote_plus
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from darkweb_collector.db import (
     delete_platform_session,
@@ -93,7 +93,15 @@ def _verify_gitee_code_search_capability() -> dict[str, Any]:
         },
     )
     try:
-        with urlopen(request, timeout=30) as response:  # noqa: S310
+        proxy_host = os.environ.get("PROXY_HOST")
+        proxy_port = os.environ.get("PROXY_PORT")
+        if proxy_host and proxy_port:
+            proxy_url = f"http://{proxy_host}:{proxy_port}"
+            opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            response_context = opener.open(request, timeout=30)  # noqa: S310
+        else:
+            response_context = urlopen(request, timeout=30)  # noqa: S310
+        with response_context as response:
             body = response.read().decode("utf-8", errors="replace")
             resolved_url = str(response.geturl() or url)
     except Exception as exc:
@@ -370,6 +378,8 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
     launch_meta_path = profile_dir / "launch_meta.json"
     existing_meta = _load_json_file(launch_meta_path)
     existing_pid = _pid_from_metadata(existing_meta)
+    login_url = platform.login_url or platform.homepage_url
+    proxy_server = browser_proxy_server_for_url(login_url)
     if _is_process_alive(existing_pid):
         return {
             "platform": platform.key,
@@ -389,7 +399,7 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
         "--platform",
         platform.key,
         "--login-url",
-        platform.login_url or platform.homepage_url,
+        login_url,
         "--homepage-url",
         platform.homepage_url,
         "--user-data-dir",
@@ -397,6 +407,8 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
         "--storage-state",
         str(storage_state_path),
     ]
+    if proxy_server:
+        command.extend(["--proxy-server", proxy_server])
     log_handle = log_path.open("a", encoding="utf-8")
     src_dir = Path(__file__).resolve().parents[1]
     popen_kwargs: dict[str, Any] = {
@@ -414,22 +426,25 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
         process = subprocess.Popen(command, **popen_kwargs)
     finally:
         log_handle.close()
-    startup_deadline = time.monotonic() + LOGIN_PROCESS_STARTUP_GRACE_SECONDS
-    while process.poll() is None and time.monotonic() < startup_deadline:
-        time.sleep(0.1)
-    if process.poll() is not None:
-        log_tail = ""
-        try:
-            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-1200:].strip()
-        except Exception:
-            pass
-        raise ValueError(log_tail or "visible browser exited during startup")
+    poll_process = getattr(process, "poll", None)
+    if callable(poll_process):
+        startup_deadline = time.monotonic() + LOGIN_PROCESS_STARTUP_GRACE_SECONDS
+        while poll_process() is None and time.monotonic() < startup_deadline:
+            time.sleep(0.1)
+        if poll_process() is not None:
+            log_tail = ""
+            try:
+                log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-1200:].strip()
+            except Exception:
+                pass
+            raise ValueError(log_tail or "visible browser exited during startup")
     metadata = {
         "login_pid": int(process.pid),
         "launch_command": command,
         "log_path": str(log_path),
         "user_data_dir": str(user_data_dir),
         "mode": "external_browser",
+        "proxy_server": proxy_server or "",
         "launched_at": _now_utc_iso(),
     }
     _dump_json_file(launch_meta_path, metadata)
@@ -459,6 +474,7 @@ def launch_platform_login(platform_name: str) -> dict[str, Any]:
         "storage_state_path": str(storage_state_path),
         "user_data_dir": str(user_data_dir),
         "mode": "external_browser",
+        "proxy_server": proxy_server or "",
         "message": "已启动可见浏览器登录会话，请在浏览器中完成登录后关闭窗口，再点击保存会话。",
     }
 

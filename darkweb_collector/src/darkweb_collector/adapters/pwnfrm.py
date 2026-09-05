@@ -266,7 +266,6 @@ class PwnfrmAdapter(SiteAdapter):
                         content=detail_result.payload.get("content", ""),
                         authors=detail_result.payload.get("author", ""),
                         timestamps=detail_result.payload.get("timestamp", ""),
-                        published_at_utc=detail_result.payload.get("published_at_utc", ""),
                         attachments=", ".join(detail_result.payload.get("attachments", [])),
                         victims=detail_result.payload.get("victims", []),
                         attackers=detail_result.payload.get("attackers", []),

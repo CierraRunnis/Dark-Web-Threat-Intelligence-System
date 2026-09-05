@@ -1,54 +1,31 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
-import logging
 import time
 from typing import Any
 
-from darkweb_collector.browser_process_pool import browser_process_pool_status, submit_browser_site
-from darkweb_collector.code_monitoring import (
-    github_code_search_status_payload,
-    list_code_watchlists_payload,
-    scan_code_watchlist_once,
-)
 from darkweb_collector.config import get_site_config, load_site_configs, set_site_enabled
 from darkweb_collector.db import (
     get_active_crawl_job,
     get_db_connection,
-    get_last_successful_crawl_job,
-    get_latest_crawl_job,
     get_ransomware_live_sync_state,
-    get_site_connectivity_probe_map,
-    upsert_site_connectivity_probe,
     upsert_crawl_job,
 )
+from darkweb_collector.code_monitoring import list_code_watchlists_payload, scan_code_watchlist_once
 from darkweb_collector.document_exposure import list_watchlists_payload, scan_watchlist_once
-from darkweb_collector.changan_auto_login import changan_auto_login_available
-from darkweb_collector.job_diagnostics import consecutive_failures, failure_cooldown_until
-from darkweb_collector.orchestrator import new_job_id, run_site_once
+from darkweb_collector.job_status import (
+    has_recent_running_job_in_queue,
+    is_active_job_blocking,
+    mark_stale_active_job,
+)
+from darkweb_collector.orchestrator import enqueue_due_sites, run_site_once
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
-from darkweb_collector.queueing import (
-    BROWSER_ACTIVE_QUEUES,
-    BROWSER_QUEUES,
-    browser_concurrency,
-    browser_queue_concurrency,
-    queue_for_seed,
-)
-from darkweb_collector.ransomware_live import (
-    get_ransomware_live_api_key,
-    get_ransomware_live_sync_config,
-    get_ransomware_live_sync_status_snapshot,
-    set_ransomware_live_sync_config,
-)
-from darkweb_collector.site_auth import site_auth_readiness
-from darkweb_collector.tor_fetch import fetch_url, is_onion_url
+from darkweb_collector.queueing import queue_for_seed
+from darkweb_collector.state_store import get_state_store
+from darkweb_collector.ransomware_live import get_ransomware_live_api_key, sync_ransomware_live_victims
 from darkweb_collector.utils import utc_now_iso
 
 
-STALE_RUNNING_MINUTES = 30
-STALE_ENQUEUED_MINUTES = 10
-STALE_ENQUEUED_BUSY_QUEUE_MINUTES = 60
 CONTINUOUS_INTERVAL_SECONDS = 60
 DEFAULT_VULNERABILITY_SYNC_INTERVAL_SECONDS = 3600
 DEFAULT_VULNERABILITY_SYNC_LIMIT = 300
@@ -57,19 +34,16 @@ DEFAULT_RANSOMWARE_SYNC_LIMIT = 0
 DEFAULT_CODE_MONITORING_INTERVAL_SECONDS = 3600
 DEFAULT_CODE_MONITORING_CONTINUOUS_SEARCH_PAGE_LIMIT = 2
 DEFAULT_CODE_MONITORING_CONTINUOUS_MAX_RESULTS_PER_TERM = 5
+DEFAULT_CODE_MONITORING_LOCK_RETRY_SECONDS = 15
 DEFAULT_NETDISK_MONITORING_INTERVAL_SECONDS = 3600
 WORKER_QUEUE_CACHE_TTL_SECONDS = 5
-SITE_CONNECTIVITY_PROBE_INTERVAL_SECONDS = 24 * 60 * 60
-SITE_CONNECTIVITY_MONITOR_POLL_SECONDS = 10 * 60
-
-
-logger = logging.getLogger("darkweb_collector.api_actions")
 
 
 _continuous_lock = Lock()
 _continuous_enabled = False
 _continuous_started_at = ""
 _continuous_last_tick_at = ""
+_continuous_last_error = ""
 _continuous_mode = "queue"
 _continuous_stop_event: Event | None = None
 _continuous_thread: Thread | None = None
@@ -88,6 +62,20 @@ _vulnerability_sync_limit = DEFAULT_VULNERABILITY_SYNC_LIMIT
 _vulnerability_sync_running = False
 _vulnerability_sync_stop_event: Event | None = None
 _vulnerability_sync_thread: Thread | None = None
+
+_ransomware_sync_lock = Lock()
+_ransomware_sync_enabled = False
+_ransomware_sync_started_at = ""
+_ransomware_sync_last_tick_at = ""
+_ransomware_sync_last_success_at = ""
+_ransomware_sync_last_error = ""
+_ransomware_sync_last_source = ""
+_ransomware_sync_last_ingested = 0
+_ransomware_sync_interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
+_ransomware_sync_limit = DEFAULT_RANSOMWARE_SYNC_LIMIT
+_ransomware_sync_running = False
+_ransomware_sync_stop_event: Event | None = None
+_ransomware_sync_thread: Thread | None = None
 
 _code_monitoring_lock = Lock()
 _code_monitoring_enabled = False
@@ -116,218 +104,7 @@ _netdisk_monitoring_tasks: dict[int, dict[str, Any]] = {}
 _worker_queue_cache_lock = Lock()
 _worker_queue_cache_checked_at = 0.0
 _worker_queue_cache: set[str] = set()
-_worker_queue_worker_counts: dict[str, int] = {}
-_worker_queue_worker_names: dict[str, list[str]] = {}
-_worker_queue_refresh_thread: Thread | None = None
-_site_connectivity_monitor_lock = Lock()
-_site_connectivity_monitor_thread: Thread | None = None
 
-
-def _persist_site_connectivity_probe(payload: dict[str, Any]) -> None:
-    with get_db_connection() as connection:
-        upsert_site_connectivity_probe(connection, payload)
-
-
-def probe_site_connectivity(site_name: str) -> dict[str, Any]:
-    config = get_site_config(site_name)
-    url = config.seed_urls[0]
-    fetch_mode = "tor_http" if is_onion_url(url) else config.seed_fetch_mode
-    started = time.perf_counter()
-    try:
-        html = fetch_url(
-            url=url,
-            mode=fetch_mode,
-            timeout_seconds=min(max(config.fetch_timeout_seconds, 5), 30),
-            render_wait_seconds=min(max(config.render_wait_seconds, 1), 5),
-            retries=0,
-        )
-        available = True
-        error = ""
-    except Exception as exc:
-        html = ""
-        available = False
-        error = str(exc).strip()[:500] or type(exc).__name__
-    error_lower = error.lower()
-    failure_reason = (
-        ""
-        if available
-        else "route_unavailable"
-        if any(marker in error_lower for marker in ("socks", "proxy", "tor connection"))
-        else "timeout"
-        if any(marker in error_lower for marker in ("timed out", "timeout"))
-        else "fetch_failed"
-    )
-    latency_ms = max(0, round((time.perf_counter() - started) * 1000))
-    payload = {
-        "site_name": config.site_name,
-        "url": url,
-        "fetch_mode": fetch_mode,
-        "available": available,
-        "status": "available" if available else "unavailable",
-        "latency_ms": latency_ms,
-        "checked_at": utc_now_iso(),
-        "response_bytes": len(html.encode("utf-8", errors="replace")),
-        "failure_reason": failure_reason,
-        "error": error,
-    }
-    _persist_site_connectivity_probe(payload)
-    return payload
-
-
-def _parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def _tor_route_ready_for_probe(url: str) -> bool:
-    if not is_onion_url(url):
-        return True
-    try:
-        from darkweb_collector.tor_bridge_control import get_tor_bridge_status, load_tor_bridge_settings
-
-        settings = load_tor_bridge_settings()
-        if not settings.get("enabled"):
-            return True
-        return bool(get_tor_bridge_status().get("connected"))
-    except Exception:
-        return True
-
-
-def run_due_site_connectivity_probes(*, now: datetime | None = None) -> dict[str, list[str]]:
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    with get_db_connection() as connection:
-        latest = get_site_connectivity_probe_map(connection)
-
-    result: dict[str, list[str]] = {
-        "probed": [],
-        "skipped_recent": [],
-        "skipped_route": [],
-        "errors": [],
-    }
-    for config in load_site_configs():
-        if not config.enabled or not config.seed_urls:
-            continue
-        previous = latest.get(config.site_name) or {}
-        checked_at = _parse_dt(str(previous.get("checked_at") or ""))
-        if checked_at is not None and (current - checked_at).total_seconds() < SITE_CONNECTIVITY_PROBE_INTERVAL_SECONDS:
-            result["skipped_recent"].append(config.site_name)
-            continue
-        if not _tor_route_ready_for_probe(config.seed_urls[0]):
-            result["skipped_route"].append(config.site_name)
-            continue
-        try:
-            probe_site_connectivity(config.site_name)
-            result["probed"].append(config.site_name)
-        except Exception as exc:
-            result["errors"].append(config.site_name)
-            logger.warning("daily site connectivity probe failed for %s: %s", config.site_name, exc)
-    return result
-
-
-def _site_connectivity_monitor_loop(stop_event: Event) -> None:
-    while not stop_event.is_set():
-        try:
-            run_due_site_connectivity_probes()
-        except Exception:
-            logger.exception("daily site connectivity monitor failed")
-        if stop_event.wait(SITE_CONNECTIVITY_MONITOR_POLL_SECONDS):
-            break
-
-
-def start_site_connectivity_monitor() -> None:
-    global _site_connectivity_monitor_thread
-    with _site_connectivity_monitor_lock:
-        if _site_connectivity_monitor_thread and _site_connectivity_monitor_thread.is_alive():
-            return
-        stop_event = Event()
-        thread = Thread(
-            target=_site_connectivity_monitor_loop,
-            args=(stop_event,),
-            name="site-connectivity-monitor",
-            daemon=True,
-        )
-        _site_connectivity_monitor_thread = thread
-        thread.start()
-
-
-def _has_recent_running_job_in_queue(connection, queue_name: str, *, exclude_job_id: str = "") -> bool:
-    if not queue_name:
-        return False
-    rows = connection.execute(
-        """
-        SELECT job_id, started_at, finished_at
-        FROM crawl_jobs
-        WHERE queue_name = ? AND status = 'running'
-        """,
-        (queue_name,),
-    ).fetchall()
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_RUNNING_MINUTES)
-    for row in rows:
-        job_id = str(row["job_id"] or "")
-        if exclude_job_id and job_id == exclude_job_id:
-            continue
-        if row["finished_at"]:
-            continue
-        started_at = _parse_dt(row["started_at"])
-        if started_at is not None and started_at >= cutoff:
-            return True
-    return False
-
-
-def _is_active_job_blocking(active_job: dict[str, Any] | None, *, queue_has_recent_running: bool = False) -> bool:
-    if not active_job:
-        return False
-    status = active_job.get("status")
-    if status == "enqueued":
-        enqueued_at = _parse_dt(active_job.get("enqueued_at"))
-        if enqueued_at is None:
-            return False
-        threshold_minutes = (
-            STALE_ENQUEUED_BUSY_QUEUE_MINUTES if queue_has_recent_running else STALE_ENQUEUED_MINUTES
-        )
-        return enqueued_at >= datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
-    if status != "running":
-        return False
-    started_at = _parse_dt(active_job.get("started_at"))
-    if started_at is None:
-        return False
-    return started_at >= datetime.now(timezone.utc) - timedelta(minutes=STALE_RUNNING_MINUTES)
-
-
-def _mark_stale_active_job(site_name: str, active_job: dict[str, Any] | None) -> None:
-    if not active_job:
-        return
-    if active_job.get("status") not in {"enqueued", "running"}:
-        return
-
-    marker = _parse_dt(active_job.get("started_at") or active_job.get("enqueued_at"))
-    if marker is None:
-        return
-
-    with get_db_connection() as connection:
-        upsert_crawl_job(
-            connection,
-            job_id=str(active_job["job_id"]),
-            site_name=site_name,
-            job_type="seed",
-            queue_name=str(active_job.get("queue_name") or ""),
-            target=str(active_job.get("target") or site_name),
-            status="stale",
-            enqueued_at=active_job.get("enqueued_at"),
-            started_at=active_job.get("started_at"),
-            finished_at=utc_now_iso(),
-            error_message="stale seed task auto-cleared",
-        )
-        connection.commit()
 
 
 def _enqueue_job_row(job_id: str, site_name: str, queue_name: str) -> None:
@@ -345,11 +122,11 @@ def _enqueue_job_row(job_id: str, site_name: str, queue_name: str) -> None:
         connection.commit()
 
 
-def _refresh_worker_queue_cache() -> tuple[set[str], dict[str, int], dict[str, list[str]]]:
+def _refresh_worker_queue_cache() -> set[str]:
     try:
         from darkweb_collector.celery_app import app as celery_app
     except Exception:
-        return set(), {}, {}
+        return set()
 
     inspect = celery_app.control.inspect(timeout=0.8)
     try:
@@ -357,142 +134,70 @@ def _refresh_worker_queue_cache() -> tuple[set[str], dict[str, int], dict[str, l
     except Exception:
         active_queues = {}
     queue_names: set[str] = set()
-    worker_counts: dict[str, int] = {}
-    worker_names: dict[str, list[str]] = {}
-    for worker_name, worker_queues in active_queues.items():
+    for worker_queues in active_queues.values():
         for queue in worker_queues or []:
             name = str((queue or {}).get("name") or "").strip()
             if name:
                 queue_names.add(name)
-                worker_counts[name] = worker_counts.get(name, 0) + 1
-                worker_names.setdefault(name, []).append(str(worker_name))
-    return queue_names, worker_counts, {name: sorted(names) for name, names in worker_names.items()}
-
-
-def _refresh_worker_queue_cache_if_needed(*, force: bool = False) -> None:
-    global _worker_queue_cache_checked_at, _worker_queue_cache, _worker_queue_worker_counts, _worker_queue_worker_names
-    now = time.monotonic()
-    if force or (now - _worker_queue_cache_checked_at) > WORKER_QUEUE_CACHE_TTL_SECONDS:
-        (
-            _worker_queue_cache,
-            _worker_queue_worker_counts,
-            _worker_queue_worker_names,
-        ) = _refresh_worker_queue_cache()
-        _worker_queue_cache_checked_at = now
-
-
-def _refresh_worker_queue_cache_in_background() -> None:
-    global _worker_queue_cache_checked_at, _worker_queue_cache, _worker_queue_worker_counts, _worker_queue_worker_names
-    queues, worker_counts, worker_names = _refresh_worker_queue_cache()
-    with _worker_queue_cache_lock:
-        _worker_queue_cache = queues
-        _worker_queue_worker_counts = worker_counts
-        _worker_queue_worker_names = worker_names
-        _worker_queue_cache_checked_at = time.monotonic()
-
-
-def _schedule_worker_queue_cache_refresh() -> None:
-    global _worker_queue_refresh_thread
-    with _worker_queue_cache_lock:
-        cache_is_fresh = (time.monotonic() - _worker_queue_cache_checked_at) <= WORKER_QUEUE_CACHE_TTL_SECONDS
-        if cache_is_fresh or (_worker_queue_refresh_thread and _worker_queue_refresh_thread.is_alive()):
-            return
-        _worker_queue_refresh_thread = Thread(
-            target=_refresh_worker_queue_cache_in_background,
-            name="worker-queue-status-refresh",
-            daemon=True,
-        )
-        _worker_queue_refresh_thread.start()
+    return queue_names
 
 
 def _has_queue_worker(queue_name: str) -> bool:
+    global _worker_queue_cache_checked_at, _worker_queue_cache
+    now = time.monotonic()
     with _worker_queue_cache_lock:
-        _refresh_worker_queue_cache_if_needed()
+        if (now - _worker_queue_cache_checked_at) > WORKER_QUEUE_CACHE_TTL_SECONDS:
+            _worker_queue_cache = _refresh_worker_queue_cache()
+            _worker_queue_cache_checked_at = now
         return queue_name in _worker_queue_cache
 
 
 def _run_site_in_thread(site_name: str) -> None:
+    # Local import keeps api_actions import-time cheap (no playwright pull-in
+    # for API processes that never touch browser_client).
+    from darkweb_collector.browser_client import close_browser_client
+
     try:
         run_site_once(site_name)
     except Exception:
         # run_site_once already records failed jobs in crawl_jobs.
         return
-
-
-def _dispatch_browser_process(site_name: str, queue_name: str, message: str) -> dict[str, Any]:
-    job_id = new_job_id("seed", site_name)
-    _enqueue_job_row(job_id=job_id, site_name=site_name, queue_name=queue_name)
-    submit_browser_site(site_name=site_name, job_id=job_id)
-    return {
-        "site_name": site_name,
-        "dispatch_mode": "process",
-        "message": message,
-        "job_id": job_id,
-    }
+    finally:
+        # Each dispatch spawns a fresh daemon thread. Playwright's sync API
+        # binds its driver greenlets to the thread that created them, so the
+        # thread MUST close its own client before exiting — otherwise the
+        # next thread inherits a dead reference and dies with
+        # "cannot switch to a different thread (which happens to have exited)".
+        try:
+            close_browser_client()
+        except Exception as exc:
+            print(f"[api_actions] close_browser_client after {site_name} failed (ignored): {exc}")
 
 
 def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
     config = get_site_config(site_name)
-    auth = site_auth_readiness(config)
-    if not auth["ready"] and not changan_auto_login_available(config):
-        return {
-            "site_name": site_name,
-            "dispatch_mode": "skipped",
-            "message": auth["auth_message"],
-            "job_id": "",
-            "reason": "auth_required",
-            "auth_platform": auth["auth_platform"],
-            "auth_status": auth["auth_status"],
-        }
     with get_db_connection() as connection:
         active_job = get_active_crawl_job(connection, site_name=site_name, job_type="seed")
-        queue_has_recent_running = _has_recent_running_job_in_queue(
+        queue_has_recent_running = has_recent_running_job_in_queue(
             connection,
             str((active_job or {}).get("queue_name") or ""),
             exclude_job_id=str((active_job or {}).get("job_id") or ""),
         )
-        seed_rows = [
-            dict(row)
-            for row in connection.execute(
-                """
-                SELECT status, started_at, finished_at, enqueued_at, error_message
-                FROM crawl_jobs
-                WHERE site_name = ? AND job_type = 'seed'
-                ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
-                LIMIT 20
-                """,
-                (site_name,),
-            ).fetchall()
-        ]
-    if _is_active_job_blocking(active_job, queue_has_recent_running=queue_has_recent_running):
+    if is_active_job_blocking(active_job, queue_has_recent_running=queue_has_recent_running):
         return {
             "site_name": site_name,
             "dispatch_mode": "skipped",
             "message": "该站点已有运行中的种子任务",
             "job_id": active_job.get("job_id") if active_job else "",
         }
-    cooldown_until = failure_cooldown_until(config, seed_rows)
-    if not force and cooldown_until is not None and datetime.now(timezone.utc) < cooldown_until:
-        return {
-            "site_name": site_name,
-            "dispatch_mode": "skipped",
-            "message": "该站点连续失败达到阈值，仍处于冷却期",
-            "job_id": "",
-            "reason": "failure_cooldown",
-            "consecutive_failures": consecutive_failures(seed_rows),
-            "failure_cooldown_until": cooldown_until.isoformat(),
-        }
 
-    _mark_stale_active_job(site_name, active_job)
+    if active_job:
+        with get_db_connection() as connection:
+            mark_stale_active_job(connection, site_name=site_name, job_type="seed", active_job=active_job)
+            connection.commit()
 
-    queue_name = queue_for_seed(config)
+    queue_name = queue_for_seed(config.seed_fetch_mode)
     if not _has_queue_worker(queue_name):
-        if config.uses_browser:
-            return _dispatch_browser_process(
-                site_name=site_name,
-                queue_name=queue_name,
-                message="未检测到可消费浏览器队列的 worker，已提交到本地浏览器进程池",
-            )
         thread = Thread(target=_run_site_in_thread, args=(site_name,), daemon=True)
         thread.start()
         return {
@@ -517,12 +222,6 @@ def dispatch_run_site(site_name: str, force: bool = True) -> dict[str, Any]:
             "job_id": job_id,
         }
     except Exception:
-        if config.uses_browser:
-            return _dispatch_browser_process(
-                site_name=site_name,
-                queue_name=queue_name,
-                message="队列不可用，已提交到本地浏览器进程池",
-            )
         thread = Thread(target=_run_site_in_thread, args=(site_name,), daemon=True)
         thread.start()
         return {
@@ -545,28 +244,58 @@ def dispatch_run_all_enabled_sites(force: bool = True) -> dict[str, Any]:
     }
 
 
+def dispatch_due_enabled_sites() -> dict[str, Any]:
+    try:
+        from darkweb_collector.tasks import crawl_seed
+    except ImportError as exc:
+        raise RuntimeError("Celery is required to enqueue queued crawl jobs") from exc
+
+    def seed_dispatcher(config) -> str | None:
+        queue_name = queue_for_seed(config.seed_fetch_mode)
+        async_result = crawl_seed.apply_async(
+            kwargs={"site_name": config.site_name, "force": False},
+            queue=queue_name,
+        )
+        return str(async_result.id)
+
+    dispatched = enqueue_due_sites(
+        seed_dispatcher=seed_dispatcher,
+        state_store=get_state_store(prefer_redis=True),
+    )
+    return {
+        "count": len(dispatched),
+        "results": dispatched,
+    }
+
+
 def dispatch_run_all_enabled_sites_once(force: bool = True) -> dict[str, Any]:
     return dispatch_run_all_enabled_sites(force=force)
 
 
 def _continuous_loop(stop_event: Event) -> None:
-    global _continuous_last_tick_at, _continuous_enabled
+    global _continuous_last_tick_at, _continuous_enabled, _continuous_last_error
     while not stop_event.is_set():
         _continuous_last_tick_at = utc_now_iso()
-        dispatch_run_all_enabled_sites(force=False)
+        try:
+            dispatch_due_enabled_sites()
+            _continuous_last_error = ""
+        except Exception as exc:
+            _continuous_last_error = f"{type(exc).__name__}: {exc}"
+            print(f"[api_actions] continuous dispatch failed (will retry): {_continuous_last_error}")
         if stop_event.wait(CONTINUOUS_INTERVAL_SECONDS):
             break
     _continuous_enabled = False
 
 
 def start_continuous_dispatch() -> dict[str, Any]:
-    global _continuous_enabled, _continuous_started_at, _continuous_last_tick_at, _continuous_stop_event, _continuous_thread
+    global _continuous_enabled, _continuous_started_at, _continuous_last_tick_at, _continuous_last_error, _continuous_stop_event, _continuous_thread
     with _continuous_lock:
         if _continuous_enabled and _continuous_thread and _continuous_thread.is_alive():
             return {
                 "enabled": True,
                 "started_at": _continuous_started_at,
                 "last_tick_at": _continuous_last_tick_at,
+                "last_error": _continuous_last_error,
                 "mode": _continuous_mode,
                 "message": "持久运行已在运行",
             }
@@ -576,6 +305,7 @@ def start_continuous_dispatch() -> dict[str, Any]:
         _continuous_enabled = True
         _continuous_started_at = utc_now_iso()
         _continuous_last_tick_at = ""
+        _continuous_last_error = ""
         _continuous_stop_event = stop_event
         _continuous_thread = thread
         thread.start()
@@ -584,6 +314,7 @@ def start_continuous_dispatch() -> dict[str, Any]:
             "enabled": True,
             "started_at": _continuous_started_at,
             "last_tick_at": _continuous_last_tick_at,
+            "last_error": _continuous_last_error,
             "mode": _continuous_mode,
             "message": "已开始持久运行",
         }
@@ -597,6 +328,7 @@ def stop_continuous_dispatch() -> dict[str, Any]:
                 "enabled": False,
                 "started_at": _continuous_started_at,
                 "last_tick_at": _continuous_last_tick_at,
+                "last_error": _continuous_last_error,
                 "mode": _continuous_mode,
                 "message": "当前未运行持久调度",
             }
@@ -607,6 +339,7 @@ def stop_continuous_dispatch() -> dict[str, Any]:
             "enabled": False,
             "started_at": _continuous_started_at,
             "last_tick_at": _continuous_last_tick_at,
+            "last_error": _continuous_last_error,
             "mode": _continuous_mode,
             "message": "已停止持久运行",
         }
@@ -619,39 +352,8 @@ def get_continuous_dispatch_status() -> dict[str, Any]:
         "enabled": enabled,
         "started_at": _continuous_started_at,
         "last_tick_at": _continuous_last_tick_at,
+        "last_error": _continuous_last_error,
         "mode": _continuous_mode,
-    }
-
-
-def get_browser_runtime_status() -> dict[str, Any]:
-    _schedule_worker_queue_cache_refresh()
-    with _worker_queue_cache_lock:
-        worker_queues = sorted(_worker_queue_cache)
-        worker_counts = dict(_worker_queue_worker_counts)
-        worker_names = {name: list(names) for name, names in _worker_queue_worker_names.items()}
-    browser_worker_names = sorted(
-        {
-            worker_name
-            for queue_name in BROWSER_QUEUES
-            for worker_name in worker_names.get(queue_name, [])
-        }
-    )
-    browser_worker_count = len(browser_worker_names)
-    configured_concurrency = browser_concurrency()
-    return {
-        "browser_queue": ",".join(BROWSER_ACTIVE_QUEUES),
-        "browser_queues": list(BROWSER_QUEUES),
-        "queue_configured_concurrency": {
-            queue_name: browser_queue_concurrency(queue_name)
-            for queue_name in BROWSER_ACTIVE_QUEUES
-        },
-        "configured_concurrency": configured_concurrency,
-        "browser_concurrency": configured_concurrency,
-        "browser_worker_count": browser_worker_count,
-        "browser_worker_names": browser_worker_names,
-        "local_process_pool": browser_process_pool_status(),
-        "worker_queues": worker_queues,
-        "worker_counts": worker_counts,
     }
 
 
@@ -668,11 +370,7 @@ def _run_vulnerability_sync(limit: int, prefer_live: bool = True) -> dict[str, A
         _vulnerability_sync_last_tick_at = utc_now_iso()
         _vulnerability_sync_last_error = ""
     try:
-        result = sync_public_vulnerability_feed(
-            limit=limit,
-            prefer_live=prefer_live,
-            refresh_normalized=False,
-        )
+        result = sync_public_vulnerability_feed(limit=limit, prefer_live=prefer_live)
         with _vulnerability_sync_lock:
             _vulnerability_sync_last_success_at = utc_now_iso()
             _vulnerability_sync_last_mode = str(result.get("mode") or "")
@@ -793,108 +491,149 @@ def get_vulnerability_sync_status() -> dict[str, Any]:
     }
 
 
-def dispatch_run_ransomware_sync_once(limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT) -> dict[str, Any]:
-    from darkweb_collector.tasks import enqueue_ransomware_live_sync
+def _run_ransomware_sync(limit: int) -> dict[str, Any]:
+    global _ransomware_sync_running
+    global _ransomware_sync_last_tick_at
+    global _ransomware_sync_last_success_at
+    global _ransomware_sync_last_error
+    global _ransomware_sync_last_source
+    global _ransomware_sync_last_ingested
+    with _ransomware_sync_lock:
+        _ransomware_sync_running = True
+        _ransomware_sync_last_tick_at = utc_now_iso()
+        _ransomware_sync_last_error = ""
+    try:
+        result = sync_ransomware_live_victims(limit=limit, refresh_normalized=True)
+        with _ransomware_sync_lock:
+            _ransomware_sync_last_success_at = utc_now_iso()
+            _ransomware_sync_last_source = str(result.get("source") or "")
+            _ransomware_sync_last_ingested = int(result.get("ingested") or 0)
+            _ransomware_sync_last_error = ""
+        return result
+    except Exception as exc:
+        with _ransomware_sync_lock:
+            _ransomware_sync_last_error = str(exc)
+        raise
+    finally:
+        with _ransomware_sync_lock:
+            _ransomware_sync_running = False
 
-    job_id = enqueue_ransomware_live_sync(limit=max(0, int(limit)), force=True)
-    if not job_id:
-        return {
-            **get_ransomware_sync_status(),
-            "message": "ransomware.live 同步任务已在运行或等待执行",
-        }
+
+def _run_ransomware_sync_once_in_thread(limit: int) -> None:
+    try:
+        _run_ransomware_sync(limit=limit)
+    except Exception:
+        return
+
+
+def dispatch_run_ransomware_sync_once(limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT) -> dict[str, Any]:
+    global _ransomware_sync_thread
+    with _ransomware_sync_lock:
+        if _ransomware_sync_running:
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 同步任务已在运行中",
+            }
+        thread = Thread(target=_run_ransomware_sync_once_in_thread, args=(limit,), daemon=True)
+        _ransomware_sync_thread = thread
+        thread.start()
     return {
         **get_ransomware_sync_status(),
         "message": "已触发一次 ransomware.live 同步",
-        "job_id": job_id,
     }
+
+
+def _ransomware_sync_loop(stop_event: Event) -> None:
+    global _ransomware_sync_enabled
+    while not stop_event.is_set():
+        try:
+            _run_ransomware_sync(limit=_ransomware_sync_limit)
+        except Exception:
+            pass
+        if stop_event.wait(_ransomware_sync_interval_seconds):
+            break
+    _ransomware_sync_enabled = False
 
 
 def start_ransomware_sync_dispatch(
     interval_seconds: int = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS,
     limit: int = DEFAULT_RANSOMWARE_SYNC_LIMIT,
 ) -> dict[str, Any]:
-    if not get_ransomware_live_api_key():
-        raise RuntimeError("RANSOMWARE_LIVE_API_KEY is not set")
-    sync_config = set_ransomware_live_sync_config(
-        enabled=True,
-        interval_seconds=interval_seconds,
-        limit=limit,
-    )
-    from darkweb_collector.tasks import enqueue_ransomware_live_sync
-
-    job_id = enqueue_ransomware_live_sync(limit=int(sync_config["limit"]), force=True)
+    global _ransomware_sync_enabled
+    global _ransomware_sync_started_at
+    global _ransomware_sync_stop_event
+    global _ransomware_sync_thread
+    global _ransomware_sync_interval_seconds
+    global _ransomware_sync_limit
+    if interval_seconds <= 0:
+        interval_seconds = DEFAULT_RANSOMWARE_SYNC_INTERVAL_SECONDS
+    with _ransomware_sync_lock:
+        if _ransomware_sync_enabled and _ransomware_sync_thread and _ransomware_sync_thread.is_alive():
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 自动同步已在运行",
+            }
+        stop_event = Event()
+        thread = Thread(target=_ransomware_sync_loop, args=(stop_event,), daemon=True)
+        _ransomware_sync_enabled = True
+        _ransomware_sync_started_at = utc_now_iso()
+        _ransomware_sync_interval_seconds = interval_seconds
+        _ransomware_sync_limit = limit
+        _ransomware_sync_stop_event = stop_event
+        _ransomware_sync_thread = thread
+        thread.start()
     return {
         **get_ransomware_sync_status(),
         "message": "已开始 ransomware.live 自动同步",
-        "job_id": job_id or "",
     }
 
 
 def stop_ransomware_sync_dispatch() -> dict[str, Any]:
-    sync_config = get_ransomware_live_sync_config()
-    if not sync_config["enabled"]:
-        return {
-            **get_ransomware_sync_status(),
-            "message": "ransomware.live 自动同步当前未开启",
-        }
-    set_ransomware_live_sync_config(
-        enabled=False,
-        interval_seconds=int(sync_config["interval_seconds"]),
-        limit=int(sync_config["limit"]),
-    )
+    global _ransomware_sync_enabled
+    with _ransomware_sync_lock:
+        if not _ransomware_sync_enabled or _ransomware_sync_stop_event is None:
+            return {
+                **get_ransomware_sync_status(),
+                "message": "ransomware.live 自动同步当前未运行",
+            }
+        _ransomware_sync_stop_event.set()
+        _ransomware_sync_enabled = False
     return {
         **get_ransomware_sync_status(),
-        "message": "已停止 ransomware.live 后续自动同步；正在执行的任务不会被强制中断",
+        "message": "已停止 ransomware.live 自动同步",
     }
 
 
 def get_ransomware_sync_status() -> dict[str, Any]:
-    sync_config = get_ransomware_live_sync_config()
-    snapshot = get_ransomware_live_sync_status_snapshot()
+    thread_alive = bool(_ransomware_sync_thread and _ransomware_sync_thread.is_alive())
     with get_db_connection() as connection:
         sync_state = get_ransomware_live_sync_state(connection)
-        active_job = get_active_crawl_job(connection, "ransomware_live", "ransomware_sync")
-        latest_job = get_latest_crawl_job(connection, "ransomware_live", "ransomware_sync")
-        latest_success = get_last_successful_crawl_job(connection, "ransomware_live", "ransomware_sync")
-
-    latest_status = str((latest_job or {}).get("status") or "")
-    last_error = str(snapshot.get("last_error") or "")
-    if latest_status == "failed":
-        last_error = str((latest_job or {}).get("error_message") or last_error)
-    elif latest_status == "succeeded":
-        last_error = ""
+    last_error = _ransomware_sync_last_error
     if get_ransomware_live_api_key() and "RANSOMWARE_LIVE_API_KEY" in last_error and "not set" in last_error.lower():
         last_error = ""
-    last_tick_at = str(
-        (active_job or {}).get("started_at")
-        or (active_job or {}).get("enqueued_at")
-        or snapshot.get("last_tick_at")
-        or (latest_job or {}).get("started_at")
-        or (latest_job or {}).get("enqueued_at")
-        or ""
-    )
-    last_success_at = str((latest_success or {}).get("finished_at") or snapshot.get("last_success_at") or "")
     return {
-        "enabled": bool(sync_config["enabled"]),
-        "running": bool(active_job and active_job.get("status") == "running"),
-        "pending": bool(active_job and active_job.get("status") == "enqueued"),
-        "started_at": str(sync_config.get("started_at") or ""),
-        "last_tick_at": last_tick_at,
-        "last_success_at": last_success_at,
+        "enabled": bool(_ransomware_sync_enabled and thread_alive),
+        "running": bool(_ransomware_sync_running),
+        "started_at": _ransomware_sync_started_at,
+        "last_tick_at": _ransomware_sync_last_tick_at,
+        "last_success_at": _ransomware_sync_last_success_at,
         "last_error": last_error,
-        "last_source": str(snapshot.get("last_source") or ""),
-        "last_fetched": int(snapshot.get("last_fetched") or 0),
-        "last_ingested": int(snapshot.get("last_ingested") or 0),
-        "last_new": int(snapshot.get("last_new") or 0),
-        "last_updated": int(snapshot.get("last_updated") or 0),
-        "last_unchanged": int(snapshot.get("last_unchanged") or 0),
-        "interval_seconds": int(sync_config["interval_seconds"]),
-        "limit": int(sync_config["limit"]),
-        "last_job_id": str((latest_job or {}).get("job_id") or snapshot.get("last_job_id") or ""),
-        "last_job_status": latest_status,
+        "last_source": _ransomware_sync_last_source,
+        "last_ingested": _ransomware_sync_last_ingested,
+        "interval_seconds": _ransomware_sync_interval_seconds,
+        "limit": _ransomware_sync_limit,
         "record_count": int(sync_state.get("count") or 0),
         "latest_disclosure_time": str(sync_state.get("latest_disclosure_time") or ""),
     }
+
+
+def _remaining_interval_seconds(interval_seconds: int, loop_started_at: float) -> float:
+    elapsed_seconds = max(0.0, time.monotonic() - loop_started_at)
+    return max(0.0, float(interval_seconds) - elapsed_seconds)
+
+
+def _is_sqlite_locked_error(exc: Exception) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 def _run_code_monitoring_once() -> dict[str, Any]:
@@ -926,11 +665,6 @@ def _code_monitoring_task_snapshot(
     hit_count: int = 0,
     clue_hit_count: int = 0,
     sensitive_hit_count: int = 0,
-    new_primary_hit_count: int = 0,
-    new_suppressed_hit_count: int = 0,
-    updated_hit_count: int = 0,
-    new_sensitive_hit_count: int = 0,
-    new_clue_hit_count: int = 0,
     stop_event: Event | None = None,
     thread: Thread | None = None,
 ) -> dict[str, Any]:
@@ -947,11 +681,6 @@ def _code_monitoring_task_snapshot(
         "hit_count": int(hit_count or 0),
         "clue_hit_count": int(clue_hit_count or 0),
         "sensitive_hit_count": int(sensitive_hit_count or 0),
-        "new_primary_hit_count": int(new_primary_hit_count or 0),
-        "new_suppressed_hit_count": int(new_suppressed_hit_count or 0),
-        "updated_hit_count": int(updated_hit_count or 0),
-        "new_sensitive_hit_count": int(new_sensitive_hit_count or 0),
-        "new_clue_hit_count": int(new_clue_hit_count or 0),
         "target_watchlist_id": int(watchlist_id or 0),
         "target_watchlist_name": watchlist_name,
         "stop_event": stop_event,
@@ -986,15 +715,9 @@ def _code_monitoring_task_status_payload(watchlist_id: int, task: dict[str, Any]
         "hit_count": int(task.get("hit_count") or 0),
         "clue_hit_count": int(task.get("clue_hit_count") or 0),
         "sensitive_hit_count": int(task.get("sensitive_hit_count") or 0),
-        "new_primary_hit_count": int(task.get("new_primary_hit_count") or 0),
-        "new_suppressed_hit_count": int(task.get("new_suppressed_hit_count") or 0),
-        "updated_hit_count": int(task.get("updated_hit_count") or 0),
-        "new_sensitive_hit_count": int(task.get("new_sensitive_hit_count") or 0),
-        "new_clue_hit_count": int(task.get("new_clue_hit_count") or 0),
         "target_watchlist_id": int(task.get("target_watchlist_id") or 0),
         "target_watchlist_name": str(task.get("target_watchlist_name") or ""),
         "active_watchlist_count": _active_code_monitoring_task_count(),
-        "github_search": github_code_search_status_payload(),
     }
 
 
@@ -1003,11 +726,6 @@ def _positive_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _remaining_interval_seconds(interval_seconds: int, loop_started_at: float) -> float:
-    elapsed_seconds = max(0.0, time.monotonic() - loop_started_at)
-    return max(0.0, float(interval_seconds) - elapsed_seconds)
 
 
 def _code_monitoring_continuous_scan_options(watchlist: dict[str, Any]) -> dict[str, Any]:
@@ -1057,11 +775,6 @@ def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[st
             "hit_count": 0,
             "clue_hit_count": 0,
             "sensitive_hit_count": 0,
-            "new_primary_hit_count": 0,
-            "new_suppressed_hit_count": 0,
-            "updated_hit_count": 0,
-            "new_sensitive_hit_count": 0,
-            "new_clue_hit_count": 0,
             "errors": [],
             "results": [],
         }
@@ -1082,11 +795,6 @@ def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[st
                 aggregate["hit_count"] += int(result.get("hits") or 0)
                 aggregate["clue_hit_count"] += int(result.get("clue_hits") or 0)
                 aggregate["sensitive_hit_count"] += int(result.get("sensitive_hits") or 0)
-                aggregate["new_primary_hit_count"] += int(result.get("new_primary_hit_count") or 0)
-                aggregate["new_suppressed_hit_count"] += int(result.get("new_suppressed_hit_count") or 0)
-                aggregate["updated_hit_count"] += int(result.get("updated_hit_count") or 0)
-                aggregate["new_sensitive_hit_count"] += int(result.get("new_sensitive_hit_count") or 0)
-                aggregate["new_clue_hit_count"] += int(result.get("new_clue_hit_count") or 0)
                 aggregate["errors"].extend(result.get("errors") or [])
                 aggregate["results"].append(result)
             except Exception as exc:
@@ -1108,11 +816,6 @@ def _run_code_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict[st
                     "hit_count": aggregate["hit_count"],
                     "clue_hit_count": aggregate["clue_hit_count"],
                     "sensitive_hit_count": aggregate["sensitive_hit_count"],
-                    "new_primary_hit_count": aggregate["new_primary_hit_count"],
-                    "new_suppressed_hit_count": aggregate["new_suppressed_hit_count"],
-                    "updated_hit_count": aggregate["updated_hit_count"],
-                    "new_sensitive_hit_count": aggregate["new_sensitive_hit_count"],
-                    "new_clue_hit_count": aggregate["new_clue_hit_count"],
                 }
             else:
                 _code_monitoring_last_success_at = utc_now_iso()
@@ -1176,8 +879,11 @@ def _code_monitoring_loop(watchlist_id: int, stop_event: Event) -> None:
         loop_started_at = time.monotonic()
         try:
             _run_code_monitoring_once_for_watchlist(watchlist_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            if _is_sqlite_locked_error(exc):
+                if stop_event.wait(DEFAULT_CODE_MONITORING_LOCK_RETRY_SECONDS):
+                    break
+                continue
         with _code_monitoring_lock:
             task = _code_monitoring_tasks.get(watchlist_id) or {}
             interval_seconds = int(task.get("interval_seconds") or DEFAULT_CODE_MONITORING_INTERVAL_SECONDS)
@@ -1280,8 +986,6 @@ def get_code_monitoring_continuous_status(*, watchlist_id: int | None = None) ->
             payload["target_watchlist_name"] = task.get("target_watchlist_name") or "多个监测对象"
             return payload
     return _code_monitoring_task_status_payload(0)
-
-
 def _run_netdisk_monitoring_once() -> dict[str, Any]:
     return _run_netdisk_monitoring_once_for_watchlist(None)
 
@@ -1424,6 +1128,8 @@ def _run_netdisk_monitoring_once_for_watchlist(watchlist_id: int | None) -> dict
                 result = scan_watchlist_once(
                     int(watchlist["id"]),
                     source_families=["netdisk_aggregator"],
+                    file_types=list(watchlist.get("file_types") or []),
+                    detail_fetch=False,
                 )
                 errors = list(result.get("errors") or [])
                 aggregate["candidate_count"] += int(result.get("candidates") or 0)

@@ -27,13 +27,14 @@
     <div class="app-stage">
       <header class="app-header" data-od-id="settings-header">
         <button class="btn btn-secondary icon-btn menu-button" data-sidebar-toggle aria-label="打开导航"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-        <div class="header-actions"><span class="app-version" data-od-id="settings-version">版本 <strong>v20260901.1.0</strong></span><button class="avatar" type="button" aria-label="个人账户" data-od-id="settings-account"></button></div>
+        <div class="header-actions"><span class="app-version" data-od-id="settings-version">版本 <strong>v0.20.0</strong></span><button class="avatar" type="button" aria-label="个人账户" data-od-id="settings-account"></button></div>
       </header>
 
-      <main class="app-main settings-main" id="content" data-collector-surface data-needs-code-config data-needs-watchlist-notifications data-od-id="settings-main">
+      <main class="app-main settings-main" id="content" data-collector-surface data-needs-bot data-needs-code-config data-od-id="settings-main">
         <section class="section settings-nav-section" data-od-id="settings-navigation">
           <div class="tabs settings-tabs" data-panels="settings" role="tablist" aria-label="配置类型">
             <button class="tab active" data-tab="objects" role="tab" aria-selected="true" data-od-id="settings-tab-objects"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="m10.5 9.5 3 5M16 5v5m-2.5-2.5h5"/></svg><span>监测对象</span></button>
+            <button class="tab" data-tab="access" role="tab" aria-selected="false" data-od-id="settings-tab-access"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12h8m-6-4V5m4 3V5M7 12v2a5 5 0 0 0 10 0v-2M12 19v2"/></svg><span>平台接入</span></button>
             <button class="tab" data-tab="rules" role="tab" aria-selected="false" data-od-id="settings-tab-rules"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 6v6c0 5-3.1 8.1-8 10-4.9-1.9-8-5-8-10V6l8-3Z"/><path d="M9 12h6m-3-3v6"/></svg><span>敏感规则</span></button>
             <button class="tab" data-tab="notifications" role="tab" aria-selected="false" data-od-id="settings-tab-notifications"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 8h18c0-1-3-1-3-8M10 21h4"/></svg><span>通知通道</span></button>
           </div>
@@ -96,10 +97,63 @@
           </div>
         </section>
 
+        <section class="section settings-panel-section" data-od-id="settings-access" data-panel-group="settings" data-panel="access" hidden>
+          <div class="settings-ops-stack">
+            <article class="settings-surface" data-od-id="github-app-access">
+              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M8 18c-4.5 1.4-4.5-2.5-6-3m12 6v-3.5c0-1 .1-1.5-.5-2 2.8-.3 5.7-1.4 5.7-6.2A4.8 4.8 0 0 0 18 6c.1-.3.5-1.6-.1-3.2 0 0-1-.3-3.4 1.3A11.8 11.8 0 0 0 8.3 4C5.9 2.5 4.9 2.8 4.9 2.8 4.3 4.4 4.7 5.7 4.8 6a4.8 4.8 0 0 0-1.3 3.3c0 4.8 2.9 5.9 5.7 6.2-.5.4-.6 1-.6 2V21"/></svg></span><div><h2>GitHub App API 认证</h2><p>管理员配置；私钥只允许录入，不在页面回显</p></div></div><div class="settings-actions"><span class="badge" data-bind="github-app-status">未配置</span><button class="btn btn-secondary" data-code-action="github-refresh">刷新状态</button></div></header>
+              <div class="access-overview"><div><span>App ID</span><strong class="num" data-bind="github-app-id">—</strong></div><div><span>Installation ID</span><strong class="num" data-bind="github-installation-id">—</strong></div><div><span>最近验证</span><strong class="num" data-bind="github-last-validated">—</strong></div><div><span>令牌到期</span><strong class="num" data-bind="github-token-expires">—</strong></div></div>
+              <div class="settings-error-line" data-bind="github-last-error" hidden></div>
+              <div class="github-app-form"><div class="settings-form-grid settings-form-grid-2"><label class="field"><span>App ID</span><input class="input" id="github-app-id" inputmode="numeric" autocomplete="off" placeholder="输入正整数 App ID"></label><label class="field"><span>Installation ID</span><input class="input" id="github-installation-id" inputmode="numeric" autocomplete="off" placeholder="输入正整数 Installation ID"></label></div><label class="field"><span>PEM 私钥</span><textarea class="textarea github-private-key" id="github-private-key" autocomplete="off" placeholder="粘贴完整 GitHub App PEM 私钥；已配置时留空将保留现有私钥"></textarea></label></div>
+              <footer class="settings-surface-foot"><p>保存后会立即验证安装状态并签发令牌，私钥不会写入前端文件或 Git 仓库。</p><div class="settings-actions"><button class="btn btn-danger" data-code-action="github-delete">删除配置</button><button class="btn btn-primary" data-code-action="github-save">保存并验证</button></div></footer>
+            </article>
+
+            <article class="settings-surface" data-od-id="code-platform-sessions">
+              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7M17 9v6"/></svg></span><div><h2>代码平台会话</h2><p>GitHub、GitLab 与 Gitee 会话独立校验，不共用状态</p></div></div><button class="btn btn-primary" data-code-action="sessions-detect">自动检测会话</button></header>
+              <div class="session-grid" role="table" aria-label="代码平台会话状态">
+                <div class="session-grid-head" role="row"><span>平台</span><span>状态</span><span>账号标签</span><span>最近校验</span><span>最近错误</span><span>操作</span></div>
+                <article class="session-grid-row" role="row" data-code-session-platform="github"><div class="platform-name"><span class="platform-mark">GH</span><strong>GitHub</strong></div><span class="session-state status-missing" data-session-status>未配置</span><input class="input" data-session-account placeholder="账号标签"><span class="num" data-session-verified>—</span><span class="session-error" data-session-error>—</span><div class="session-actions"><button class="btn btn-secondary" data-code-action="session-login" data-platform="github">登录</button><button class="btn btn-secondary" data-code-action="session-save" data-platform="github">保存</button><button class="btn btn-ghost" data-code-action="session-delete" data-platform="github">删除</button></div></article>
+                <article class="session-grid-row" role="row" data-code-session-platform="gitlab"><div class="platform-name"><span class="platform-mark">GL</span><strong>GitLab</strong></div><span class="session-state status-missing" data-session-status>未配置</span><input class="input" data-session-account placeholder="账号标签"><span class="num" data-session-verified>—</span><span class="session-error" data-session-error>—</span><div class="session-actions"><button class="btn btn-secondary" data-code-action="session-login" data-platform="gitlab">登录</button><button class="btn btn-secondary" data-code-action="session-save" data-platform="gitlab">保存</button><button class="btn btn-ghost" data-code-action="session-delete" data-platform="gitlab">删除</button></div></article>
+                <article class="session-grid-row" role="row" data-code-session-platform="gitee"><div class="platform-name"><span class="platform-mark">GE</span><strong>Gitee</strong></div><span class="session-state status-missing" data-session-status>未配置</span><input class="input" data-session-account placeholder="账号标签"><span class="num" data-session-verified>—</span><span class="session-error" data-session-error>—</span><div class="session-actions"><button class="btn btn-secondary" data-code-action="session-login" data-platform="gitee">登录</button><button class="btn btn-secondary" data-code-action="session-save" data-platform="gitee">保存</button><button class="btn btn-ghost" data-code-action="session-delete" data-platform="gitee">删除</button></div></article>
+              </div>
+            </article>
+
+            <article class="settings-surface exposure-access-surface" data-settings-module-card="netdisk" data-od-id="netdisk-source-access">
+              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16v12H4zM8 10h8M8 14h5"/></svg></span><div><h2>网盘来源接入</h2><p>来源目录与采集策略在此维护，健康度与分页游标前往站点管理查看</p></div></div><a class="btn btn-secondary" href="collector-sites.html?module=netdisk">查看运行健康</a></header>
+              <div class="source-access-table" role="table" aria-label="网盘来源接入">
+                <div class="source-access-head" role="row"><span>来源</span><span>入口</span><span>采集方式</span><span>对象范围</span><span>启用</span></div>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/baidu-netdisk.png" alt="百度网盘"><strong>百度网盘</strong></div><span class="source-domain">pan.baidu.com</span><span>搜索 + 详情</span><span>跟随当前对象</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用百度网盘</span></label></article>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/alipan.png" alt="阿里云盘"><strong>阿里云盘</strong></div><span class="source-domain">aliyundrive.com</span><span>公开检索</span><span>跟随当前对象</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用阿里云盘</span></label></article>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/quark.png" alt="夸克网盘"><strong>夸克网盘</strong></div><span class="source-domain">pan.quark.cn</span><span>公开检索</span><span>跟随当前对象</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用夸克网盘</span></label></article>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/onedrive.png" alt="OneDrive"><strong>OneDrive</strong></div><span class="source-domain">onedrive.live.com</span><span>公开检索</span><span>跟随当前对象</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用 OneDrive</span></label></article>
+              </div>
+            </article>
+
+            <article class="settings-surface exposure-access-surface" data-settings-module-card="library" data-od-id="library-source-access">
+              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h11l3 3v13H5zM15 4v4h4M8 12h8M8 16h6"/></svg></span><div><h2>文库来源接入</h2><p>来源开关与会话分开维护，避免把采集运行状态混入配置页</p></div></div><a class="btn btn-secondary" href="collector-sites.html?module=library">查看运行健康</a></header>
+              <div class="source-access-table" role="table" aria-label="文库来源接入">
+                <div class="source-access-head" role="row"><span>来源</span><span>入口</span><span>鉴权</span><span>采集方式</span><span>启用</span></div>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/baidu-wenku.svg" alt="百度文库"><strong>百度文库</strong></div><span class="source-domain">wenku.baidu.com</span><span>可选会话</span><span>搜索 + 详情</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用百度文库</span></label></article>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/doc88.png" alt="道客巴巴"><strong>道客巴巴</strong></div><span class="source-domain">doc88.com</span><span>公开</span><span>公开检索</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用道客巴巴</span></label></article>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/docin.png" alt="豆丁网"><strong>豆丁网</strong></div><span class="source-domain">docin.com</span><span>公开</span><span>公开检索</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用豆丁网</span></label></article>
+                <article class="source-access-row" role="row"><div class="source-platform"><img src="assets/logos/csdn.png" alt="CSDN 文库"><strong>CSDN 文库</strong></div><span class="source-domain">download.csdn.net</span><span>会话</span><span>搜索 + 详情</span><label class="switch-control compact-switch"><input type="checkbox" checked><span class="switch-track" aria-hidden="true"></span><span class="sr-only">启用 CSDN 文库</span></label></article>
+              </div>
+            </article>
+
+            <article class="settings-surface exposure-access-surface" data-settings-module-card="library" data-od-id="library-platform-sessions">
+              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7M17 9v6"/></svg></span><div><h2>文库平台会话</h2><p>会话按来源独立保存与校验，不与代码平台共享凭据</p></div></div><button class="btn btn-secondary" type="button" data-exposure-action="session-detect">检测文库会话</button></header>
+              <div class="document-session-grid" role="table" aria-label="文库平台会话状态">
+                <div class="document-session-head" role="row"><span>来源</span><span>状态</span><span>账号标签</span><span>最近校验</span><span>操作</span></div>
+                <article class="document-session-row" role="row"><div class="source-platform"><img src="assets/logos/baidu-wenku.svg" alt="百度文库"><strong>百度文库</strong></div><span class="session-state status-missing">未配置</span><input class="input" placeholder="账号标签"><span class="num">—</span><div class="session-actions"><button class="btn btn-secondary" type="button" data-exposure-action="session-login">登录</button><button class="btn btn-ghost" type="button" data-exposure-action="session-save">保存</button></div></article>
+                <article class="document-session-row" role="row"><div class="source-platform"><img src="assets/logos/csdn.png" alt="CSDN 文库"><strong>CSDN 文库</strong></div><span class="session-state status-missing">未配置</span><input class="input" placeholder="账号标签"><span class="num">—</span><div class="session-actions"><button class="btn btn-secondary" type="button" data-exposure-action="session-login">登录</button><button class="btn btn-ghost" type="button" data-exposure-action="session-save">保存</button></div></article>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section class="section settings-panel-section" data-od-id="settings-rules" data-panel-group="settings" data-panel="rules" hidden>
           <div class="settings-ops-stack">
-            <article class="settings-surface code-monitoring-surface" data-watchlist-scoped data-od-id="code-monitoring-config">
-              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/><path d="m16 16 4 4M20 16l-4 4"/></svg></span><div><h2>当前对象的代码监测配置</h2><p>敏感规则、扫描策略和附加检索词均按监测对象独立保存</p></div></div><div class="settings-actions"><span class="scope-badge">作用范围：当前监测对象 — <strong data-bind="current-watchlist-scope">未选择</strong></span><button class="btn btn-primary" data-code-action="watchlist-save">保存代码配置</button></div></header>
+            <article class="settings-surface code-monitoring-surface" data-od-id="code-monitoring-config">
+              <header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v14H4zM8 9h8M8 13h5"/><path d="m16 16 4 4M20 16l-4 4"/></svg></span><div><h2>代码监测配置</h2><p>统一维护当前对象的敏感规则、扫描策略和检索词</p></div></div><button class="btn btn-primary" data-code-action="watchlist-save">保存代码配置</button></header>
               <div class="code-config-toolbar">
                 <label class="field"><span>监测对象</span><select class="select" id="code-term-watchlist"><option value="">请选择监测对象</option></select></label>
                 <p>以下配置均随当前对象保存，切换对象会同步刷新全部内容。</p>
@@ -141,33 +195,17 @@ java</textarea></label>
               </section>
 
               <section class="code-config-section" data-od-id="code-search-terms">
-                <header class="code-config-section-head"><div><h3>附加代码检索词</h3><p>企业画像会自动生成企业名称、品牌、英文简称、根域名和内部系统搜索词；这里只补充项目、产品或特殊词</p></div><div class="settings-actions"><button class="btn btn-secondary" data-code-action="term-template">下载模板</button><button class="btn btn-secondary" data-code-action="term-import">导入模板</button><button class="btn btn-primary" data-code-action="term-add">新增附加词</button><input id="code-term-import" type="file" accept=".xlsx,.xls" hidden></div></header>
-                <div class="derived-term-strip"><span>企业画像自动生成 <strong class="num" data-bind="derived-code-term-count">0</strong> 条搜索词</span><div data-derived-code-terms>保存监测对象后显示自动生成词。</div></div>
+                <header class="code-config-section-head"><div><h3>代码检索词</h3><p>用于在 GitHub、GitLab 与 Gitee 定位仓库和文件</p></div><div class="settings-actions"><button class="btn btn-secondary" data-code-action="term-template">下载模板</button><button class="btn btn-secondary" data-code-action="term-import">导入模板</button><button class="btn btn-primary" data-code-action="term-add">新增检索词</button><input id="code-term-import" type="file" accept=".xlsx,.xls" hidden></div></header>
                 <div class="code-term-toolbar">
                   <label class="field"><span>词条类型</span><select class="select" data-filter-target="code-term-table" data-filter-key="type"><option value="">全部类型</option><option value="company_name">企业名称</option><option value="domain">域名</option><option value="project_name">项目名称</option><option value="product_name">产品名称</option><option value="custom">自定义</option></select></label>
                   <label class="field"><span>启用状态</span><select class="select" data-filter-target="code-term-table" data-filter-key="state"><option value="">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select></label>
                   <label class="field code-term-search"><span>搜索词条</span><input class="input" data-table-search="code-term-table" placeholder="输入检索词"></label>
                 </div>
                 <div class="table-wrap settings-table-wrap"><table class="ds-table code-term-table" id="code-term-table" data-table><thead><tr><th>检索词</th><th>类型</th><th>状态</th><th>最近修改</th><th>操作</th></tr></thead><tbody id="code-term-list"></tbody></table></div>
-                <div class="settings-table-empty" data-table-empty="code-term-table">暂无附加代码检索词；企业画像自动生成词已在上方展示。</div>
+                <div class="settings-table-empty" data-table-empty="code-term-table">请选择监测对象，或新增第一条代码检索词。</div>
                 <div class="term-import-summary" data-code-import-summary role="status" hidden></div>
                 <footer class="settings-surface-foot"><p>Excel 导入会自动去重，并分别报告新增、跳过和格式错误行；修改后统一保存代码配置。</p></footer>
               </section>
-            </article>
-
-            <article class="settings-surface monitoring-keyword-surface" data-watchlist-scoped data-od-id="monitoring-keyword-rules">
-              <header class="settings-surface-head">
-                <div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 6h14M5 12h9M5 18h6"/><circle cx="18" cy="17" r="3"/><path d="m20.2 19.2 1.8 1.8"/></svg></span><div><h2>当前对象的情报监控关键词</h2><p>只用于当前监测对象的勒索、数据泄露和漏洞预警命中</p></div></div>
-                <div class="settings-actions"><button class="btn btn-secondary" data-code-action="monitoring-keyword-refresh">刷新</button><button class="btn btn-secondary" data-code-action="monitoring-keyword-add">新增词条</button><button class="btn btn-primary" data-code-action="monitoring-keyword-save">保存规则</button></div>
-              </header>
-              <div class="monitoring-keyword-summary">
-                <div><span>规则总数</span><strong class="num" data-bind="monitoring-keyword-total">0</strong></div>
-                <div><span>已启用</span><strong class="num" data-bind="monitoring-keyword-enabled">0</strong></div>
-                <p>作用范围：当前监测对象 — <strong data-bind="current-watchlist-scope">未选择</strong>；代码泄露推送仍以企业画像、附加代码检索词和主列表判定为准。</p>
-              </div>
-              <div class="table-wrap settings-table-wrap"><table class="ds-table monitoring-keyword-table"><thead><tr><th>关键词</th><th>分类</th><th>权重</th><th>匹配方式</th><th>状态</th><th>操作</th></tr></thead><tbody data-monitoring-keyword-list></tbody></table></div>
-              <div class="settings-table-empty" data-monitoring-keyword-empty>正在加载情报监控关键词…</div>
-              <footer class="settings-surface-foot"><p>规则保存后立即用于新入库的勒索、数据泄露和漏洞事件；不会补发历史事件。</p></footer>
             </article>
 
             <article class="settings-surface exposure-policy-surface" data-od-id="document-exposure-rules">
@@ -198,30 +236,15 @@ java</textarea></label>
         </section>
 
         <section class="section settings-panel-section" data-od-id="settings-notifications" data-panel-group="settings" data-panel="notifications" hidden>
-          <div class="settings-ops-stack">
-            <article class="settings-surface notification-object-scope" data-od-id="notification-object-scope"><header class="settings-surface-head"><div class="settings-heading"><span class="settings-section-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="m10.5 9.5 3 5"/></svg></span><div><h2>监测对象通知路由</h2><p>每个对象独立保存关键词、企业微信和钉钉配置，不会发送到其他对象的机器人</p></div></div><label class="field notification-object-select"><span>当前监测对象</span><select class="select" id="notification-watchlist-select"><option value="">请选择监测对象</option></select></label></header></article>
-
-            <article class="settings-ops-section settings-bot" data-watchlist-scoped data-od-id="settings-bot-notification">
-              <header class="settings-ops-head"><div><span>通知通道</span><h2>企业微信 Bot</h2></div><span class="badge" data-bind="bot-status">待配置</span></header>
-              <div class="settings-bot-channel">
-                <div class="bot-status-strip"><span>登记会话<strong class="num" data-bind="bot-target-count">0</strong></span><span>Secret<strong data-bind="bot-secret-status">未配置</strong></span></div>
-                <div class="settings-bot-form"><label class="field"><span>Bot ID</span><input class="input" id="bot-id" placeholder="输入企业微信 Bot ID" autocomplete="off"></label><label class="field"><span>Secret</span><input class="input" id="bot-secret" type="password" placeholder="输入 Bot Secret" autocomplete="new-password"></label></div>
-                <label class="switch-control"><input type="checkbox" id="watchlist-wechat-enabled"><span class="switch-track" aria-hidden="true"></span><span>仅为当前对象启用</span></label><div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="bot-save">保存配置</button><button class="btn btn-primary" data-collector-action="bot-test">发送测试</button><button class="btn btn-danger" data-collector-action="bot-delete">删除配置</button></div>
-              </div>
-              <p>作用范围：当前监测对象 — <strong data-bind="current-watchlist-scope">未选择</strong>；只推送该对象的事件和代码泄露主列表新命中。</p>
-            </article>
-
-            <article class="settings-ops-section settings-bot" data-watchlist-scoped data-od-id="settings-dingtalk-notification">
-              <header class="settings-ops-head"><div><span>通知通道</span><h2>钉钉自定义机器人</h2></div><span class="badge" data-bind="dingtalk-status">待配置</span></header>
-              <div class="settings-bot-channel">
-                <div class="bot-status-strip"><span>机器人数量<strong class="num" data-bind="dingtalk-endpoint-count">0</strong></span><span>加签机器人<strong class="num" data-bind="dingtalk-secret-count">0</strong></span></div>
-                <div class="settings-bot-form settings-dingtalk-form"><label class="field"><span>机器人名称</span><input class="input" id="dingtalk-name" placeholder="例如：安全运营群" autocomplete="off"></label><label class="field"><span>Webhook / access_token</span><input class="input" id="dingtalk-webhook" type="password" placeholder="输入新的钉钉机器人 Webhook 或 access_token" autocomplete="new-password"></label><label class="field"><span>加签 Secret</span><input class="input" id="dingtalk-secret" type="password" placeholder="启用加签时填写 Secret" autocomplete="new-password"></label></div>
-                <div class="settings-bot-actions settings-dingtalk-actions"><label class="switch-control"><input type="checkbox" id="watchlist-dingtalk-enabled"><span class="switch-track" aria-hidden="true"></span><span>为当前对象启用</span></label><button class="btn btn-secondary" data-collector-action="dingtalk-toggle-save">保存开关</button><button class="btn btn-primary" data-collector-action="dingtalk-save">添加机器人</button><button class="btn btn-ghost" data-collector-action="dingtalk-test">全部测试</button><button class="btn btn-danger" data-collector-action="dingtalk-delete">清空全部</button></div>
-              </div>
-              <div class="dingtalk-endpoint-list" id="dingtalk-endpoint-list"><p class="dingtalk-endpoint-empty">当前对象尚未配置钉钉机器人</p></div>
-              <p>作用范围：当前监测对象 — <strong data-bind="current-watchlist-scope">未选择</strong>；消息会推送到该对象全部已配置机器人，单个机器人失败不影响其他机器人。</p>
-            </article>
-          </div>
+          <article class="settings-ops-section settings-bot" data-od-id="settings-bot-notification">
+            <header class="settings-ops-head"><div><span>通知通道</span><h2>企业微信 Bot</h2></div><span class="badge" data-bind="bot-status">待配置</span></header>
+            <div class="settings-bot-channel">
+              <div class="bot-status-strip"><span>登记会话<strong class="num" data-bind="bot-target-count">0</strong></span><span>Secret<strong data-bind="bot-secret-status">未配置</strong></span></div>
+              <div class="settings-bot-form"><label class="field"><span>Bot ID</span><input class="input" id="bot-id" placeholder="输入企业微信 Bot ID" autocomplete="off"></label><label class="field"><span>Secret</span><input class="input" id="bot-secret" type="password" placeholder="输入 Bot Secret" autocomplete="new-password"></label></div>
+              <div class="settings-bot-actions"><button class="btn btn-secondary" data-collector-action="bot-save">保存配置</button><button class="btn btn-primary" data-collector-action="bot-test">发送测试</button></div>
+            </div>
+            <p>Bot 负责事件推送，不参与采集运行控制；持久配置集中保存在此处。</p>
+          </article>
         </section>
       </main>
     </div>

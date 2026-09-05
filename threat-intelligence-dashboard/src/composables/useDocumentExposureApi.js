@@ -112,20 +112,6 @@ export function useDocumentExposureApi() {
         limit: params.limit,
       })}`)
     },
-    loadHitsPage(params = {}) {
-      return requestJson(`/api/document-exposures/page${buildQuery({
-        watchlist_id: params.watchlistId,
-        review_status: params.reviewStatus,
-        platform: params.platform,
-        access_state: params.accessState,
-        source_family: params.sourceFamily,
-        severity: params.severity,
-        recent_hours: params.recentHours,
-        query: params.query,
-        offset: params.offset,
-        limit: params.limit,
-      })}`)
-    },
     loadHitDetail(hitId) {
       return requestJson(`/api/document-exposures/${hitId}`)
     },

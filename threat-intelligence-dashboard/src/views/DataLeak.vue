@@ -33,16 +33,16 @@
             </template>
           </EventTableToolbar>
 
-          <div class="ti-table-shell table-shell">
-            <el-table class="event-table" :data="pagedEvents" style="width: 100%" table-layout="fixed">
-              <el-table-column prop="disclosureDate" label="披露日期" :width="dataLeakDateColumnWidth" />
-              <el-table-column v-if="showDataLeakUpdatedColumn" prop="updatedTime" label="最近更新" :width="dataLeakUpdatedColumnWidth" />
-              <el-table-column prop="title" label="标题" :min-width="dataLeakTitleMinWidth" show-overflow-tooltip />
-              <el-table-column v-if="showDataLeakCategoryColumn" prop="category" label="事件分类" :width="dataLeakCategoryColumnWidth" />
-              <el-table-column prop="attacker" label="攻击者" :width="dataLeakAttackerColumnWidth" show-overflow-tooltip />
-              <el-table-column v-if="showDataLeakIndustryColumn" prop="industry" label="行业" :width="dataLeakIndustryColumnWidth" />
-              <el-table-column v-if="showDataLeakRegionColumn" prop="region" label="受害国家和地区" :min-width="dataLeakRegionMinWidth" show-overflow-tooltip />
-              <el-table-column label="查看" :width="dataLeakActionColumnWidth">
+          <div v-loading="eventsLoading" class="ti-table-shell table-shell">
+            <el-table class="event-table" :data="dataLeakEvents" style="width: 100%" table-layout="auto">
+              <el-table-column prop="disclosureDate" label="披露日期" width="140" />
+              <el-table-column prop="updatedTime" label="最近更新" width="170" />
+              <el-table-column prop="title" label="标题" min-width="420" show-overflow-tooltip />
+              <el-table-column prop="category" label="事件分类" width="150" />
+              <el-table-column prop="attacker" label="攻击者" width="160" show-overflow-tooltip />
+              <el-table-column prop="industry" label="行业" width="150" />
+              <el-table-column prop="region" label="受害国家和地区" min-width="220" show-overflow-tooltip />
+              <el-table-column label="查看" width="120" fixed="right">
                 <template #default="{ row }">
                   <el-button size="small" type="primary" @click="viewEventDetail(row)">查看</el-button>
                 </template>
@@ -51,12 +51,16 @@
           </div>
 
           <div class="table-footer">
-            <div class="table-footer__note">当前展示 {{ pagedEvents.length }} 条，事件分类与追踪渠道摘要模块已移除。</div>
+            <div v-if="eventsError" class="table-footer__note">{{ eventsError }}</div>
+            <div v-else class="table-footer__note">
+              当前页展示 {{ dataLeakEvents.length }} 条，共 {{ totalEvents }} 条。
+            </div>
             <el-pagination
               v-model:current-page="currentPage"
               v-model:page-size="pageSize"
               :page-sizes="[10, 20, 50, 100]"
-              :total="filteredEvents.length"
+              :total="totalEvents"
+              :disabled="eventsLoading"
               layout="total, sizes, prev, pager, next"
               background
             />
@@ -72,13 +76,16 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import EventTableToolbar from '@/components/common/EventTableToolbar.vue'
 import ModuleSummaryCard from '@/components/common/ModuleSummaryCard.vue'
-import { useIntelligenceData } from '@/composables/useIntelligenceData'
+import { normalizeEventItem } from '@/composables/useIntelligenceData'
 
 const DETAIL_CACHE_VERSION = '2026-04-09-rich-detail-v4'
 
-const { data, refresh: refreshIntelligence } = useIntelligenceData()
-const dataLeakEvents = computed(() => data.value.dataLeakEvents || [])
-const dataLeakSummary = computed(() => data.value.dataLeakSummary || [])
+const dataLeakEvents = ref([])
+const dataLeakSummary = ref([])
+const categoryOptions = ref([])
+const totalEvents = ref(0)
+const eventsLoading = ref(false)
+const eventsError = ref('')
 const route = useRoute()
 const router = useRouter()
 
@@ -86,53 +93,70 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const categoryFilter = ref('')
 const searchValue = ref('')
-const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const listStateKey = computed(() => `list-state:${route.path}`)
 let refreshTimer = null
+let requestTimer = null
+let requestController = null
+let pageReady = false
 
-const categoryOptions = computed(() => [...new Set(dataLeakEvents.value.map((item) => item.category))])
-const showDataLeakUpdatedColumn = computed(() => viewportWidth.value >= 1400)
-const showDataLeakCategoryColumn = computed(() => viewportWidth.value >= 1180)
-const showDataLeakIndustryColumn = computed(() => viewportWidth.value >= 1400)
-const showDataLeakRegionColumn = computed(() => viewportWidth.value >= 1680)
-const dataLeakDateColumnWidth = computed(() => viewportWidth.value < 1180 ? 104 : viewportWidth.value < 1500 ? 118 : 140)
-const dataLeakUpdatedColumnWidth = computed(() => viewportWidth.value < 1500 ? 128 : 150)
-const dataLeakTitleMinWidth = computed(() => viewportWidth.value < 1180 ? 180 : viewportWidth.value < 1500 ? 220 : 300)
-const dataLeakCategoryColumnWidth = computed(() => viewportWidth.value < 1500 ? 110 : 130)
-const dataLeakAttackerColumnWidth = computed(() => viewportWidth.value < 1500 ? 110 : 140)
-const dataLeakIndustryColumnWidth = computed(() => viewportWidth.value < 1500 ? 100 : 120)
-const dataLeakRegionMinWidth = computed(() => 180)
-const dataLeakActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 72 : 82)
+async function loadDataLeakPage() {
+  requestController?.abort()
+  const controller = new AbortController()
+  requestController = controller
+  eventsLoading.value = true
+  eventsError.value = ''
 
-function parseSortTime(value) {
-  if (!value) return Number.NEGATIVE_INFINITY
-  const normalized = String(value).trim().replace(' ', 'T')
-  const parsed = Date.parse(normalized)
-  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed
+  const params = new URLSearchParams({
+    page: String(currentPage.value),
+    page_size: String(pageSize.value),
+  })
+  if (categoryFilter.value) {
+    params.set('category', categoryFilter.value)
+  }
+  if (searchValue.value.trim()) {
+    params.set('keyword', searchValue.value.trim())
+  }
+
+  try {
+    const response = await fetch(`/api/data-leaks?${params.toString()}`, {
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status}`)
+    }
+    const payload = await response.json()
+    if (controller.signal.aborted) return
+
+    dataLeakEvents.value = Array.isArray(payload.items) ? payload.items.map(normalizeEventItem) : []
+    dataLeakSummary.value = Array.isArray(payload.summary) ? payload.summary : []
+    categoryOptions.value = Array.isArray(payload.categories) ? payload.categories : []
+    totalEvents.value = Number(payload.total) || 0
+
+    const responsePage = Number(payload.page) || 1
+    if (currentPage.value !== responsePage) {
+      currentPage.value = responsePage
+    }
+  } catch (requestError) {
+    if (requestError?.name !== 'AbortError') {
+      eventsError.value = `分页数据加载失败：${requestError.message}`
+    }
+  } finally {
+    if (requestController === controller) {
+      requestController = null
+      eventsLoading.value = false
+    }
+  }
 }
 
-const sortedEvents = computed(() => {
-  return [...dataLeakEvents.value].sort((left, right) => {
-    return parseSortTime(right.disclosureTimeRaw || right.disclosureTime || right.updatedTimeRaw || right.updatedTime) - parseSortTime(left.disclosureTimeRaw || left.disclosureTime || left.updatedTimeRaw || left.updatedTime)
-  })
-})
-
-const filteredEvents = computed(() => {
-  return sortedEvents.value.filter((item) => {
-    const matchesCategory = !categoryFilter.value || item.category === categoryFilter.value
-    const keyword = searchValue.value.trim().toLowerCase()
-    const matchesKeyword =
-      !keyword ||
-      [item.title, item.originalTitle, item.attacker, item.region].some((field) => String(field || '').toLowerCase().includes(keyword))
-
-    return matchesCategory && matchesKeyword
-  })
-})
-
-const pagedEvents = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredEvents.value.slice(start, start + pageSize.value)
-})
+function scheduleDataLeakPageLoad(delay = 250) {
+  if (requestTimer) {
+    window.clearTimeout(requestTimer)
+  }
+  requestTimer = window.setTimeout(() => {
+    requestTimer = null
+    loadDataLeakPage()
+  }, delay)
+}
 
 function viewEventDetail(row) {
   if (!row?.id) return
@@ -146,7 +170,7 @@ function viewEventDetail(row) {
     })
   )
   sessionStorage.setItem(`event-back:${row.id}`, '/data-leak')
-  router.push({ name: 'EventDetail', params: { eventId: row.id } })
+  router.push({ name: 'EventDetail', params: { eventId: row.id }, query: { module: 'data_leak' } })
 }
 
 const activeFilters = computed(() => {
@@ -163,24 +187,22 @@ const activeFilters = computed(() => {
   return filters
 })
 
-watch([filteredEvents, pageSize], () => {
-  const maxPage = Math.max(1, Math.ceil(filteredEvents.value.length / pageSize.value))
-  if (currentPage.value > maxPage) {
-    currentPage.value = maxPage
-  }
-  if (currentPage.value < 1) {
+watch([pageSize, categoryFilter, searchValue], () => {
+  if (!pageReady) return
+  if (currentPage.value !== 1) {
     currentPage.value = 1
+    return
+  }
+  scheduleDataLeakPageLoad()
+})
+
+watch(currentPage, () => {
+  if (pageReady) {
+    scheduleDataLeakPageLoad(0)
   }
 })
 
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth
-}
-
 onMounted(() => {
-  updateViewportWidth()
-  window.addEventListener('resize', updateViewportWidth)
-  refreshIntelligence()
   const raw = sessionStorage.getItem(listStateKey.value)
   if (raw) {
     try {
@@ -193,17 +215,23 @@ onMounted(() => {
       sessionStorage.removeItem(listStateKey.value)
     }
   }
-  refreshTimer = window.setInterval(() => {
-    refreshIntelligence()
-  }, 15000)
+
+  pageReady = true
+  loadDataLeakPage()
+  refreshTimer = window.setInterval(loadDataLeakPage, 15000)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', updateViewportWidth)
   if (refreshTimer) {
     window.clearInterval(refreshTimer)
     refreshTimer = null
   }
+  if (requestTimer) {
+    window.clearTimeout(requestTimer)
+    requestTimer = null
+  }
+  requestController?.abort()
+  requestController = null
 })
 </script>
 

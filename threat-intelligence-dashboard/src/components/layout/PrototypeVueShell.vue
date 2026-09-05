@@ -30,7 +30,7 @@
             </svg>
           </button>
           <div class="header-actions">
-            <span class="app-version">版本 <strong>v20260901.1.0</strong></span>
+            <span class="app-version">版本 <strong>v0.20.0</strong></span>
             <span class="avatar">个人</span>
           </div>
         </header>
@@ -51,6 +51,7 @@ import { useRouter } from 'vue-router'
 import { initializePrototype } from '@/prototype/runtime'
 import '@/prototype/styles.css'
 import '@/prototype/integration.css'
+import '@/prototype/overrides.css'
 
 const props = defineProps({
   pageClass: {

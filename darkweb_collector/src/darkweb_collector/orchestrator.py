@@ -7,20 +7,21 @@ import uuid
 from typing import Callable
 
 from darkweb_collector.adapters.registry import get_adapter
-from darkweb_collector.changan_auto_login import changan_auto_login_available, recover_changan_session
 from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.db import (
     get_active_crawl_job,
     get_db_connection,
     get_last_successful_crawl_job,
     list_crawl_jobs,
-    reconcile_stale_crawl_jobs,
     upsert_crawl_job,
 )
-from darkweb_collector.job_diagnostics import is_in_failure_cooldown
+from darkweb_collector.job_status import (
+    has_recent_running_job_in_queue,
+    is_active_job_blocking,
+    mark_stale_active_job,
+)
 from darkweb_collector.models import DetailTask, RunContext, SiteConfig
 from darkweb_collector.queueing import queue_for_detail, queue_for_seed
-from darkweb_collector.site_auth import SiteAuthenticationRequired, site_auth_readiness
 from darkweb_collector.state_store import StateStore
 from darkweb_collector.utils import utc_now_iso
 
@@ -41,27 +42,6 @@ def mark_job_running(job_id: str, site_name: str, job_type: str, queue_name: str
             target=target,
             status="running",
             started_at=started_at,
-        )
-        connection.commit()
-
-
-def mark_job_enqueued(
-    job_id: str,
-    site_name: str,
-    job_type: str,
-    queue_name: str,
-    target: str,
-) -> None:
-    with get_db_connection() as connection:
-        upsert_crawl_job(
-            connection,
-            job_id=job_id,
-            site_name=site_name,
-            job_type=job_type,
-            queue_name=queue_name,
-            target=target,
-            status="enqueued",
-            enqueued_at=utc_now_iso(),
         )
         connection.commit()
 
@@ -193,7 +173,7 @@ def execute_detail_job(
 
 
 def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Path | None = None) -> str:
-    queue_name = queue_for_detail(get_site_config(site_name, config_path))
+    queue_name = queue_for_detail(get_site_config(site_name, config_path).detail_fetch_mode)
     job_id = new_job_id("detail", site_name)
     mark_job_running(
         job_id=job_id,
@@ -211,19 +191,6 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
             job_id=job_id,
             config_path=config_path,
         )
-    except SiteAuthenticationRequired as exc:
-        duration_ms = int((time.perf_counter() - start_perf) * 1000)
-        mark_job_finished(
-            job_id=job_id,
-            site_name=site_name,
-            job_type="detail",
-            queue_name=queue_name,
-            target=detail_task.target_url,
-            status="skipped",
-            duration_ms=duration_ms,
-            error_message=str(exc),
-        )
-        return job_id
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
@@ -250,19 +217,14 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
     return job_id
 
 
-def run_site_once(
-    site_name: str,
-    config_path: Path | None = None,
-    state_store: StateStore | None = None,
-    job_id: str | None = None,
-) -> dict[str, object]:
+def run_site_once(site_name: str, config_path: Path | None = None, state_store: StateStore | None = None) -> dict[str, object]:
     from darkweb_collector.state_store import InMemoryStateStore
 
     config = get_site_config(site_name, config_path)
-    seed_queue = queue_for_seed(config)
-    selected_job_id = job_id or new_job_id("seed", site_name)
+    seed_queue = queue_for_seed(config.seed_fetch_mode)
+    job_id = new_job_id("seed", site_name)
     mark_job_running(
-        job_id=selected_job_id,
+        job_id=job_id,
         site_name=site_name,
         job_type="seed",
         queue_name=seed_queue,
@@ -281,34 +243,13 @@ def run_site_once(
             force=True,
             state_store=selected_state_store,
             detail_dispatcher=inline_dispatcher,
-            job_id=selected_job_id,
+            job_id=job_id,
             config_path=config_path,
         )
-    except SiteAuthenticationRequired as exc:
-        duration_ms = int((time.perf_counter() - start_perf) * 1000)
-        mark_job_finished(
-            job_id=selected_job_id,
-            site_name=site_name,
-            job_type="seed",
-            queue_name=seed_queue,
-            target=site_name,
-            status="skipped",
-            duration_ms=duration_ms,
-            error_message=str(exc),
-        )
-        return {
-            "site_name": site_name,
-            "seed_job_id": selected_job_id,
-            "detail_job_ids": [],
-            "detail_task_count": 0,
-            "detail_failed_count": 0,
-            "reason": "auth_required",
-            "auth_platform": exc.platform,
-        }
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
-            job_id=selected_job_id,
+            job_id=job_id,
             site_name=site_name,
             job_type="seed",
             queue_name=seed_queue,
@@ -321,7 +262,7 @@ def run_site_once(
 
     duration_ms = int((time.perf_counter() - start_perf) * 1000)
     mark_job_finished(
-        job_id=selected_job_id,
+        job_id=job_id,
         site_name=site_name,
         job_type="seed",
         queue_name=seed_queue,
@@ -338,46 +279,32 @@ def enqueue_due_sites(
     config_path: Path | None = None,
 ) -> list[dict[str, str]]:
     dispatched: list[dict[str, str]] = []
-    configs = load_site_configs(config_path)
-    for config in configs:
-        if not config.enabled:
-            continue
-        auth = site_auth_readiness(config)
-        if auth["ready"] or not changan_auto_login_available(config):
-            continue
-        recover_changan_session(config, str(auth.get("auth_message") or "session expired"))
-
     with get_db_connection() as connection:
-        reconcile_stale_crawl_jobs(connection)
-        for config in configs:
+        for config in load_site_configs(config_path):
             if not config.enabled:
                 continue
-            if not site_auth_readiness(config)["ready"]:
-                continue
-            if get_active_crawl_job(connection, site_name=config.site_name, job_type="seed"):
-                continue
-            rows = [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT status, started_at, finished_at
-                    FROM crawl_jobs
-                    WHERE site_name = ? AND job_type = 'seed'
-                    ORDER BY COALESCE(finished_at, started_at, enqueued_at) DESC
-                    LIMIT 20
-                    """,
-                    (config.site_name,),
-                ).fetchall()
-            ]
-            if is_in_failure_cooldown(config, rows):
-                continue
+            active_job = get_active_crawl_job(connection, site_name=config.site_name, job_type="seed")
+            if active_job:
+                queue_has_recent_running = has_recent_running_job_in_queue(
+                    connection,
+                    str(active_job.get("queue_name") or ""),
+                    exclude_job_id=str(active_job.get("job_id") or ""),
+                )
+                if is_active_job_blocking(active_job, queue_has_recent_running=queue_has_recent_running):
+                    continue
+                mark_stale_active_job(
+                    connection,
+                    site_name=config.site_name,
+                    job_type="seed",
+                    active_job=active_job,
+                )
             last_success = get_last_successful_crawl_job(connection, site_name=config.site_name, job_type="seed")
             last_finished = last_success["finished_at"] if last_success else None
             if not is_site_due(config, last_finished):
                 continue
             if not state_store.claim_seed_slot(config.site_name, max(config.effective_interval_seconds, 300)):
                 continue
-            queue_name = queue_for_seed(config)
+            queue_name = queue_for_seed(config.seed_fetch_mode)
             job_id = seed_dispatcher(config)
             if not job_id:
                 continue

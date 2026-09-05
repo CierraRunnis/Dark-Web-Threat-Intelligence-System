@@ -98,7 +98,7 @@ function normalizeIndustryName(industry) {
   return INDUSTRY_NAME_OVERRIDES[value] || INDUSTRY_NAME_OVERRIDES[value.toLowerCase()] || value
 }
 
-function normalizeEventItem(item) {
+export function normalizeEventItem(item) {
   if (!item || typeof item !== "object") return item
   const countryNormalized = normalizeCountryItem(item)
   return {
@@ -131,7 +131,7 @@ function rebuildExecutiveCountries(dataLeakEvents, ransomwareEvents) {
     .slice(0, 10)
 }
 
-function normalizePayloadCountries(payload) {
+export function normalizePayloadCountries(payload) {
   if (!payload || typeof payload !== 'object') return payload
 
   const dataLeakEvents = Array.isArray(payload.dataLeakEvents) ? payload.dataLeakEvents.map(normalizeEventItem) : payload.dataLeakEvents || []
@@ -208,6 +208,11 @@ async function loadIntelligenceData() {
     })
     .catch((requestError) => {
       error.value = requestError
+      console.warn('[useIntelligenceData] API 请求失败，回退到 mock 数据:', requestError.message)
+      
+      // 回退到 mock 数据，确保页面可以显示内容
+      intelligenceData.value = { ...fallbackData }
+      
       scheduleRetry()
       return intelligenceData.value
     })

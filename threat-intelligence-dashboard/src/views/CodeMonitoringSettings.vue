@@ -3,90 +3,6 @@
     <section class="content-grid">
       <div class="ti-card ti-reveal-up">
         <div class="ti-card-header">
-          <div class="ti-card-title">GitHub API 认证</div>
-          <div class="health-actions">
-            <span class="github-app-status" :class="githubAppStatus.className">
-              <span class="github-app-status__dot" />
-              {{ githubAppStatus.label }}
-            </span>
-            <el-button plain :loading="loadingGithubApp" @click="loadGithubAppConfig">刷新状态</el-button>
-          </div>
-        </div>
-        <div class="ti-card-body">
-          <div class="github-app-overview">
-            <div>
-              <span>App ID</span>
-              <strong>{{ githubAppConfig.appId || '-' }}</strong>
-            </div>
-            <div>
-              <span>Installation ID</span>
-              <strong>{{ githubAppConfig.installationId || '-' }}</strong>
-            </div>
-            <div>
-              <span>最近验证</span>
-              <strong>{{ formatDateTime(githubAppConfig.lastValidatedAt) || '-' }}</strong>
-            </div>
-            <div>
-              <span>令牌到期</span>
-              <strong>{{ formatDateTime(githubAppConfig.tokenExpiresAt) || '-' }}</strong>
-            </div>
-          </div>
-
-          <el-alert
-            v-if="githubAppConfig.lastError"
-            class="github-app-alert"
-            type="error"
-            :closable="false"
-            :title="githubAppConfig.lastError"
-            show-icon
-          />
-
-          <el-form label-position="top" class="github-app-form" @submit.prevent>
-            <div class="github-app-form__ids">
-              <el-form-item label="App ID">
-                <el-input v-model.trim="githubAppForm.appId" inputmode="numeric" autocomplete="off" />
-              </el-form-item>
-              <el-form-item label="Installation ID">
-                <el-input v-model.trim="githubAppForm.installationId" inputmode="numeric" autocomplete="off" />
-              </el-form-item>
-            </div>
-            <el-form-item :label="githubAppConfig.configured ? '私钥（留空保留现有私钥）' : '私钥'">
-              <el-input
-                v-model="githubAppForm.privateKey"
-                class="github-app-private-key"
-                type="textarea"
-                :rows="7"
-                resize="vertical"
-                autocomplete="off"
-                placeholder="粘贴完整的 GitHub App PEM 私钥"
-              />
-            </el-form-item>
-          </el-form>
-
-          <div class="github-app-footer">
-            <p class="panel-note">
-              保存时会立即验证 App 安装状态并签发令牌；私钥不会显示在页面或写入 Git 仓库。
-            </p>
-            <div class="github-app-actions">
-              <el-button
-                v-if="githubAppConfig.configured"
-                type="danger"
-                plain
-                :loading="deletingGithubApp"
-                @click="deleteGithubAppConfig"
-              >
-                删除配置
-              </el-button>
-              <el-button type="primary" :loading="savingGithubApp" @click="saveGithubAppConfig">
-                保存并验证
-              </el-button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="ti-card ti-reveal-up">
-        <div class="ti-card-header">
           <div class="ti-card-title">平台会话管理</div>
           <div class="health-actions">
             <el-button plain :loading="loadingSessions || detectingSessions" @click="refreshSessions">
@@ -96,9 +12,9 @@
         </div>
         <div class="ti-card-body">
           <div class="ti-table-shell">
-            <el-table :data="platformSessions" table-layout="fixed" style="width: 100%">
-              <el-table-column prop="label" label="平台" :min-width="sessionPlatformMinWidth" show-overflow-tooltip />
-              <el-table-column label="状态" :width="sessionStatusColumnWidth">
+            <el-table :data="platformSessions" table-layout="auto">
+              <el-table-column prop="label" label="平台" min-width="180" />
+              <el-table-column label="状态" width="140">
                 <template #default="{ row }">
                   <span class="session-status" :class="statusBadgeClass(row.status)">
                     <span class="session-status__dot" />
@@ -106,18 +22,18 @@
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSessionAccountColumn" prop="account_label" label="账号标签" :width="sessionAccountColumnWidth">
+              <el-table-column prop="account_label" label="账号标签" min-width="180">
                 <template #default="{ row }">
                   <el-input v-model="sessionDrafts[row.platform]" placeholder="账号标签" size="small" />
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSessionVerifiedColumn" prop="last_verified_at" label="最近校验" :width="sessionVerifiedColumnWidth">
+              <el-table-column prop="last_verified_at" label="最近校验" min-width="180">
                 <template #default="{ row }">
                   {{ formatDateTime(row.last_verified_at) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSessionErrorColumn" prop="last_error" label="最近错误" :min-width="sessionErrorMinWidth" show-overflow-tooltip />
-              <el-table-column label="操作" :width="sessionActionColumnWidth">
+              <el-table-column prop="last_error" label="最近错误" min-width="260" show-overflow-tooltip />
+              <el-table-column label="操作" min-width="260" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button
@@ -300,18 +216,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRouter } from 'vue-router'
 import { useCodeMonitoringApi } from '@/composables/useCodeMonitoringApi'
 import { formatShanghaiDateTime } from '@/composables/useShanghaiTime'
 
 const api = useCodeMonitoringApi()
-const router = useRouter()
 
-const loadingGithubApp = ref(false)
-const savingGithubApp = ref(false)
-const deletingGithubApp = ref(false)
 const loadingSessions = ref(false)
 const detectingSessions = ref(false)
 const loadingWatchlists = ref(false)
@@ -320,23 +231,9 @@ const importingTerms = ref(false)
 const platformSessions = ref([])
 const watchlists = ref([])
 const selectedWatchlistId = ref(null)
-const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const termImportInputRef = ref(null)
 const sessionDrafts = reactive({})
 const loginStarting = reactive({})
-const githubAppConfig = reactive({
-  configured: false,
-  appId: null,
-  installationId: null,
-  lastValidatedAt: '',
-  tokenExpiresAt: '',
-  lastError: '',
-})
-const githubAppForm = reactive({
-  appId: '',
-  installationId: '',
-  privateKey: '',
-})
 
 const fileExtensionOptions = ['env', 'yaml', 'yml', 'json', 'ini', 'conf', 'properties', 'py', 'js', 'ts', 'java']
 const ruleOptions = [
@@ -376,26 +273,6 @@ const statusLabelMap = {
   not_configured: '未配置',
 }
 
-const githubAppStatus = computed(() => {
-  if (!githubAppConfig.configured) {
-    return { label: '未配置', className: 'github-app-status--missing' }
-  }
-  if (githubAppConfig.lastError) {
-    return { label: '连接异常', className: 'github-app-status--invalid' }
-  }
-  return { label: '已连接', className: 'github-app-status--valid' }
-})
-
-const showSessionAccountColumn = computed(() => viewportWidth.value >= 1180)
-const showSessionVerifiedColumn = computed(() => viewportWidth.value >= 1500)
-const showSessionErrorColumn = computed(() => viewportWidth.value >= 1680)
-const sessionPlatformMinWidth = computed(() => viewportWidth.value < 1500 ? 130 : 150)
-const sessionStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 100 : 110)
-const sessionAccountColumnWidth = computed(() => viewportWidth.value < 1500 ? 140 : 150)
-const sessionVerifiedColumnWidth = computed(() => 150)
-const sessionErrorMinWidth = computed(() => 180)
-const sessionActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 220 : 240)
-
 const watchlistForm = reactive({
   id: null,
   name: '',
@@ -428,85 +305,6 @@ function formatDateTime(value) {
 
 function statusBadgeClass(status) {
   return `session-status--${status || 'unknown'}`
-}
-
-function applyGithubAppConfig(payload = {}) {
-  Object.assign(githubAppConfig, {
-    configured: Boolean(payload.configured),
-    appId: payload.appId || null,
-    installationId: payload.installationId || null,
-    lastValidatedAt: payload.lastValidatedAt || '',
-    tokenExpiresAt: payload.tokenExpiresAt || '',
-    lastError: payload.lastError || '',
-  })
-  githubAppForm.appId = payload.appId ? String(payload.appId) : ''
-  githubAppForm.installationId = payload.installationId ? String(payload.installationId) : ''
-  githubAppForm.privateKey = ''
-}
-
-async function loadGithubAppConfig() {
-  if (loadingGithubApp.value) return
-  loadingGithubApp.value = true
-  try {
-    applyGithubAppConfig(await api.loadGithubAppConfig())
-  } catch (error) {
-    ElMessage.error(error.message || 'GitHub App 配置加载失败')
-  } finally {
-    loadingGithubApp.value = false
-  }
-}
-
-async function saveGithubAppConfig() {
-  const appId = Number(githubAppForm.appId)
-  const installationId = Number(githubAppForm.installationId)
-  if (!Number.isInteger(appId) || appId <= 0 || !Number.isInteger(installationId) || installationId <= 0) {
-    ElMessage.error('App ID 和 Installation ID 必须是正整数')
-    return
-  }
-  if (!githubAppConfig.configured && !githubAppForm.privateKey.trim()) {
-    ElMessage.error('首次配置必须填写 GitHub App 私钥')
-    return
-  }
-
-  savingGithubApp.value = true
-  try {
-    applyGithubAppConfig(await api.saveGithubAppConfig({
-      app_id: appId,
-      installation_id: installationId,
-      private_key: githubAppForm.privateKey,
-    }))
-    ElMessage.success('GitHub App 已连接')
-  } catch (error) {
-    ElMessage.error(error.message || 'GitHub App 配置验证失败')
-  } finally {
-    savingGithubApp.value = false
-  }
-}
-
-async function deleteGithubAppConfig() {
-  try {
-    await ElMessageBox.confirm(
-      '删除后，GitHub 认证 API 将不可用，自动模式只能回退到已登录的浏览器会话。',
-      '删除 GitHub App 配置',
-      {
-        type: 'warning',
-        confirmButtonText: '确认删除',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch {
-    return
-  }
-
-  deletingGithubApp.value = true
-  try {
-    applyGithubAppConfig(await api.deleteGithubAppConfig())
-    ElMessage.success('GitHub App 配置已删除')
-  } catch (error) {
-    ElMessage.error(error.message || 'GitHub App 配置删除失败')
-  } finally {
-    deletingGithubApp.value = false
-  }
 }
 
 function normalizeLines(value) {
@@ -851,7 +649,7 @@ async function deleteWatchlist() {
   const current = watchlists.value.find((item) => item.id === selectedWatchlistId.value)
   try {
     await ElMessageBox.confirm(
-      `删除监测对象“${current?.name || '当前对象'}”后，企业画像、检索词、命中结果和扫描历史将一并删除，但不会影响企业微信或钉钉机器人配置。`,
+      `删除监测对象“${current?.name || '当前对象'}”后，企业画像、检索词、命中结果和扫描历史将一并删除。`,
       '删除确认',
       {
         type: 'warning',
@@ -880,14 +678,9 @@ async function launchLogin(platform) {
   if (loginStarting[platform]) return
   loginStarting[platform] = true
   try {
-    const payload = await api.startRemoteLogin(platform)
-    router.push({
-      name: 'RemotePlatformLogin',
-      query: {
-        platform,
-        session_id: payload.session_id,
-      },
-    })
+    const payload = await api.launchLogin(platform)
+    await loadSessions()
+    ElMessage.success(payload?.message || '已启动登录会话')
   } catch (error) {
     ElMessage.error(error.message || '启动登录失败')
   } finally {
@@ -915,19 +708,9 @@ async function removeSession(platform) {
   }
 }
 
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth
-}
-
 onMounted(async () => {
-  updateViewportWidth()
-  window.addEventListener('resize', updateViewportWidth)
-  await Promise.all([loadGithubAppConfig(), loadSessions(), loadWatchlists()])
+  await Promise.all([loadSessions(), loadWatchlists()])
   await autoDetectSessions({ silent: true })
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', updateViewportWidth)
 })
 </script>
 
@@ -936,103 +719,6 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr;
   gap: 22px;
-}
-
-.github-app-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.github-app-status__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #94a3b8;
-}
-
-.github-app-status--valid {
-  color: #166534;
-}
-
-.github-app-status--valid .github-app-status__dot {
-  background: #22c55e;
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.16);
-}
-
-.github-app-status--invalid,
-.github-app-status--missing {
-  color: #b45309;
-}
-
-.github-app-status--invalid .github-app-status__dot,
-.github-app-status--missing .github-app-status__dot {
-  background: #f59e0b;
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.16);
-}
-
-.github-app-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px;
-  margin-bottom: 18px;
-  overflow: hidden;
-  border: 1px solid var(--ti-border-default);
-  border-radius: 8px;
-  background: var(--ti-border-default);
-}
-
-.github-app-overview > div {
-  min-width: 0;
-  padding: 14px 16px;
-  background: var(--ti-surface-default);
-}
-
-.github-app-overview span {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--ti-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.github-app-overview strong {
-  display: block;
-  overflow-wrap: anywhere;
-}
-
-.github-app-alert {
-  margin-bottom: 18px;
-}
-
-.github-app-form__ids {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.github-app-private-key :deep(textarea) {
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 13px;
-}
-
-.github-app-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-}
-
-.github-app-footer .panel-note {
-  margin: 0;
-}
-
-.github-app-actions {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 10px;
 }
 
 .ti-table-shell {
@@ -1182,11 +868,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1200px) {
-  .github-app-overview,
-  .github-app-form__ids {
-    grid-template-columns: 1fr 1fr;
-  }
-
   .watchlist-toolbar,
   .watchlist-form,
   .watchlist-term-row,
@@ -1201,22 +882,6 @@ onUnmounted(() => {
 
   .watchlist-terms__actions {
     justify-content: flex-start;
-  }
-}
-
-@media (max-width: 720px) {
-  .github-app-overview,
-  .github-app-form__ids {
-    grid-template-columns: 1fr;
-  }
-
-  .github-app-footer {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .github-app-actions {
-    justify-content: flex-end;
   }
 }
 </style>

@@ -4,13 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from darkweb_collector.models import (
-    SiteConfig,
-    VALID_BROWSER_QUEUES,
-    VALID_FETCH_MODES,
-    VALID_PROFILES,
-)
-from darkweb_collector.runtime import default_config_path, output_root, project_root
+from darkweb_collector.models import SiteConfig, VALID_FETCH_MODES, VALID_PROFILES
+from darkweb_collector.runtime import default_config_path, project_root
 
 
 REQUIRED_KEYS = {
@@ -57,9 +52,6 @@ def _resolve_output_dir(path_value: str) -> Path:
     output_dir = Path(path_value)
     if output_dir.is_absolute():
         return output_dir
-    parts = output_dir.parts
-    if parts and parts[0].lower() == "output":
-        return output_root().joinpath(*parts[1:]).resolve()
     return (project_root() / output_dir).resolve()
 
 
@@ -86,16 +78,6 @@ def _validate_site(payload: dict[str, Any]) -> SiteConfig:
         raise ConfigError(f"{site_name}: invalid detail_fetch_mode '{detail_fetch_mode}'")
     if profile not in VALID_PROFILES:
         raise ConfigError(f"{site_name}: invalid profile '{profile}'")
-
-    browser_queue = str(payload.get("browser_queue") or "browser_render").strip()
-    if browser_queue not in VALID_BROWSER_QUEUES:
-        raise ConfigError(f"{site_name}: invalid browser_queue '{browser_queue}'")
-    try:
-        max_concurrent_details = int(payload.get("max_concurrent_details", 1))
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{site_name}: max_concurrent_details must be an integer") from exc
-    if max_concurrent_details < 1:
-        raise ConfigError(f"{site_name}: max_concurrent_details must be at least 1")
 
     extras = {key: value for key, value in payload.items() if key not in REQUIRED_KEYS}
     return SiteConfig(

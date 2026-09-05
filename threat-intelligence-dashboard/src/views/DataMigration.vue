@@ -1,842 +1,1348 @@
 <template>
-  <a class="skip-link" href="#content">跳到主要内容</a>
-  <div class="app-shell sidebar-collapsed migration-shell" @click="handleNavigation">
-    <aside class="app-sidebar" data-od-id="data-migration-sidebar">
-      <a class="brand" href="/">
-        <span class="brand-mark" aria-hidden="true"><img src="/assets/xuanjian-mark.svg?v=8" alt="" /></span>
-        <span class="brand-copy"><strong>玄鉴</strong><span>XUANJIAN INTELLIGENCE</span></span>
-      </a>
-      <nav class="sidebar-nav" aria-label="主导航"></nav>
-      <div class="sidebar-footer"></div>
-    </aside>
-    <button class="sidebar-backdrop" data-sidebar-toggle aria-label="关闭导航"></button>
+  <div class="data-migration-page ti-page">
+    <section class="migration-hero ti-panel ti-reveal-up">
+      <div class="migration-hero__head">
+        <div>
+          <span class="ti-kicker">Database Migration</span>
+          <h2>数据库与证据镜像迁移</h2>
+          <p>上传可信的 <code>.dwti</code> 全量迁移包，在独立 PostgreSQL Schema 中完成预检、导入和联合校验后再确认切换。</p>
+        </div>
+        <el-button :loading="loadingOverview" @click="loadOverview">
+          <el-icon><Refresh /></el-icon>
+          刷新状态
+        </el-button>
+      </div>
 
-    <div class="app-stage">
-      <header class="app-header" data-od-id="data-migration-header">
-        <button class="btn btn-secondary icon-btn menu-button" type="button" data-sidebar-toggle aria-label="打开导航">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
-        </button>
-        <div class="migration-breadcrumbs">
-          <router-link to="/settings">配置中心</router-link>
-          <span>/</span>
-          <strong>数据迁移</strong>
+      <div class="migration-status-grid">
+        <article class="migration-status-card">
+          <div class="migration-status-card__label">
+            <span>目标数据库</span>
+            <i :class="targetConfigured ? 'is-success' : 'is-warning'"></i>
+          </div>
+          <strong>{{ targetConfigured ? 'PostgreSQL 已配置' : '尚未配置' }}</strong>
+          <p v-if="targetConfigured" class="migration-mono">
+            {{ target.host || '127.0.0.1' }}:{{ target.port || 5432 }}/{{ target.database || '-' }}
+          </p>
+          <p v-else>请先由服务端准备迁移目标，页面不会接收数据库口令。</p>
+        </article>
+
+        <article class="migration-status-card">
+          <div class="migration-status-card__label">
+            <span>当前活动版本</span>
+            <i :class="activeRelease.active ? 'is-success' : 'is-neutral'"></i>
+          </div>
+          <strong>{{ activeRelease.active ? 'PostgreSQL' : 'SQLite' }}</strong>
+          <p v-if="activeRelease.active" class="migration-mono">
+            {{ activeRelease.database_schema || activeRelease.job_id || '-' }}
+          </p>
+          <p v-else>确认激活之前，现有 SQLite 与镜像目录保持不变。</p>
+        </article>
+
+        <article class="migration-status-card">
+          <div class="migration-status-card__label">
+            <span>切换策略</span>
+            <i :class="config.auto_restart ? 'is-success' : 'is-warning'"></i>
+          </div>
+          <strong>{{ config.auto_restart ? '自动重启与回退' : '需要人工重启' }}</strong>
+          <p>激活会短暂中断服务；新版本检查失败时将尝试恢复上一活动版本。</p>
+        </article>
+      </div>
+    </section>
+
+    <el-alert
+      v-if="pageError"
+      class="migration-alert"
+      type="error"
+      :title="pageError"
+      :closable="true"
+      show-icon
+      @close="pageError = ''"
+    />
+
+    <section class="migration-workspace">
+      <article class="ti-panel migration-upload-panel ti-reveal-up">
+        <header class="migration-panel-head">
+          <div>
+            <span class="migration-step">1</span>
+            <div>
+              <h3>上传迁移包</h3>
+              <p>浏览器以原始请求体流式上传，不使用 multipart 封装。</p>
+            </div>
+          </div>
+          <el-tag effect="plain">{{ maxBundleLabel }}</el-tag>
+        </header>
+
+        <el-alert
+          v-if="!targetConfigured"
+          type="warning"
+          title="目标 PostgreSQL 尚未配置，暂不能上传"
+          :closable="false"
+          show-icon
+        />
+
+        <div
+          class="migration-drop-zone"
+          :class="{
+            'is-dragging': dragging,
+            'is-disabled': !targetConfigured || uploadBusy,
+            'has-file': selectedFile,
+          }"
+          role="button"
+          tabindex="0"
+          @click="openFilePicker"
+          @keydown.enter.prevent="openFilePicker"
+          @keydown.space.prevent="openFilePicker"
+          @dragenter.prevent="dragging = true"
+          @dragover.prevent="dragging = true"
+          @dragleave.prevent="dragging = false"
+          @drop.prevent="handleDrop"
+        >
+          <input
+            ref="fileInput"
+            type="file"
+            accept=".dwti,application/octet-stream"
+            hidden
+            @change="handleFileChange"
+          />
+          <el-icon class="migration-drop-zone__icon"><UploadFilled /></el-icon>
+          <strong>{{ selectedFile?.name || '选择或拖入 .dwti 文件' }}</strong>
+          <small v-if="selectedFile">{{ formatBytes(selectedFile.size) }}</small>
+          <small v-else>只接受可信来源的 ZIP64 迁移包；上传后会自动开始安全预检。</small>
         </div>
-        <div class="header-actions">
-          <span class="app-version">版本 <strong>v20260901.1.0</strong></span>
-          <button class="avatar" type="button" aria-label="个人账户"></button>
+
+        <div v-if="uploading" class="migration-upload-progress">
+          <div>
+            <span>正在流式上传 {{ selectedFile?.name }}</span>
+            <strong>{{ formatBytes(selectedFile?.size || 0) }}</strong>
+          </div>
+          <el-progress :percentage="100" :show-text="false" :indeterminate="true" :duration="2" />
         </div>
+
+        <div class="migration-upload-actions">
+          <div>
+            <p>上传前应停止旧系统 API、worker、scheduler 等写入进程。</p>
+            <p v-if="blockingJob" class="migration-warning-text">
+              当前任务 {{ jobIdShort(blockingJob) }} 仍在处理中，请等待结束。
+            </p>
+          </div>
+          <div class="migration-button-row">
+            <el-button v-if="selectedFile" :disabled="uploading" @click.stop="clearSelectedFile">清除</el-button>
+            <el-button
+              type="primary"
+              :loading="uploading"
+              :disabled="!canUpload"
+              @click="startUpload"
+            >
+              上传并开始校验
+            </el-button>
+          </div>
+        </div>
+
+        <div class="migration-safety-notes">
+          <p><el-icon><WarningFilled /></el-icon>这是完整版本替换，不会合并当前库中的新增记录。</p>
+          <p><el-icon><Lock /></el-icon>平台会话需要在迁移后重新登录；校验和不代表迁移包发布者身份。</p>
+        </div>
+      </article>
+
+      <article class="ti-panel migration-job-panel ti-reveal-up" v-loading="loadingJob">
+        <header class="migration-panel-head">
+          <div>
+            <span class="migration-step">2</span>
+            <div>
+              <h3>任务状态</h3>
+              <p v-if="currentJob">任务 {{ jobIdShort(currentJob) }}</p>
+              <p v-else>上传迁移包后在此跟踪处理进度。</p>
+            </div>
+          </div>
+          <el-tag v-if="currentJob" :type="currentStatus.type" effect="dark">
+            {{ currentStatus.label }}
+          </el-tag>
+        </header>
+
+        <template v-if="currentJob">
+          <div class="migration-flow" aria-label="迁移任务阶段">
+            <div
+              v-for="step in flowSteps"
+              :key="step"
+              class="migration-flow__step"
+              :class="flowStepClass(step)"
+            >
+              <i></i>
+              <span>{{ statusMeta(step).label }}</span>
+            </div>
+          </div>
+
+          <div class="migration-progress-card">
+            <div>
+              <strong>{{ currentStatus.label }}</strong>
+              <span>{{ currentStatus.progress }}%</span>
+            </div>
+            <el-progress
+              :percentage="currentStatus.progress"
+              :status="progressStatus"
+              :stroke-width="10"
+              :show-text="false"
+            />
+            <p>{{ currentJob.message || currentStatus.description }}</p>
+          </div>
+          <section
+            v-if="currentStatus.key === 'analyzing' || performanceResult"
+            class="migration-performance-card"
+          >
+            <div class="migration-performance-card__head">
+              <div>
+                <strong>性能验证报告</strong>
+                <p>提交后端生成或认可的 JSON 性能报告，完成迁移后的性能分析门禁。</p>
+              </div>
+              <el-tag :type="performanceResult ? 'success' : 'warning'" effect="plain">
+                {{ performanceResult ? '已提交' : '待提交' }}
+              </el-tag>
+            </div>
+
+            <template v-if="performanceResult">
+              <pre>{{ formatJson(performanceResult) }}</pre>
+            </template>
+            <template v-else>
+              <input
+                ref="performanceFileInput"
+                type="file"
+                accept=".json,application/json"
+                hidden
+                @change="handlePerformanceFile"
+              />
+              <div class="migration-performance-card__actions">
+                <div>
+                  <strong>{{ performanceFile?.name || '请选择 JSON 性能报告' }}</strong>
+                  <small v-if="performanceFile">{{ formatBytes(performanceFile.size) }}</small>
+                </div>
+                <el-button @click="performanceFileInput?.click()">选择 JSON</el-button>
+                <el-button
+                  type="primary"
+                  :loading="performanceSubmitting"
+                  :disabled="!performancePayload"
+                  @click="submitPerformance"
+                >
+                  提交性能报告
+                </el-button>
+              </div>
+              <p v-if="performanceError" class="migration-performance-card__error">{{ performanceError }}</p>
+            </template>
+          </section>
+
+          <el-alert
+            v-if="pollWarning"
+            class="migration-inline-alert"
+            type="warning"
+            :title="pollWarning"
+            :closable="false"
+            show-icon
+          />
+          <el-alert
+            v-if="currentFailure"
+            class="migration-inline-alert"
+            :type="currentStatus.key === 'rollback_failed' ? 'error' : 'warning'"
+            :title="currentJob.message || currentStatus.description"
+            :description="failureDescription"
+            :closable="false"
+            show-icon
+          />
+          <el-alert
+            v-if="String(currentJob.status || '').toLowerCase() === 'restart_required'"
+            class="migration-inline-alert"
+            type="warning"
+            title="活动版本已写入，但自动重启已关闭"
+            description="请尽快使用项目启动脚本重启全部服务；重启前数据库与镜像视图可能不一致。"
+            :closable="false"
+            show-icon
+          />
+
+          <div class="migration-job-facts">
+            <div><span>文件</span><strong>{{ currentJob.filename || 'upload.dwti' }}</strong></div>
+            <div><span>包体</span><strong>{{ formatBytes(currentJob.bundle_bytes || 0) }}</strong></div>
+            <div><span>阶段</span><strong>{{ currentJob.phase || currentStatus.key }}</strong></div>
+            <div><span>更新时间</span><strong>{{ formatTime(jobTimestamp(currentJob)) }}</strong></div>
+          </div>
+
+          <div class="migration-activate-row">
+            <p v-if="currentStatus.key === 'ready'">所有校验通过后，仍需人工确认才会写入活动版本并重启服务。</p>
+            <p v-else>{{ currentStatus.description }}</p>
+            <el-button
+              v-if="currentStatus.key === 'ready'"
+              type="danger"
+              :loading="activating"
+              @click="confirmActivate"
+            >
+              确认激活并切换
+            </el-button>
+          </div>
+        </template>
+
+        <el-empty v-else description="暂无迁移任务" />
+      </article>
+    </section>
+
+    <section v-if="report" class="ti-panel migration-report ti-reveal-up">
+      <header class="migration-panel-head">
+        <div>
+          <span class="migration-step">3</span>
+          <div>
+            <h3>导入与校验报告</h3>
+            <p>以下数据来自后端完成导入后的只读报告。</p>
+          </div>
+        </div>
+        <el-tag :type="currentStatus.type" effect="plain">{{ currentStatus.label }}</el-tag>
       </header>
 
-      <main class="app-main migration-main" id="content">
-        <section class="page-titlebar migration-titlebar">
+      <div class="migration-report-metrics">
+        <div><span>数据表</span><strong>{{ formatNumber(report.tables) }}</strong></div>
+        <div><span>数据行</span><strong>{{ formatNumber(report.rows) }}</strong></div>
+        <div><span>镜像文件</span><strong>{{ formatNumber(report.artifacts) }}</strong></div>
+        <div><span>镜像体积</span><strong>{{ formatBytes(report.artifact_bytes) }}</strong></div>
+      </div>
+
+      <dl class="migration-report-details">
+        <div>
+          <dt>目标数据库</dt>
+          <dd>{{ report.database_name || target.database || '-' }}</dd>
+        </div>
+        <div>
+          <dt>独立 Schema</dt>
+          <dd class="migration-mono">{{ report.database_schema || '-' }}</dd>
+        </div>
+        <div>
+          <dt>新镜像根目录</dt>
+          <dd class="migration-mono">{{ report.output_root || '-' }}</dd>
+        </div>
+        <div>
+          <dt>Schema 指纹</dt>
+          <dd class="migration-mono migration-break-all">{{ report.schema_fingerprint || '-' }}</dd>
+        </div>
+        <div>
+          <dt>可移植路径</dt>
+          <dd>{{ portablePathSummary }}</dd>
+        </div>
+        <div>
+          <dt>校验完成</dt>
+          <dd>{{ formatTime(report.verified_at) }}</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="ti-panel migration-history ti-reveal-up">
+      <header class="migration-panel-head">
+        <div>
+          <span class="migration-step migration-step--muted"><el-icon><Clock /></el-icon></span>
           <div>
-            <span class="migration-kicker">DATABASE MIGRATION</span>
-            <h1>数据迁移</h1>
-            <p class="lead">导入数据库与镜像文件一体化迁移包，完成联合校验后再切换活动版本。</p>
+            <h3>最近迁移任务</h3>
+            <p>选择任务可查看完整状态、错误和导入报告。</p>
           </div>
-          <div class="page-actions">
-            <button class="btn btn-secondary" type="button" :disabled="loading" @click="loadAll">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7" /></svg>
-              {{ loading ? '正在刷新' : '刷新状态' }}
-            </button>
-          </div>
-        </section>
+        </div>
+        <span class="migration-history__count">{{ jobs.length }} 条</span>
+      </header>
 
-        <section class="migration-status-grid" aria-label="迁移环境状态">
-          <article class="card migration-status-card">
-            <div class="migration-status-head"><span>目标数据库</span><i :class="config.target?.configured ? 'is-ok' : 'is-warning'"></i></div>
-            <strong :class="config.target?.configured ? 'migration-state-ok' : 'migration-state-warning'">
-              {{ config.target?.configured ? 'PostgreSQL 已配置' : '尚未配置' }}
-            </strong>
-            <p v-if="config.target?.configured" class="num">
-              {{ config.target.host }}:{{ config.target.port }}/{{ config.target.database }}
-            </p>
-            <p v-else>首次启动会自动准备本机 PostgreSQL，也可在服务端设置迁移目标。</p>
-          </article>
-          <article class="card migration-status-card">
-            <div class="migration-status-head"><span>当前活动数据库</span><i :class="config.active_release?.active ? 'is-ok' : 'is-info'"></i></div>
-            <strong>{{ activeDatabaseLabel }}</strong>
-            <p v-if="config.active_release?.active" class="num">批次 {{ config.active_release.job_id }}</p>
-            <p v-else>项目仍使用原 SQLite，确认切换前不会改变。</p>
-          </article>
-          <article class="card migration-status-card">
-            <div class="migration-status-head"><span>切换策略</span><i :class="config.auto_restart ? 'is-ok' : 'is-warning'"></i></div>
-            <strong>{{ config.auto_restart ? '自动重启已启用' : '需要手工重启' }}</strong>
-            <p>上一活动版本会被保留，用于启动失败时受控回退。</p>
-          </article>
-          <article class="card migration-status-card">
-            <div class="migration-status-head"><span>数据存储</span><i :class="storageNeedsAttention ? 'is-warning' : 'is-ok'"></i></div>
-            <strong :title="config.storage?.data_root || ''">{{ config.storage?.custom ? '自定义数据盘' : '默认数据目录' }}</strong>
-            <p class="migration-storage-path" :title="config.storage?.data_root || ''">{{ config.storage?.data_root || '正在读取…' }}</p>
-            <p v-if="config.storage?.disk_free_bytes">
-              可用 {{ formatBytes(config.storage.disk_free_bytes) }}{{ storageNeedsAttention ? ' · 部分数据仍在其他目录' : ' · 迁移目录已跟随数据盘' }}
-            </p>
-          </article>
-        </section>
-
-        <section class="settings-surface migration-panel">
-          <header class="settings-surface-head">
-            <div class="settings-heading">
-              <span class="migration-step">1</span>
-              <div><h2>选择 .dwti 迁移包</h2><p>上传前确认已暂停旧系统写入，并使用外部工具完成离线打包。</p></div>
+      <el-table
+        :data="jobs"
+        empty-text="暂无迁移记录"
+        row-key="job_id"
+        highlight-current-row
+        :current-row-key="currentJob?.job_id"
+        @row-click="selectJob"
+      >
+        <el-table-column label="任务" min-width="210">
+          <template #default="{ row }">
+            <div class="migration-job-cell">
+              <strong>{{ row.filename || 'migration.dwti' }}</strong>
+              <span class="migration-mono">{{ jobIdShort(row) }}</span>
             </div>
-            <span class="badge migration-limit">最大 {{ formatBytes(config.max_bundle_bytes || 0) }}</span>
-          </header>
-          <div class="migration-panel-body">
-            <label class="migration-drop-zone" :class="{ disabled: !config.target?.configured || uploading }">
-              <input
-                type="file"
-                accept=".dwti"
-                :disabled="!config.target?.configured || uploading"
-                @change="selectFile"
-              />
-              <span class="migration-upload-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 14v5h14v-5" /></svg>
-              </span>
-              <strong>{{ selectedFile?.name || '点击选择迁移包' }}</strong>
-              <small v-if="selectedFile">{{ formatBytes(selectedFile.size) }}</small>
-              <small v-else>支持 ZIP64；数据库、表清单和镜像文件会在后台逐项校验</small>
-            </label>
-
-            <div v-if="uploading || uploadProgress" class="migration-progress">
-              <div><span>上传进度</span><strong class="num">{{ uploadProgress }}%</strong></div>
-              <div class="migration-progress-track"><i :style="{ width: uploadProgress + '%' }"></i></div>
-            </div>
-            <div class="migration-panel-actions">
-              <p>平台会话、Cookie、令牌及凭据文件不会进入迁移包。</p>
-              <button
-                class="btn btn-primary"
-                type="button"
-                :disabled="!selectedFile || uploading || !config.target?.configured"
-                @click="uploadBundle"
-              >
-                {{ uploading ? '正在上传…' : '上传并开始校验' }}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section v-if="currentJob" class="settings-surface migration-panel">
-          <header class="settings-surface-head">
-            <div class="settings-heading">
-              <span class="migration-step">2</span>
-              <div><h2>预检、导入与联合校验</h2><p>{{ currentJob.message }}</p></div>
-            </div>
-            <span class="badge migration-job-status" :class="currentJob.status">{{ statusLabel(currentJob.status) }}</span>
-          </header>
-          <div class="migration-panel-body">
-            <div class="migration-progress">
-              <div><span>{{ phaseLabel(currentJob.phase) }}</span><strong class="num">{{ currentJob.progress || 0 }}%</strong></div>
-              <div class="migration-progress-track"><i :style="{ width: (currentJob.progress || 0) + '%' }"></i></div>
-            </div>
-            <div v-if="currentJob.report" class="migration-result-grid">
-              <div><span>数据库表</span><strong class="num">{{ currentJob.report.tables }}</strong></div>
-              <div><span>数据行</span><strong class="num">{{ number(currentJob.report.rows) }}</strong></div>
-              <div><span>镜像文件</span><strong class="num">{{ number(currentJob.report.artifacts) }}</strong></div>
-              <div><span>镜像大小</span><strong class="num">{{ formatBytes(currentJob.report.artifact_bytes) }}</strong></div>
-              <div><span>目标 Schema</span><strong class="num">{{ currentJob.report.database_schema }}</strong></div>
-              <div><span>校验结果</span><strong class="migration-state-ok">全部一致</strong></div>
-            </div>
-            <div v-if="currentJob.status === 'failed'" class="migration-error" role="alert">{{ currentJob.message }}</div>
-          </div>
-        </section>
-
-        <section v-if="currentJob?.status === 'ready'" class="settings-surface migration-panel migration-danger-panel">
-          <header class="settings-surface-head">
-            <div class="settings-heading">
-              <span class="migration-step is-danger">3</span>
-              <div><h2>确认切换</h2><p>系统将进入短暂维护窗口，并重启到新的 PostgreSQL Schema 与镜像目录。</p></div>
-            </div>
-            <span class="badge migration-switch-badge">高风险操作</span>
-          </header>
-          <div class="migration-panel-body">
-            <label class="migration-confirm-line">
-              <input v-model="confirmed" type="checkbox" />
-              <span><strong>确认使用当前迁移包切换活动版本</strong><small>我已确认这是最终数据版本，并接受切换期间短暂停机。</small></span>
-            </label>
-            <div class="migration-panel-actions">
-              <p>PostgreSQL 产生新写入后，不能直接丢弃新数据回退至旧 SQLite。</p>
-              <button class="btn btn-danger" type="button" :disabled="!confirmed || activating" @click="activate">
-                {{ activating ? '正在切换…' : '确认切换并重启' }}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section v-if="notice" class="migration-notice" :class="noticeType" role="status">{{ notice }}</section>
-
-        <section v-if="jobs.length" class="settings-surface migration-history">
-          <header class="settings-surface-head">
-            <div class="settings-heading">
-              <span class="settings-section-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M4 7h16v12H4zM8 4h8v3M8 11h8M8 15h5" /></svg>
-              </span>
-              <div><h2>最近迁移任务</h2><p>保留最近 20 个迁移批次的处理状态</p></div>
-            </div>
-          </header>
-          <div class="migration-history-list">
-            <button v-for="job in jobs" :key="job.job_id" type="button" class="migration-history-row" @click="chooseJob(job)">
-              <span><strong>{{ job.filename }}</strong><small class="num">{{ job.job_id }}</small></span>
-              <span class="badge migration-job-status" :class="job.status">{{ statusLabel(job.status) }}</span>
-            </button>
-          </div>
-        </section>
-      </main>
-    </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="132">
+          <template #default="{ row }">
+            <el-tag :type="jobMeta(row).type" effect="plain">{{ jobMeta(row).label }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="进度" min-width="180">
+          <template #default="{ row }">
+            <el-progress :percentage="jobMeta(row).progress" :show-text="false" :stroke-width="7" />
+          </template>
+        </el-table-column>
+        <el-table-column prop="message" label="最近消息" min-width="300" show-overflow-tooltip />
+        <el-table-column label="更新时间" width="180">
+          <template #default="{ row }">{{ formatTime(jobTimestamp(row)) }}</template>
+        </el-table-column>
+      </el-table>
+    </section>
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { getAuthToken } from '@/composables/useAuth'
-import { initializePrototype } from '@/prototype/runtime'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  createDataMigrationApi,
+  isMigrationPollingStatus,
+  migrationStatusKey,
+  migrationStatusMeta,
+} from '@/composables/useDataMigrationApi'
 
-const router = useRouter()
-const config = ref({ target: { configured: false }, active_release: {} })
+const POLL_INTERVAL_MS = 1600
+const flowSteps = ['queued', 'preflight', 'importing', 'verifying', 'analyzing', 'ready', 'activating', 'active']
+const abortController = new AbortController()
+const api = createDataMigrationApi({ signal: abortController.signal })
+
+const config = ref({})
 const jobs = ref([])
 const currentJob = ref(null)
 const selectedFile = ref(null)
+const fileInput = ref(null)
+const dragging = ref(false)
+const loadingOverview = ref(false)
+const loadingJob = ref(false)
 const uploading = ref(false)
-const uploadProgress = ref(0)
-const loading = ref(false)
-const confirmed = ref(false)
 const activating = ref(false)
-const notice = ref('')
-const noticeType = ref('info')
+const pageError = ref('')
+const pollWarning = ref('')
+const performanceFileInput = ref(null)
+const performanceFile = ref(null)
+const performancePayload = ref(null)
+const performanceSubmitting = ref(false)
+const performanceError = ref('')
+
 let pollTimer = null
-let previousBodyClassName = ''
+let pollInFlight = false
+let disposed = false
 
-const activeDatabaseLabel = computed(() => {
-  const active = config.value.active_release
-  return active?.active && active.database_engine === 'postgresql' ? 'PostgreSQL' : 'SQLite'
+const target = computed(() => config.value?.target || {})
+const activeRelease = computed(() => config.value?.active_release || {})
+const targetConfigured = computed(() => Boolean(target.value?.configured))
+const report = computed(() => currentJob.value?.report || null)
+const performanceResult = computed(() => (
+  currentJob.value?.performance_result
+  || currentJob.value?.performance_report
+  || currentJob.value?.performance
+  || currentJob.value?.report?.performance
+  || null
+))
+const currentStatus = computed(() => migrationStatusMeta(currentJob.value || 'queued'))
+const currentFailure = computed(() => ['failed', 'rolled_back', 'rollback_failed'].includes(currentStatus.value.key))
+const progressStatus = computed(() => (
+  ['active'].includes(currentStatus.value.key)
+    ? 'success'
+    : ['failed', 'rollback_failed'].includes(currentStatus.value.key)
+      ? 'exception'
+      : undefined
+))
+const failureDescription = computed(() => {
+  const type = currentJob.value?.error_type
+  const fallback = currentStatus.value.description
+  return type ? `${fallback}（错误类型：${type}）` : fallback
+})
+const blockingJob = computed(() => jobs.value.find((job) => isMigrationPollingStatus(job)) || null)
+const uploadBusy = computed(() => uploading.value || Boolean(blockingJob.value))
+const canUpload = computed(() => targetConfigured.value && selectedFile.value && !uploadBusy.value)
+const maxBundleBytes = computed(() => Number(config.value?.max_bundle_bytes || 0))
+const maxBundleLabel = computed(() => (
+  maxBundleBytes.value > 0 ? `上限 ${formatBytes(maxBundleBytes.value)}` : '由服务端限制体积'
+))
+const portablePathSummary = computed(() => {
+  const paths = report.value?.portable_artifact_paths
+  const count = paths && typeof paths === 'object'
+    ? Object.values(paths).reduce((sum, value) => sum + Number(value || 0), 0)
+    : Number(paths || 0)
+  const renamed = Number(report.value?.portable_path_renames || 0)
+  return `${formatNumber(count)} 条路径，${formatNumber(renamed)} 个重命名`
 })
 
-const storageNeedsAttention = computed(() => {
-  const storage = config.value.storage || {}
-  return storage.migration_on_data_root === false
-    || storage.application_on_data_root === false
-    || Boolean(storage.active_application_root && !storage.active_application_on_data_root)
-    || storage.playwright_on_data_root === false
-    || Boolean(storage.postgresql_data_directory && !storage.postgresql_on_data_root)
-    || storage.collector_database_on_data_root === false
-    || storage.collector_output_on_data_root === false
-    || storage.garnet_on_data_root === false
-})
+function statusMeta(status) {
+  return migrationStatusMeta(status)
+}
+
+function jobMeta(job) {
+  return migrationStatusMeta(job)
+}
+
+function flowStepClass(step) {
+  const currentKey = currentStatus.value.key
+  const currentIndex = flowSteps.indexOf(currentKey)
+  const index = flowSteps.indexOf(step)
+  if (currentFailure.value) {
+    const phaseIndex = flowSteps.indexOf(migrationStatusKey(currentJob.value?.phase || 'queued'))
+    return {
+      'is-complete': index < Math.max(phaseIndex, 0),
+      'is-error': index === Math.max(phaseIndex, 0),
+      'is-pending': index > Math.max(phaseIndex, 0),
+    }
+  }
+  return {
+    'is-complete': currentKey === 'active' ? index < currentIndex : index < currentIndex,
+    'is-current': index === currentIndex,
+    'is-pending': index > currentIndex,
+  }
+}
 
 function formatBytes(value) {
   const bytes = Number(value || 0)
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  return `${(bytes / 1024 ** index).toFixed(index ? 2 : 0)} ${units[index]}`
+  const precision = index === 0 || bytes / (1024 ** index) >= 100 ? 0 : 1
+  return `${(bytes / (1024 ** index)).toFixed(precision)} ${units[index]}`
 }
 
-function number(value) {
-  return Number(value || 0).toLocaleString('zh-CN')
+function formatNumber(value) {
+  const number = Number(value || 0)
+  return Number.isFinite(number) ? new Intl.NumberFormat('zh-CN').format(number) : '-'
 }
 
-function statusLabel(status) {
-  return {
-    queued: '等待处理', preparing: '处理中', ready: '等待切换', activating: '正在切换',
-    restart_required: '等待重启', active: '已生效', failed: '失败', rolled_back: '已回退',
-    rollback_failed: '回退失败',
-  }[status] || status || '未知'
+function formatTime(value) {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return String(value)
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(parsed)
 }
 
-function phaseLabel(phase) {
-  return {
-    queued: '等待预检', snapshot: '数据库快照', preflight: '安全预检', artifacts: '镜像文件',
-    database: '数据库导入', verify: '联合校验', ready: '校验完成', activate: '系统切换',
-    complete: '迁移完成', failed: '处理失败',
-  }[phase] || phase || '处理中'
+function jobTimestamp(job) {
+  return job?.updated_at || job?.finished_at || job?.verified_at || job?.created_at || ''
 }
 
-async function readError(response) {
-  try {
-    const payload = await response.json()
-    return payload.detail || payload.message || '请求失败'
-  } catch {
-    return '请求失败'
+function jobIdShort(job) {
+  const value = String(job?.job_id || '')
+  return value ? value.slice(0, 12) : '-'
+}
+
+function upsertJob(job) {
+  if (!job?.job_id) return
+  const existing = jobs.value.find((item) => item.job_id === job.job_id) || {}
+  const merged = { ...existing, ...job }
+  jobs.value = [merged, ...jobs.value.filter((item) => item.job_id !== job.job_id)]
+  if (currentJob.value?.job_id === job.job_id || !currentJob.value) {
+    currentJob.value = { ...(currentJob.value || {}), ...merged }
   }
 }
 
-async function loadConfig() {
-  const response = await fetch('/api/migrations/config', { cache: 'no-store' })
-  if (!response.ok) throw new Error(await readError(response))
-  config.value = await response.json()
-}
-
-async function loadJobs() {
-  const response = await fetch('/api/migrations', { cache: 'no-store' })
-  if (!response.ok) throw new Error(await readError(response))
-  jobs.value = (await response.json()).items || []
-  if (!currentJob.value && jobs.value.length) currentJob.value = jobs.value[0]
-}
-
-async function loadAll() {
-  loading.value = true
-  notice.value = ''
-  try {
-    await Promise.all([loadConfig(), loadJobs()])
-    if (currentJob.value) await refreshJob()
-  } catch (error) {
-    notice.value = error.message
-    noticeType.value = 'error'
-  } finally {
-    loading.value = false
-  }
-}
-
-function selectFile(event) {
-  selectedFile.value = event.target.files?.[0] || null
-  uploadProgress.value = 0
-  notice.value = ''
-}
-
-function uploadBundle() {
-  if (!selectedFile.value || uploading.value) return
-  uploading.value = true
-  uploadProgress.value = 0
-  notice.value = ''
-  const xhr = new XMLHttpRequest()
-  xhr.open('POST', '/api/migrations/upload')
-  xhr.setRequestHeader('Authorization', `Bearer ${getAuthToken()}`)
-  xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-  xhr.setRequestHeader('X-DWTI-Filename', encodeURIComponent(selectedFile.value.name))
-  xhr.upload.onprogress = (event) => {
-    if (event.lengthComputable) uploadProgress.value = Math.round((event.loaded / event.total) * 100)
-  }
-  xhr.onload = () => {
-    uploading.value = false
-    if (xhr.status < 200 || xhr.status >= 300) {
-      try { notice.value = JSON.parse(xhr.responseText).detail || '上传失败' } catch { notice.value = '上传失败' }
-      noticeType.value = 'error'
-      return
-    }
-    currentJob.value = JSON.parse(xhr.responseText)
-    notice.value = '迁移包已上传，系统正在后台预检和导入。'
-    noticeType.value = 'info'
-    startPolling()
-  }
-  xhr.onerror = () => {
-    uploading.value = false
-    notice.value = '上传连接失败'
-    noticeType.value = 'error'
-  }
-  xhr.send(selectedFile.value)
-}
-
-async function refreshJob() {
-  if (!currentJob.value?.job_id) return
-  const response = await fetch(`/api/migrations/${currentJob.value.job_id}`, { cache: 'no-store' })
-  if (!response.ok) throw new Error(await readError(response))
-  currentJob.value = await response.json()
-  if (!['queued', 'preparing', 'activating'].includes(currentJob.value.status)) stopPolling()
-}
-
-function startPolling() {
-  stopPolling()
-  pollTimer = window.setInterval(async () => {
-    try {
-      await refreshJob()
-      await loadJobs()
-      if (currentJob.value?.status === 'active') await loadConfig()
-    } catch {
-      if (currentJob.value?.status === 'activating') {
-        notice.value = '系统正在重启，页面连接暂时中断；服务恢复后刷新即可。'
-        noticeType.value = 'info'
-      }
-    }
-  }, 1200)
-}
-
-function stopPolling() {
-  if (pollTimer) window.clearInterval(pollTimer)
+function clearPollTimer() {
+  if (pollTimer) window.clearTimeout(pollTimer)
   pollTimer = null
 }
 
-function chooseJob(job) {
-  currentJob.value = job
-  confirmed.value = false
-  if (['queued', 'preparing', 'activating'].includes(job.status)) startPolling()
+function schedulePoll() {
+  clearPollTimer()
+  if (disposed || !isMigrationPollingStatus(currentJob.value)) return
+  pollTimer = window.setTimeout(pollCurrentJob, POLL_INTERVAL_MS)
 }
 
-async function activate() {
-  if (!confirmed.value || !currentJob.value) return
-  activating.value = true
+async function pollCurrentJob() {
+  if (disposed || pollInFlight || !currentJob.value?.job_id) return
+  pollInFlight = true
+  const previousStatus = currentStatus.value.key
   try {
-    const response = await fetch(`/api/migrations/${currentJob.value.job_id}/activate`, { method: 'POST' })
-    if (!response.ok) throw new Error(await readError(response))
-    currentJob.value = await response.json()
-    notice.value = currentJob.value.message
-    noticeType.value = 'info'
-    startPolling()
+    const updated = await api.getJob(currentJob.value.job_id)
+    pollWarning.value = ''
+    upsertJob(updated)
+    const nextStatus = migrationStatusMeta(updated).key
+    if (nextStatus !== previousStatus && ['ready', 'active', 'failed', 'rolled_back', 'rollback_failed'].includes(nextStatus)) {
+      const [nextConfig, nextJobs] = await Promise.all([api.getConfig(), api.listJobs()])
+      config.value = nextConfig || {}
+      jobs.value = Array.isArray(nextJobs?.items) ? nextJobs.items : []
+      upsertJob(updated)
+    }
   } catch (error) {
-    notice.value = error.message
-    noticeType.value = 'error'
+    if (error?.name !== 'AbortError') {
+      pollWarning.value = currentStatus.value.key === 'activating'
+        ? '服务可能正在重启，页面会继续尝试恢复任务状态。'
+        : (error.message || '暂时无法刷新任务状态，页面将自动重试。')
+    }
+  } finally {
+    pollInFlight = false
+    schedulePoll()
+  }
+}
+
+async function loadOverview() {
+  loadingOverview.value = true
+  pageError.value = ''
+  try {
+    const [nextConfig, nextJobs] = await Promise.all([api.getConfig(), api.listJobs()])
+    config.value = nextConfig || {}
+    jobs.value = Array.isArray(nextJobs?.items) ? nextJobs.items : []
+    const selectedId = currentJob.value?.job_id
+    const summary = jobs.value.find((job) => job.job_id === selectedId) || jobs.value[0] || null
+    currentJob.value = summary
+    if (summary?.job_id) await refreshJob(summary.job_id, true)
+  } catch (error) {
+    if (error?.name !== 'AbortError') pageError.value = error.message || '加载迁移配置失败'
+  } finally {
+    loadingOverview.value = false
+    schedulePoll()
+  }
+}
+
+async function refreshJob(jobId, silent = false) {
+  if (!jobId) return
+  if (!silent) loadingJob.value = true
+  try {
+    const job = await api.getJob(jobId)
+    upsertJob(job)
+    pollWarning.value = ''
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      if (silent) pollWarning.value = error.message || '加载任务详情失败'
+      else ElMessage.error(error.message || '加载任务详情失败')
+    }
+  } finally {
+    if (!silent) loadingJob.value = false
+    schedulePoll()
+  }
+}
+
+async function selectJob(row) {
+  if (!row?.job_id) return
+  currentJob.value = row
+  pollWarning.value = ''
+  await refreshJob(row.job_id)
+}
+
+function openFilePicker() {
+  if (!targetConfigured.value || uploadBusy.value) return
+  fileInput.value?.click()
+}
+
+function chooseFile(file) {
+  dragging.value = false
+  if (!file) return
+  if (!String(file.name || '').toLowerCase().endsWith('.dwti')) {
+    ElMessage.error('请选择 .dwti 迁移包')
+    return
+  }
+  if (maxBundleBytes.value > 0 && file.size > maxBundleBytes.value) {
+    ElMessage.error(`迁移包超过服务端限制 ${formatBytes(maxBundleBytes.value)}`)
+    return
+  }
+  selectedFile.value = file
+}
+
+function handleFileChange(event) {
+  chooseFile(event.target.files?.[0])
+  event.target.value = ''
+}
+
+function handleDrop(event) {
+  dragging.value = false
+  if (!targetConfigured.value || uploadBusy.value) return
+  chooseFile(event.dataTransfer?.files?.[0])
+}
+
+function clearSelectedFile() {
+  selectedFile.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
+
+async function startUpload() {
+  if (!canUpload.value) return
+  uploading.value = true
+  pageError.value = ''
+  try {
+    const job = await api.uploadBundle(selectedFile.value)
+    currentJob.value = job
+    upsertJob(job)
+    clearSelectedFile()
+    ElMessage.success('迁移包已上传，后端正在执行安全预检')
+    schedulePoll()
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      pageError.value = error.message || '上传迁移包失败'
+      ElMessage.error(pageError.value)
+    }
+  } finally {
+    uploading.value = false
+  }
+}
+
+function formatJson(value) {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+async function handlePerformanceFile(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  performanceError.value = ''
+  performanceFile.value = null
+  performancePayload.value = null
+  if (!file) return
+  if (!String(file.name || '').toLowerCase().endsWith('.json')) {
+    performanceError.value = '请选择 JSON 性能报告'
+    return
+  }
+  try {
+    const payload = JSON.parse(await file.text())
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('性能报告根节点必须是 JSON 对象')
+    }
+    performanceFile.value = file
+    performancePayload.value = payload
+  } catch (error) {
+    performanceError.value = error.message || '性能报告不是有效 JSON'
+  }
+}
+
+async function submitPerformance() {
+  if (!currentJob.value?.job_id || !performancePayload.value || performanceSubmitting.value) return
+  performanceSubmitting.value = true
+  performanceError.value = ''
+  try {
+    const result = await api.submitPerformance(currentJob.value.job_id, performancePayload.value)
+    const updated = result?.job || result
+    if (updated && typeof updated === 'object' && (updated.status || updated.job_id)) {
+      upsertJob({ ...currentJob.value, ...updated, job_id: currentJob.value.job_id })
+    } else {
+      currentJob.value = { ...currentJob.value, performance_result: result }
+      upsertJob(currentJob.value)
+    }
+    performanceFile.value = null
+    performancePayload.value = null
+    ElMessage.success('性能报告已提交')
+    schedulePoll()
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      performanceError.value = error.message || '提交性能报告失败'
+    }
+  } finally {
+    performanceSubmitting.value = false
+  }
+}
+async function confirmActivate() {
+  if (!currentJob.value?.job_id || currentStatus.value.key !== 'ready') return
+  const schema = report.value?.database_schema || '新的 PostgreSQL Schema'
+  try {
+    await ElMessageBox.confirm(
+      `确定激活 ${schema}？服务会短暂重启；如果新数据库已产生写入，后续回退不会合并这些写入。`,
+      '确认切换活动版本',
+      {
+        type: 'warning',
+        confirmButtonText: '确认激活',
+        cancelButtonText: '暂不切换',
+        distinguishCancelAndClose: true,
+      },
+    )
+  } catch {
+    return
+  }
+
+  activating.value = true
+  pageError.value = ''
+  try {
+    const job = await api.activate(currentJob.value.job_id)
+    upsertJob(job)
+    if (String(job.status || '').toLowerCase() === 'restart_required') {
+      ElMessage.warning('活动版本已写入，请手工重启全部服务')
+    } else {
+      ElMessage.success('激活已开始，服务重启期间页面会自动重试')
+    }
+    schedulePoll()
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      pageError.value = error.message || '激活迁移版本失败'
+      ElMessage.error(pageError.value)
+    }
   } finally {
     activating.value = false
   }
 }
 
-function handleNavigation(event) {
-  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-  const link = event.target.closest('a[href]')
-  if (!link || link.target === '_blank' || link.hasAttribute('download')) return
-  const url = new URL(link.href, window.location.href)
-  if (url.origin !== window.location.origin) return
-  event.preventDefault()
-  router.push(`${url.pathname}${url.search}${url.hash}`)
-}
-
-onMounted(async () => {
-  document.title = '数据迁移 · 玄鉴'
-  previousBodyClassName = document.body.className
-  document.body.className = 'page-data-migration'
-  document.body.dataset.prototypePage = 'data-migration.html'
-  await nextTick()
-  initializePrototype()
-  await loadAll()
-})
+onMounted(loadOverview)
 
 onBeforeUnmount(() => {
-  stopPolling()
-  if (document.body.classList.contains('page-data-migration')) document.body.className = previousBodyClassName
-  delete document.body.dataset.prototypePage
+  disposed = true
+  clearPollTimer()
+  abortController.abort()
 })
 </script>
 
-<style scoped>
-.migration-main {
-  width: min(100%, 1580px);
-  min-width: 0;
-  margin-inline: auto;
+<style scoped lang="scss">
+.data-migration-page {
+  display: grid;
+  gap: 20px;
+  color: var(--ti-text-primary);
 }
 
-.migration-breadcrumbs {
-  min-width: 0;
+.migration-hero,
+.migration-upload-panel,
+.migration-job-panel,
+.migration-report,
+.migration-history {
+  padding: 24px;
+}
+
+.migration-hero__head,
+.migration-panel-head,
+.migration-upload-actions,
+.migration-activate-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
 }
 
-.migration-breadcrumbs a:hover { color: var(--accent); }
-.migration-breadcrumbs strong { color: var(--fg); }
-
-.migration-titlebar {
-  min-height: 64px;
-  align-items: center;
-  margin-bottom: 8px;
+.migration-hero__head h2 {
+  margin: 8px 0;
+  font-size: clamp(26px, 3vw, 36px);
 }
 
-.migration-titlebar h1 { font-size: 24px; }
-
-.migration-titlebar .lead {
-  display: block;
-  margin-top: 5px;
-  max-width: 76ch;
-  font-size: 12px;
+.migration-hero__head p,
+.migration-panel-head p,
+.migration-upload-actions p,
+.migration-activate-row p {
+  margin: 0;
+  color: var(--ti-text-secondary);
+  line-height: 1.65;
 }
 
-.migration-kicker {
-  display: block;
-  margin-bottom: 3px;
-  color: var(--accent);
-  font: 700 9px var(--font-mono);
-  letter-spacing: .14em;
-}
-
-.migration-titlebar .btn svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.migration-hero code,
+.migration-mono {
+  font-family: var(--ti-font-mono, "SFMono-Regular", Consolas, monospace);
 }
 
 .migration-status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 22px;
 }
 
 .migration-status-card {
   min-width: 0;
-  min-height: 112px;
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  padding: 14px;
+  padding: 17px;
+  border: 1px solid var(--ti-border-soft);
+  border-radius: 16px;
+  background: rgba(247, 250, 255, 0.72);
 }
 
-.migration-status-head {
+.migration-status-card__label {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  color: var(--muted);
-  font-size: 11px;
+  gap: 12px;
+  color: var(--ti-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
-.migration-status-head i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--muted);
+.migration-status-card__label i {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--ti-text-muted);
 }
 
-.migration-status-head i.is-ok { background: var(--success); }
-.migration-status-head i.is-warning { background: var(--warning); }
-.migration-status-head i.is-info { background: var(--accent); }
+.migration-status-card__label i.is-success { background: var(--ti-success-strong); }
+.migration-status-card__label i.is-warning { background: var(--ti-warning-strong); }
+.migration-status-card__label i.is-neutral { background: var(--ti-border-strong); }
 
-.migration-status-card > strong {
-  overflow-wrap: anywhere;
-  font-size: 16px;
+.migration-status-card strong {
+  display: block;
+  margin-top: 13px;
+  font-size: 18px;
 }
 
 .migration-status-card p {
-  margin: 0;
+  min-height: 42px;
+  margin: 8px 0 0;
   overflow-wrap: anywhere;
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--ti-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
-.migration-storage-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.migration-alert,
+.migration-inline-alert {
+  border-radius: 14px;
 }
 
-.migration-state-ok { color: var(--success) !important; }
-.migration-state-warning { color: #a66b00 !important; }
-
-.migration-panel,
-.migration-history {
-  margin-top: 10px;
+.migration-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(420px, 1.08fr);
+  gap: 20px;
+  align-items: start;
 }
 
-.migration-panel :deep(.settings-surface-head),
-.migration-history :deep(.settings-surface-head) {
-  min-height: 62px;
+.migration-panel-head > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.migration-panel-head h3 {
+  margin: 0 0 4px;
+  font-size: 20px;
 }
 
 .migration-step {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--settings-line);
-  border-radius: 8px;
-  background: var(--settings-tint-strong);
-  color: var(--accent);
-  font: 700 12px var(--font-mono);
-}
-
-.migration-step.is-danger {
-  border-color: color-mix(in oklch, var(--danger) 32%, var(--border));
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.migration-limit,
-.migration-job-status,
-.migration-switch-badge {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  background: var(--ti-primary);
+  color: #fff;
+  font-weight: 800;
 }
 
-.migration-job-status.ready,
-.migration-job-status.active {
-  color: var(--success);
+.migration-step--muted {
+  background: rgba(45, 93, 255, 0.1);
+  color: var(--ti-primary);
 }
 
-.migration-job-status.preparing,
-.migration-job-status.queued,
-.migration-job-status.activating {
-  color: var(--accent);
-}
-
-.migration-job-status.failed,
-.migration-job-status.rollback_failed,
-.migration-switch-badge {
-  color: var(--danger);
-}
-
-.migration-panel-body {
-  padding: 14px;
+.migration-upload-panel .el-alert {
+  margin-top: 18px;
 }
 
 .migration-drop-zone {
-  min-height: 164px;
   display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 7px;
-  padding: 22px;
-  border: 1px dashed color-mix(in oklch, var(--accent) 50%, var(--border));
-  border-radius: 6px;
-  background: color-mix(in oklch, var(--settings-tint) 72%, var(--surface));
+  place-items: center;
+  min-height: 210px;
+  margin-top: 18px;
+  padding: 26px;
+  border: 1.5px dashed var(--ti-border-strong);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(45, 93, 255, 0.035), rgba(247, 250, 255, 0.9));
   text-align: center;
   cursor: pointer;
-  transition: border-color .16s ease, background .16s ease;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
 }
 
-.migration-drop-zone:hover {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+.migration-drop-zone:hover,
+.migration-drop-zone:focus-visible,
+.migration-drop-zone.is-dragging {
+  border-color: var(--ti-primary);
+  background: rgba(45, 93, 255, 0.07);
+  outline: none;
+  transform: translateY(-1px);
 }
 
-.migration-drop-zone.disabled {
-  opacity: .52;
+.migration-drop-zone.is-disabled {
   cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
 }
 
-.migration-drop-zone input { display: none; }
+.migration-drop-zone.has-file {
+  border-style: solid;
+  border-color: rgba(31, 157, 104, 0.48);
+  background: rgba(31, 157, 104, 0.055);
+}
+
+.migration-drop-zone__icon {
+  margin-bottom: 13px;
+  color: var(--ti-primary);
+  font-size: 44px;
+}
 
 .migration-drop-zone strong {
   max-width: 100%;
   overflow-wrap: anywhere;
-  font-size: 13px;
+  font-size: 17px;
 }
 
 .migration-drop-zone small {
-  color: var(--muted);
-  font-size: 11px;
+  max-width: 480px;
+  margin-top: 8px;
+  color: var(--ti-text-muted);
+  line-height: 1.6;
 }
 
-.migration-upload-icon {
-  width: 38px;
-  height: 38px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--settings-line);
-  border-radius: 50%;
-  background: var(--surface);
-  color: var(--accent);
+.migration-upload-progress {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(45, 93, 255, 0.05);
 }
 
-.migration-upload-icon svg,
-.migration-history .settings-section-icon svg {
-  width: 19px;
-  height: 19px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.migration-progress {
-  margin: 14px 0 0;
-}
-
-.migration-progress > div:first-child {
+.migration-upload-progress > div {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 7px;
-  color: var(--muted);
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.migration-upload-actions {
+  margin-top: 18px;
+}
+
+.migration-upload-actions p + p {
+  margin-top: 5px;
+}
+
+.migration-button-row {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.migration-warning-text {
+  color: var(--ti-warning-strong) !important;
+}
+
+.migration-safety-notes {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ti-border-soft);
+}
+
+.migration-safety-notes p {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--ti-text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.migration-flow {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(54px, 1fr));
+  gap: 0;
+  margin: 24px 0 20px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.migration-flow__step {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  min-width: 66px;
+  gap: 7px;
+  color: var(--ti-text-muted);
   font-size: 11px;
+  text-align: center;
 }
 
-.migration-progress > div:first-child strong { color: var(--fg); }
+.migration-flow__step::before {
+  position: absolute;
+  top: 6px;
+  left: 0;
+  right: 50%;
+  height: 2px;
+  background: var(--ti-border-soft);
+  content: "";
+}
 
-.migration-progress-track {
-  height: 6px;
-  overflow: hidden;
+.migration-flow__step::after {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  right: 0;
+  height: 2px;
+  background: var(--ti-border-soft);
+  content: "";
+}
+
+.migration-flow__step:first-child::before,
+.migration-flow__step:last-child::after {
+  display: none;
+}
+
+.migration-flow__step i {
+  position: relative;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  border: 3px solid #fff;
   border-radius: 999px;
-  background: var(--border);
+  background: var(--ti-border-strong);
+  box-shadow: 0 0 0 1px var(--ti-border-soft);
 }
 
-.migration-progress-track i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent), var(--secondary));
-  transition: width .2s ease;
+.migration-flow__step.is-complete::before,
+.migration-flow__step.is-complete::after,
+.migration-flow__step.is-current::before {
+  background: var(--ti-success-strong);
 }
 
-.migration-panel-actions {
+.migration-flow__step.is-complete i {
+  background: var(--ti-success-strong);
+}
+
+.migration-flow__step.is-current {
+  color: var(--ti-primary);
+  font-weight: 700;
+}
+
+.migration-flow__step.is-current i {
+  background: var(--ti-primary);
+  box-shadow: 0 0 0 3px rgba(45, 93, 255, 0.15);
+}
+
+.migration-flow__step.is-error {
+  color: var(--ti-danger-strong);
+  font-weight: 700;
+}
+
+.migration-flow__step.is-error i {
+  background: var(--ti-danger-strong);
+}
+
+.migration-progress-card {
+  padding: 17px;
+  border: 1px solid var(--ti-border-soft);
+  border-radius: 16px;
+  background: rgba(247, 250, 255, 0.76);
+}
+
+.migration-progress-card > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+
+.migration-progress-card p {
+  margin: 10px 0 0;
+  color: var(--ti-text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.migration-performance-card {
+  margin-top: 14px;
+  padding: 15px;
+  border: 1px solid rgba(45, 93, 255, 0.2);
+  border-radius: 14px;
+  background: rgba(45, 93, 255, 0.04);
+}
+
+.migration-performance-card__head,
+.migration-performance-card__actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
+}
+
+.migration-performance-card__head p {
+  margin: 4px 0 0;
+  color: var(--ti-text-secondary);
+  font-size: 12px;
+}
+
+.migration-performance-card__actions {
   margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
 }
 
-.migration-panel-actions p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.migration-main button:disabled {
-  opacity: .48;
-  cursor: not-allowed;
-}
-
-.migration-result-grid {
+.migration-performance-card__actions > div {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 14px;
-}
-
-.migration-result-grid > div {
   min-width: 0;
-  display: grid;
-  gap: 5px;
-  padding: 11px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
+  margin-right: auto;
 }
 
-.migration-result-grid span {
-  color: var(--muted);
-  font-size: 10px;
+.migration-performance-card__actions small {
+  color: var(--ti-text-muted);
 }
 
-.migration-result-grid strong {
-  overflow-wrap: anywhere;
-  font-size: 12px;
-}
-
-.migration-error,
-.migration-notice {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in oklch, var(--danger) 28%, var(--border));
-  border-radius: 4px;
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 12px;
-}
-
-.migration-notice.info {
-  border-color: color-mix(in oklch, var(--accent) 28%, var(--border));
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.migration-danger-panel {
-  border-color: color-mix(in oklch, var(--danger) 35%, var(--border));
-}
-
-.migration-danger-panel :deep(.settings-surface-head) {
-  background: color-mix(in oklch, var(--danger-soft) 46%, var(--surface));
-}
-
-.migration-confirm-line {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+.migration-performance-card pre {
+  max-height: 220px;
+  margin: 12px 0 0;
   padding: 12px;
-  border: 1px solid color-mix(in oklch, var(--danger) 20%, var(--border));
-  border-radius: 5px;
-  background: color-mix(in oklch, var(--danger-soft) 40%, var(--surface));
+  overflow: auto;
+  border-radius: 10px;
+  background: #111827;
+  color: #dbeafe;
+  font: 12px/1.55 var(--ti-font-mono, Consolas, monospace);
+}
+
+.migration-performance-card__error {
+  margin: 10px 0 0;
+  color: var(--ti-danger-strong);
+  font-size: 12px;
+}
+.migration-inline-alert {
+  margin-top: 14px;
+}
+
+.migration-job-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.migration-job-facts > div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(247, 250, 255, 0.7);
+}
+
+.migration-job-facts span,
+.migration-report-metrics span {
+  display: block;
+  color: var(--ti-text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.migration-job-facts strong {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.migration-activate-row {
+  align-items: center;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ti-border-soft);
+}
+
+.migration-report-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.migration-report-metrics > div {
+  padding: 16px;
+  border: 1px solid var(--ti-border-soft);
+  border-radius: 14px;
+  background: rgba(247, 250, 255, 0.72);
+}
+
+.migration-report-metrics strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 24px;
+}
+
+.migration-report-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 18px 0 0;
+  border: 1px solid var(--ti-border-soft);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.migration-report-details > div {
+  min-width: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ti-border-soft);
+}
+
+.migration-report-details > div:nth-child(odd) {
+  border-right: 1px solid var(--ti-border-soft);
+}
+
+.migration-report-details > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.migration-report-details dt {
+  color: var(--ti-text-muted);
+  font-size: 12px;
+}
+
+.migration-report-details dd {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+
+.migration-break-all {
+  word-break: break-all;
+}
+
+.migration-history__count {
+  color: var(--ti-text-muted);
+  font-size: 13px;
+}
+
+.migration-history :deep(.el-table) {
+  margin-top: 18px;
   cursor: pointer;
 }
 
-.migration-confirm-line input {
-  margin-top: 3px;
-  accent-color: var(--danger);
-}
-
-.migration-confirm-line span {
+.migration-job-cell {
   display: grid;
-  gap: 3px;
+  gap: 4px;
 }
 
-.migration-confirm-line strong { font-size: 12px; }
-.migration-confirm-line small { color: var(--muted); font-size: 11px; }
-
-.migration-history-list {
-  display: grid;
-  padding: 0 13px;
+.migration-job-cell span {
+  color: var(--ti-text-muted);
+  font-size: 11px;
 }
 
-.migration-history-row {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 0;
-  border: 0;
-  border-top: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg);
-  text-align: left;
+@media (max-width: 1120px) {
+  .migration-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .migration-status-grid,
+  .migration-report-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
-.migration-history-row:first-child { border-top: 0; }
+@media (max-width: 720px) {
+  .migration-hero,
+  .migration-upload-panel,
+  .migration-job-panel,
+  .migration-report,
+  .migration-history {
+    padding: 18px;
+  }
 
-.migration-history-row:hover > span:first-child strong {
-  color: var(--accent);
-}
-
-.migration-history-row > span:first-child {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.migration-history-row strong,
-.migration-history-row small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.migration-history-row strong { font-size: 12px; }
-.migration-history-row small { color: var(--muted); font-size: 10px; }
-
-@media (max-width: 1200px) {
-  .migration-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-@media (max-width: 900px) {
-  .migration-main { width: 100%; }
-  .migration-status-grid { grid-template-columns: 1fr; }
-  .migration-result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
-@media (max-width: 640px) {
-  .migration-breadcrumbs { font-size: 11px; }
-  .migration-titlebar {
-    align-items: stretch;
+  .migration-hero__head,
+  .migration-panel-head,
+  .migration-upload-actions,
+  .migration-activate-row {
     flex-direction: column;
   }
-  .migration-titlebar .page-actions,
-  .migration-titlebar .btn { width: 100%; }
-  .migration-panel :deep(.settings-surface-head),
-  .migration-history :deep(.settings-surface-head) {
-    align-items: flex-start;
-    flex-direction: column;
+
+  .migration-status-grid,
+  .migration-report-metrics,
+  .migration-job-facts,
+  .migration-report-details {
+    grid-template-columns: 1fr;
   }
-  .migration-limit,
-  .migration-job-status,
-  .migration-switch-badge {
-    align-self: flex-start;
+
+  .migration-report-details > div,
+  .migration-report-details > div:nth-child(odd),
+  .migration-report-details > div:nth-last-child(-n + 2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--ti-border-soft);
   }
-  .migration-panel-body { padding: 11px; }
-  .migration-drop-zone { min-height: 148px; padding: 18px 12px; }
-  .migration-panel-actions {
-    align-items: stretch;
-    flex-direction: column;
+
+  .migration-report-details > div:last-child {
+    border-bottom: 0;
   }
-  .migration-panel-actions .btn { width: 100%; }
-  .migration-result-grid { grid-template-columns: 1fr; }
-  .migration-history-row { align-items: flex-start; }
+
+  .migration-button-row {
+    width: 100%;
+  }
+
+  .migration-button-row .el-button {
+    flex: 1;
+  }
 }
 </style>

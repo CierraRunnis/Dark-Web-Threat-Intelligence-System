@@ -1,15 +1,21 @@
 <template>
-  <div ref="screenRoot" class="prototype-screen" @click="handleNavigation"></div>
+  <div
+    ref="screenRoot"
+    class="prototype-screen"
+    :class="bodyClass"
+    @click="handleNavigation"
+  ></div>
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { initializePrototype } from '@/prototype/runtime'
-import { disposePrototypeScreen, hydratePrototypeScreen } from '@/prototype/dataRuntime'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
+import '@/prototype/styles.css'
+import '@/prototype/integration.css'
+import '@/prototype/overrides.css'
+import '@/prototype/aiAggregation.css'
 
 const screens = import.meta.glob('@/prototype/screens/*.html', {
-  eager: true,
   query: '?raw',
   import: 'default',
 })
@@ -17,27 +23,40 @@ const screens = import.meta.glob('@/prototype/screens/*.html', {
 const route = useRoute()
 const router = useRouter()
 const screenRoot = ref(null)
-const cachedScreens = new Map()
+const bodyClass = ref('')
 let renderVersion = 0
-let activeFile = ''
+let disposeRuntime = null
+let disposeExposureRuntime = null
+let exposureStyleElement = null
+let disposeExposureData = null
+
+const exposureFiles = new Set([
+  'monitoring.html',
+  'netdisk-detail.html',
+  'library-detail.html',
+  'code-detail.html',
+  'settings.html',
+])
 
 const screenRoutes = {
   'dashboard.html': '/',
   'intelligence.html': '/intelligence',
+  'ai-aggregation.html': '/ai-aggregation',
+  'ai-aggregation-templates.html': '/ai-aggregation/templates',
   'ransomware.html': '/ransomware',
   'data-leak.html': '/data-leak',
   'vulnerabilities.html': '/vulnerability-alerts',
-  'collector-sites.html': '/collector-control/sites',
-  'collector-sync.html': '/collector-control/sync',
-  'collector-runtime.html': '/collector-control/runtime',
-  'collector-failures.html': '/collector-control/failures',
   'settings.html': '/settings',
+  'collector-sites.html': '/collector-control',
+  'collector-sync.html': '/collector-control',
+  'collector-runtime.html': '/collector-control',
+  'collector-failures.html': '/collector-control/failures',
 }
 
-function screenSource(file) {
+async function screenSource(file) {
   const entry = Object.entries(screens).find(([path]) => path.endsWith(`/screens/${file}`))
   if (!entry) throw new Error(`Prototype screen not found: ${file}`)
-  return entry[1]
+  return entry[1]()
 }
 
 function rewriteHref(rawHref) {
@@ -52,21 +71,15 @@ function rewriteHref(rawHref) {
       || 'netdisk'
     return `/document-exposure/${sourceRoute}`
   }
-  if (file === 'ransomware-detail.html') return `/ransomware/${encodeURIComponent(id)}`
-  if (file === 'data-leak-detail.html') return `/data-leak/${encodeURIComponent(id)}`
-  if (file === 'vulnerability-detail.html') return `/vulnerability-alerts/${encodeURIComponent(id)}`
   if (file === 'netdisk-detail.html') return `/document-exposure/detail/netdisk_aggregator/${encodeURIComponent(id)}`
   if (file === 'library-detail.html') return `/document-exposure/detail/document_library/${encodeURIComponent(id)}`
   if (file === 'code-detail.html') return `/document-exposure/code-monitoring/detail/${encodeURIComponent(id)}`
+  if (file === 'ransomware-detail.html') return `/ransomware/${encodeURIComponent(id)}`
+  if (file === 'data-leak-detail.html') return `/data-leak/${encodeURIComponent(id)}`
+  if (file === 'vulnerability-detail.html') return `/vulnerability-alerts/${encodeURIComponent(id)}`
   if (file === 'event-detail.html') return `/event/${encodeURIComponent(id)}`
-  if (file === 'collector-run-detail.html') {
-    const params = new URLSearchParams(url.searchParams)
-    params.delete('id')
-    const query = params.toString()
-    return `/collector-control/run/${encodeURIComponent(id || 'latest')}${query ? `?${query}` : ''}`
-  }
-  const routePath = screenRoutes[file]
-  return routePath ? `${routePath}${url.search}` : rawHref
+  const path = screenRoutes[file]
+  return path ? `${path}${url.search}` : rawHref
 }
 
 function handleNavigation(event) {
@@ -81,70 +94,109 @@ function handleNavigation(event) {
   router.push(`${url.pathname}${url.search}${url.hash}`)
 }
 
+async function setExposureStyles(enabled, version = renderVersion) {
+  if (!enabled) {
+    exposureStyleElement?.remove()
+    exposureStyleElement = null
+    return
+  }
+  if (exposureStyleElement) return
+  const { default: exposureStyles } = await import('@/prototype/exposure-upstream.css?raw')
+  if (version !== renderVersion || !exposureFiles.has(route.meta.screen)) return
+  exposureStyleElement = document.createElement('style')
+  exposureStyleElement.dataset.prototypeExposureStyles = '1'
+  exposureStyleElement.textContent = exposureStyles
+  document.head.appendChild(exposureStyleElement)
+}
+
+function disposeScreenRuntime() {
+  screenRoot.value?.__dataRuntimeAbort?.abort()
+  disposeRuntime?.()
+  disposeExposureRuntime?.()
+  disposeExposureData?.()
+  disposeRuntime = null
+  disposeExposureRuntime = null
+  disposeExposureData = null
+  if (screenRoot.value) delete screenRoot.value.__prototypeBeforeLeave
+}
+
 async function renderScreen() {
   const version = ++renderVersion
   const file = route.meta.screen
-  disposePrototypeScreen(screenRoot.value)
-  if (activeFile && activeFile !== file && screenRoot.value) {
-    const readyState = screenRoot.value.querySelector('.runtime-data-state[data-state="ready"]')
-    if (activeFile === 'intelligence.html' && readyState) {
-      const fragment = document.createDocumentFragment()
-      fragment.append(...screenRoot.value.childNodes)
-      cachedScreens.set(activeFile, {
-        bodyClassName: document.body.className,
-        fragment,
-        title: document.title,
-      })
-    }
-  }
+  if (!file) return
+  disposeScreenRuntime()
 
-  const cached = activeFile !== file ? cachedScreens.get(file) : null
-  if (cached) {
-    cachedScreens.delete(file)
-    document.title = cached.title
-    document.body.className = cached.bodyClassName
-    document.body.dataset.prototypePage = file
-    document.body.dataset.prototypeSource = route.meta.source || ''
-    document.body.dataset.prototypeRecordId = String(route.params.eventId || route.params.hitId || route.params.runId || '')
-    screenRoot.value.replaceChildren(cached.fragment)
-    activeFile = file
-    return
-  }
-
-  const source = screenSource(file)
+  const source = await screenSource(file)
+  if (version !== renderVersion) return
   const parsed = new DOMParser().parseFromString(source, 'text/html')
   parsed.querySelectorAll('script').forEach((script) => script.remove())
-  parsed.querySelectorAll('a[href]').forEach((link) => link.setAttribute('href', rewriteHref(link.getAttribute('href'))))
+  parsed.querySelectorAll('a[href]').forEach((link) => {
+    link.setAttribute('href', rewriteHref(link.getAttribute('href')))
+  })
   parsed.querySelectorAll('[src]').forEach((node) => {
-    const sourcePath = node.getAttribute('src')
-    if (sourcePath?.startsWith('assets/')) node.setAttribute('src', `/${sourcePath}`)
+    const source = node.getAttribute('src')
+    if (source?.startsWith('assets/')) node.setAttribute('src', `/${source}`)
   })
   parsed.querySelectorAll('image[href]').forEach((node) => {
-    const sourcePath = node.getAttribute('href')
-    if (sourcePath?.startsWith('assets/')) node.setAttribute('href', `/${sourcePath}`)
+    const source = node.getAttribute('href')
+    if (source?.startsWith('assets/')) node.setAttribute('href', `/${source}`)
   })
+
+  const exposureScreen = exposureFiles.has(file)
+  await setExposureStyles(exposureScreen, version)
+  if (version !== renderVersion) return
+  bodyClass.value = parsed.body.className
+  document.body.dataset.prototypePage = file
+  document.body.dataset.prototypeSource = String(route.meta.source || '')
+  document.body.dataset.prototypeRecordId = String(
+    route.params.eventId || route.params.hitId || route.params.runId || '',
+  )
   const monitoringTitle = {
     netdisk: '网盘监测 · 玄鉴',
     library: '文库监测 · 玄鉴',
-    code: '代码监测 · 玄鉴'
+    code: '代码监测 · 玄鉴',
   }[route.meta.source]
   document.title = monitoringTitle || parsed.title || '玄鉴威胁情报平台'
-  document.body.className = parsed.body.className
-  document.body.dataset.prototypePage = file
-  document.body.dataset.prototypeSource = route.meta.source || ''
-  document.body.dataset.prototypeRecordId = String(route.params.eventId || route.params.hitId || route.params.runId || '')
   await nextTick()
   if (version !== renderVersion || !screenRoot.value) return
   screenRoot.value.innerHTML = parsed.body.innerHTML
-  activeFile = file
-  initializePrototype()
-  await hydratePrototypeScreen({ root: screenRoot.value, route, file })
+  const { initializePrototype } = await import('@/prototype/runtime')
+  if (version !== renderVersion || !screenRoot.value) return
+  disposeRuntime = initializePrototype(screenRoot.value, { serverControls: !exposureScreen })
+  if (exposureScreen) {
+    const [{ initializeExposurePrototype }, exposureData] = await Promise.all([
+      import('@/prototype/exposureRuntime'),
+      import('@/prototype/exposureDataRuntime'),
+    ])
+    if (version !== renderVersion || !screenRoot.value) return
+    disposeExposureData = exposureData.disposeExposureDataRuntime
+    disposeExposureRuntime = initializeExposurePrototype(screenRoot.value)
+    await exposureData.hydrateExposurePrototypeScreen({ root: screenRoot.value, route, file })
+  } else {
+    const { hydratePrototypeScreen } = await import('@/prototype/dataRuntime')
+    if (version !== renderVersion || !screenRoot.value) return
+    await hydratePrototypeScreen({ root: screenRoot.value, route, file })
+  }
 }
 
+async function invokePrototypeBeforeLeave(to, from) {
+  const beforeLeave = screenRoot.value?.__prototypeBeforeLeave
+  if (typeof beforeLeave !== 'function') return true
+  const result = await beforeLeave({ to, from })
+  return result === false ? false : true
+}
+
+onBeforeRouteLeave(invokePrototypeBeforeLeave)
+onBeforeRouteUpdate(invokePrototypeBeforeLeave)
+
 watch(() => route.fullPath, renderScreen, { immediate: true })
+onMounted(renderScreen)
+
 
 onBeforeUnmount(() => {
-  disposePrototypeScreen(screenRoot.value)
+  renderVersion += 1
+  disposeScreenRuntime()
+  setExposureStyles(false)
   delete document.body.dataset.prototypePage
   delete document.body.dataset.prototypeSource
   delete document.body.dataset.prototypeRecordId

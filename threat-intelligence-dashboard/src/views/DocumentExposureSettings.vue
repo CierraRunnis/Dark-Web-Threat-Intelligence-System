@@ -38,38 +38,38 @@
             </span>
           </div>
           <div class="ti-table-shell">
-            <el-table :data="pagedModulePlatformRows" table-layout="fixed" style="width: 100%">
-              <el-table-column prop="label" label="信息源" :min-width="settingsSourceNameMinWidth" show-overflow-tooltip />
-              <el-table-column v-if="showSettingsSourceTypeColumn" label="类型" :width="settingsSourceTypeColumnWidth">
+            <el-table :data="pagedModulePlatformRows" table-layout="auto" style="width: 100%">
+              <el-table-column prop="label" label="信息源" min-width="170" />
+              <el-table-column label="类型" min-width="140">
                 <template #default="{ row }">
                   <el-tag effect="plain">{{ platformTypeLabel(row.platform_type) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSettingsSourceAccessColumn" label="接入方式" :width="settingsSourceAccessColumnWidth">
+              <el-table-column label="接入方式" min-width="140">
                 <template #default="{ row }">
                   {{ platformAccessMode(row) }}
                 </template>
               </el-table-column>
-              <el-table-column label="域名 / 地址" :min-width="settingsSourceAddressMinWidth" show-overflow-tooltip>
+              <el-table-column label="域名 / 地址" min-width="240" show-overflow-tooltip>
                 <template #default="{ row }">
                   {{ sourceAddress(row) }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSettingsSourcePolicyColumn" label="默认策略" :width="settingsSourcePolicyColumnWidth">
+              <el-table-column label="默认策略" width="120">
                 <template #default="{ row }">
                   <el-tag :type="sourcePolicyTagType(row)" effect="light">
                     {{ sourcePolicyLabel(row) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="状态" :width="settingsSourceStateColumnWidth">
+              <el-table-column label="状态" width="130">
                 <template #default="{ row }">
                   <el-tag :type="sourceStateTagType(row)" effect="light">
                     {{ sourceStateLabel(row) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSettingsSourceHomepageColumn" label="主页" :width="settingsSourceHomepageColumnWidth">
+              <el-table-column label="主页" width="110">
                 <template #default="{ row }">
                   <el-link v-if="row.homepage_url" :href="row.homepage_url" target="_blank" type="primary">打开</el-link>
                   <span v-else>-</span>
@@ -102,34 +102,34 @@
         <div class="ti-card-body">
           <div class="ti-table-shell">
             <el-table :data="netdiskCursorRows" table-layout="fixed" style="width: 100%" size="small">
-              <el-table-column label="来源" :min-width="cursorSourceMinWidth" show-overflow-tooltip>
+              <el-table-column label="来源" min-width="130" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span>{{ row.sourceLabel || row.sourceKey || '-' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="关键词" :min-width="cursorTermMinWidth" show-overflow-tooltip>
+              <el-table-column label="关键词" min-width="150" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span>{{ row.term || '-' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="showCursorSuggestedColumn" label="建议页码" :width="cursorSuggestedColumnWidth">
+              <el-table-column label="建议页码" min-width="130">
                 <template #default="{ row }">
                   <span class="cursor-pages">{{ formatSuggestedPages(row) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="状态" :width="cursorStatusColumnWidth">
+              <el-table-column label="状态" min-width="110">
                 <template #default="{ row }">
                   <span :class="['state-status', `state-status--${row.healthStatus || 'healthy'}`]">
                     {{ healthStatusLabel(row.healthStatus) }}
                   </span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="showCursorCountersColumn" label="空页/重复页" :width="cursorCountersColumnWidth">
+              <el-table-column label="空页/重复页" min-width="110">
                 <template #default="{ row }">
                   <span>{{ formatCursorCounters(row) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="showCursorUpdatedColumn" label="更新时间" :width="cursorUpdatedColumnWidth">
+              <el-table-column label="更新时间" min-width="170">
                 <template #default="{ row }">
                   <span>{{ formatDateTime(row.updatedAt || row.healthUpdatedAt) || '-' }}</span>
                 </template>
@@ -148,25 +148,25 @@
         </div>
         <div class="ti-card-body">
           <div class="ti-table-shell">
-            <el-table :data="moduleSessions" table-layout="fixed" style="width: 100%">
-              <el-table-column prop="label" label="平台" :min-width="sessionPlatformMinWidth" show-overflow-tooltip />
-              <el-table-column label="状态" :width="sessionStatusColumnWidth">
+            <el-table :data="moduleSessions" table-layout="auto" style="width: 100%">
+              <el-table-column prop="label" label="平台" min-width="180" />
+              <el-table-column label="状态" width="140">
                 <template #default="{ row }">
                   {{ statusLabelMap[row.status] || row.status || 'unknown' }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSessionAccountColumn" prop="account_label" label="账号标签" :width="sessionAccountColumnWidth">
+              <el-table-column prop="account_label" label="账号标签" min-width="180">
                 <template #default="{ row }">
                   <el-input v-model="sessionDrafts[row.platform]" placeholder="账号标签" size="small" />
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSessionVerifiedColumn" prop="last_verified_at" label="最近校验" :width="sessionVerifiedColumnWidth">
+              <el-table-column prop="last_verified_at" label="最近校验" min-width="180">
                 <template #default="{ row }">
                   {{ formatDateTime(row.last_verified_at) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showSessionErrorColumn" prop="last_error" label="最近错误" :min-width="sessionErrorMinWidth" show-overflow-tooltip />
-              <el-table-column label="操作" :width="sessionActionColumnWidth">
+              <el-table-column prop="last_error" label="最近错误" min-width="240" show-overflow-tooltip />
+              <el-table-column label="操作" min-width="320" fixed="right">
                 <template #default="{ row }">
                   <div class="table-actions">
                     <el-button
@@ -280,7 +280,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { useDocumentExposureApi } from '@/composables/useDocumentExposureApi'
@@ -291,6 +291,19 @@ const route = useRoute()
 const router = useRouter()
 
 const MODULE_CONFIG = {
+  search_engine: {
+    sourceFamily: 'search_engine',
+    label: '搜索引擎监测',
+    title: '搜索引擎监测配置',
+    eyebrow: 'Search Engine',
+    subtitle: '配置搜索引擎监测对象、关键词、文件类型和搜索来源。',
+    sourceLabel: '搜索引擎',
+    sourceTitle: '搜索引擎信息源',
+    sessionTitle: '搜索平台会话',
+    watchlistTitle: '搜索引擎监测对象与关键词',
+    settingsRoute: '/document-exposure/search-engine/settings',
+    platformTypes: ['search_engine'],
+  },
   netdisk_aggregator: {
     sourceFamily: 'netdisk_aggregator',
     label: '网盘监测',
@@ -332,7 +345,6 @@ const netdiskSourceStates = ref([])
 const netdiskSourceHealth = ref([])
 const selectedWatchlistId = ref(null)
 const sourcePage = ref(1)
-const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const sourcePageSize = 10
 const sessionDrafts = reactive({})
 const loginStarting = reactive({})
@@ -362,38 +374,9 @@ const watchlistForm = reactive({
 })
 
 const currentSourceFamily = computed(() => (
-  route.meta.sourceFamily || route.query.source_family || 'netdisk_aggregator'
+  route.meta.sourceFamily || route.query.source_family || 'search_engine'
 ))
-const showSettingsSourceTypeColumn = computed(() => viewportWidth.value >= 1180)
-const showSettingsSourceAccessColumn = computed(() => viewportWidth.value >= 1500)
-const showSettingsSourcePolicyColumn = computed(() => viewportWidth.value >= 1680)
-const showSettingsSourceHomepageColumn = computed(() => viewportWidth.value >= 1280)
-const settingsSourceNameMinWidth = computed(() => viewportWidth.value < 1500 ? 150 : 170)
-const settingsSourceTypeColumnWidth = computed(() => 116)
-const settingsSourceAccessColumnWidth = computed(() => 120)
-const settingsSourceAddressMinWidth = computed(() => viewportWidth.value < 1500 ? 200 : 240)
-const settingsSourcePolicyColumnWidth = computed(() => 108)
-const settingsSourceStateColumnWidth = computed(() => viewportWidth.value < 1500 ? 106 : 116)
-const settingsSourceHomepageColumnWidth = computed(() => 84)
-const showCursorSuggestedColumn = computed(() => viewportWidth.value >= 1180)
-const showCursorCountersColumn = computed(() => viewportWidth.value >= 1500)
-const showCursorUpdatedColumn = computed(() => viewportWidth.value >= 1500)
-const cursorSourceMinWidth = computed(() => viewportWidth.value < 1500 ? 130 : 150)
-const cursorTermMinWidth = computed(() => viewportWidth.value < 1500 ? 140 : 160)
-const cursorSuggestedColumnWidth = computed(() => 110)
-const cursorStatusColumnWidth = computed(() => 100)
-const cursorCountersColumnWidth = computed(() => 110)
-const cursorUpdatedColumnWidth = computed(() => 150)
-const showSessionAccountColumn = computed(() => viewportWidth.value >= 1180)
-const showSessionVerifiedColumn = computed(() => viewportWidth.value >= 1500)
-const showSessionErrorColumn = computed(() => viewportWidth.value >= 1680)
-const sessionPlatformMinWidth = computed(() => viewportWidth.value < 1500 ? 130 : 150)
-const sessionStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 100 : 110)
-const sessionAccountColumnWidth = computed(() => viewportWidth.value < 1500 ? 140 : 150)
-const sessionVerifiedColumnWidth = computed(() => 150)
-const sessionErrorMinWidth = computed(() => 180)
-const sessionActionColumnWidth = computed(() => viewportWidth.value < 1500 ? 220 : 240)
-const currentModule = computed(() => MODULE_CONFIG[currentSourceFamily.value] || MODULE_CONFIG.netdisk_aggregator)
+const currentModule = computed(() => MODULE_CONFIG[currentSourceFamily.value] || MODULE_CONFIG.search_engine)
 const modulePlatformRows = computed(() => allPlatforms.value
   .filter((item) => currentModule.value.platformTypes.includes(item.platform_type))
   .sort(comparePlatformRows))
@@ -466,6 +449,7 @@ function platformSortRank(row) {
 
 function platformTypeLabel(type) {
   return {
+    search_engine: '搜索引擎',
     netdisk_search: '网盘聚合源',
     netdisk_share: '网盘分享平台',
     document_library: '文库平台',
@@ -473,6 +457,7 @@ function platformTypeLabel(type) {
 }
 
 function platformAccessMode(row) {
+  if (row.platform === 'pansou') return '本地 API'
   if (row.platform === 'panhub') return '外部 API'
   if (row.discovery_only) return '公开检索'
   if (row.platform_type === 'netdisk_share') return '链接识别'
@@ -744,18 +729,8 @@ watch(() => modulePlatformRows.value.length, (total) => {
   }
 })
 
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth
-}
-
 onMounted(async () => {
-  updateViewportWidth()
-  window.addEventListener('resize', updateViewportWidth)
   await Promise.all([loadPlatforms(), loadSessions(), loadWatchlists(), loadNetdiskCursor()])
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', updateViewportWidth)
 })
 </script>
 

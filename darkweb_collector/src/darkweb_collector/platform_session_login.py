@@ -15,6 +15,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--homepage-url", required=True)
     parser.add_argument("--user-data-dir", required=True)
     parser.add_argument("--storage-state", required=True)
+    parser.add_argument("--proxy-server", default="")
     return parser
 
 
@@ -38,6 +39,8 @@ def main() -> int:
                 }
                 if channel:
                     launch_kwargs["channel"] = channel
+                if args.proxy_server:
+                    launch_kwargs["proxy"] = {"server": args.proxy_server}
                 browser = playwright.chromium.launch(**launch_kwargs)
                 break
             except Exception as exc:

@@ -16,16 +16,11 @@
 
 ## 当前已接入站点
 
-- `changan`
 - `dragonforce`
 - `darkforums`
-- `cracked`
-- `raidforums`
-- `pwnfrm`
 - `chaos`
-- `lynx`
 
-站点配置在 [sites.yaml](./sites.yaml)。
+站点配置在 [sites.yaml](/D:/bishe/darkweb_collector/sites.yaml)。
 
 ## 抓取路由规则
 
@@ -38,25 +33,17 @@
 
 - `http://abc.onion/...` 走 Tor
 - `https://abc.onion/...` 也走 Tor
-- `https://darkforums.as/...` 优先直连，失败时回退浏览器抓取
-- `https://cracked.st/...` 由浏览器队列执行，仍优先直连；403 时回退 Chromium，并在数据目录保存隔离的匿名站点状态
-- `https://raidforums.im/...` 使用 MyBB 通用解析逻辑，优先直连，页面校验失败时回退 Chromium
+- `https://darkforums.as/...` 在站点配置为 `tor_http`，强制走 Tor
 
 `sites.yaml` 中的：
 
 - `seed_fetch_mode`
 - `detail_fetch_mode`
-- `browser_queue`
-- `max_concurrent_details`
 
 只表示抓取方式：
 
 - `tor_http`：非浏览器直取
 - `browser`：浏览器渲染
-
-浏览器任务按来源隔离：公网论坛使用 `browser_public`，`.onion` 站点使用
-`browser_onion`。`browser_render` 仅用于兼容升级前已经入队的任务。
-`max_concurrent_details` 限制同一站点同时执行的详情任务数量，默认值为 `1`。
 
 是否走 Tor 由目标 URL 自动决定。
 
@@ -67,7 +54,7 @@
 推荐先进入虚拟环境：
 
 ```bash
-cd /path/to/project/darkweb_collector
+cd /path/to/bishe/darkweb_collector
 source venv/bin/activate
 ```
 
@@ -79,7 +66,7 @@ pip install -r requirements.txt
 
 ### 2. Tor 环境
 
-启动脚本会自动安装并更新项目私有的 Tor Expert Bundle，不要求 Windows 侧预装或启动 Tor Browser。默认由脚本设置 SOCKS 地址；仅在连接外部 Tor 时才需要手动覆盖：
+如果要抓取 `.onion` 站点，需要先确保 Windows 侧 Tor Browser 已启动，并且 WSL 可以访问：
 
 ```bash
 export TOR_SOCKS_HOST=127.0.0.1
@@ -92,70 +79,26 @@ export TOR_SOCKS_PORT=9150
 curl --socks5-hostname 127.0.0.1:9150 https://check.torproject.org/api/ip
 ```
 
-### 3. 明网 HTTP/HTTPS 代理
+### 3. 明网出网（TUN 模式）
 
-如果要让明网站点走普通代理，可设置：
+Clash 运行在 TUN 模式时，明网流量由 TUN 虚拟网卡在 IP 层透明出网，采集器无需设置任何 HTTP 代理，直连即可，因此**不要**设置 `PROXY_HOST` / `PROXY_PORT`。
+
+如果某些环境没有启用 TUN、仍需走显式代理，可临时设置：
 
 ```bash
 export PROXY_HOST=127.0.0.1
 export PROXY_PORT=7890
 ```
 
-如果不设置这两个变量，明网站点会尝试直连。
+不设置这两个变量时，明网站点直连。
 
 ## 常用运行方式
 
 先进入项目目录：
 
 ```bash
-cd /path/to/project/darkweb_collector
+cd /path/to/bishe/darkweb_collector
 ```
-
-## 一键启动整套服务
-
-如果你希望一次性启动 Redis、后端 API、前端、采集 worker、scheduler 和同步任务，推荐在 WSL 中使用：
-
-```bash
-bash scripts/start_all_services_wsl.sh start
-```
-
-脚本会自动：
-
-- 校验 `tmux`、`python3`、`python3-venv`、`python3-pip`、`npm`、`redis-server`、`redis-cli`、`curl`
-- 在 Debian/Ubuntu/WSL 环境下，缺失时自动通过 `apt-get` 安装系统依赖
-- 自动创建后端虚拟环境并安装 `requirements.txt`
-- 自动安装 Playwright Firefox/Chromium 运行时，并在 Debian/Ubuntu/WSL 环境下补齐浏览器系统依赖
-- 检查前端 `node_modules`，缺失时自动执行 `npm install`
-- 自动安装或复用 PostgreSQL 16，幂等准备项目迁移数据库和账号；显式配置外部 PostgreSQL 时跳过本机安装
-- 准备 WSL 本地运行时数据库；如果没有历史数据库，会自动初始化空库
-- 用 `tmux` 拉起整套服务并保留各窗口日志
-
-常用子命令：
-
-```bash
-# 启动
-bash scripts/start_all_services_wsl.sh start
-
-# 查看状态
-bash scripts/start_all_services_wsl.sh status
-
-# 进入 tmux 会话
-bash scripts/start_all_services_wsl.sh attach
-
-# 停止
-bash scripts/start_all_services_wsl.sh stop
-
-# 卸载运行组件但保留数据库、采集输出和登录配置
-bash scripts/start_all_services_wsl.sh uninstall keep-data
-
-# 彻底删除项目管理的数据（需要输入 DELETE）
-bash scripts/start_all_services_wsl.sh uninstall purge-data
-```
-
-默认启动后可访问：
-
-- 前端：`http://localhost:5173`
-- 后端健康检查：`http://127.0.0.1:8000/api/health`
 
 ### 查看当前站点
 
@@ -191,100 +134,6 @@ python scripts/crawl.py run-site --site darkforums --continuous --interval-secon
 python scripts/crawl.py show-runs --limit 20
 ```
 
-## Bot 助手推送
-
-`darkweb_collector.bot_assistant` 和 `darkweb_collector.dingtalk_bot` 支持同时配置企业微信智能机器人和钉钉自定义机器人。企业微信可接收威胁情报摘要与监测通知；代码监测完成后，两类机器人都会收到新增且进入“代码泄露监测主列表”的记录，已抑制列表不会推送。
-
-### 前端配置
-
-启动后端 API 和前端后，进入：
-
-```text
-http://localhost:5173/collector-control
-```
-
-在“Bot 助手推送”卡片中填写：
-
-- `Bot ID`：企业微信“智能机器人”API 配置中显示的 Bot ID。
-- `Secret`：企业微信“智能机器人”API 配置中显示的 Secret。
-- `钉钉 Webhook`：钉钉群自定义机器人提供的完整 Webhook，也可以只填写 `access_token`。
-- `钉钉加签 Secret`：自定义机器人启用“加签”安全设置时填写；未启用加签时可留空。
-
-企业微信后台需选择“API 配置”，连接方式选择“使用长连接”。点击“保存配置”后，配置会保存到后端运行数据目录的 `bot_assistant_settings.json`，页面只显示脱敏后的 Bot ID，不回显完整 Secret。保存后把机器人拉进目标群聊，或直接私聊机器人，后端会通过长连接收到回调并自动登记该会话；监测事件和测试推送会发送到所有已登记会话。
-
-钉钉配置独立保存到同一运行数据目录下的 `dingtalk_bot_settings.json`，页面只显示脱敏后的 Webhook。企业微信与钉钉配置互不覆盖，可同时接收代码泄露监测主列表的新命中通知。
-
-### API 配置
-
-查看配置状态：
-
-```bash
-curl http://127.0.0.1:8000/api/bot/status
-```
-
-保存企业微信机器人配置：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/bot/config \
-  -H "Content-Type: application/json" \
-  -d '{"provider":"wechat_work_aibot","bot_id":"企业微信智能机器人 Bot ID","secret":"企业微信智能机器人 Secret"}'
-```
-
-保存并测试钉钉机器人配置：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/dingtalk/config \
-  -H "Content-Type: application/json" \
-  -d '{"webhook_url":"https://oapi.dingtalk.com/robot/send?access_token=TOKEN","secret":"SEC..."}'
-curl -X POST http://127.0.0.1:8000/api/dingtalk/send \
-  -H "Content-Type: application/json" \
-  -d '{"title":"测试推送","content":"### 暗网情报系统\n> 钉钉机器人测试消息"}'
-```
-
-触发情报摘要推送：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/bot/send \
-  -H "Content-Type: application/json" \
-  -d '{"type":"digest","limit":5}'
-```
-
-本地调试不实际发出请求：
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/bot/send \
-  -H "Content-Type: application/json" \
-  -d '{"type":"markdown","content":"### 测试推送","dry_run":true}'
-```
-
-### CLI 与环境变量兜底
-
-CLI 会优先使用后端已保存配置和已自动登记的会话目标；也可以通过参数临时传入 Bot ID、Secret 和推送目标：
-
-```bash
-python scripts/crawl.py send-bot-message --type digest --limit 5
-python scripts/crawl.py send-bot-message --type digest --bot-id "Bot ID" --secret "Secret" --chat-id "userid 或 chatid"
-python scripts/crawl.py send-bot-message --type text --content "暗网情报系统测试消息"
-python scripts/crawl.py send-bot-message --type markdown --content "### 暗网情报系统\n> 测试推送"
-python scripts/crawl.py send-bot-message --type digest --bot-id "Bot ID" --secret "Secret" --chat-id "userid 或 chatid" --dry-run
-```
-
-部署时也可以继续使用环境变量作为兜底配置：
-
-```bash
-export WECOM_BOT_ID="企业微信智能机器人 Bot ID"
-export WECOM_SECRET="企业微信智能机器人 Secret"
-export WECOM_HOME_CHANNEL="userid 或 chatid"
-export DINGTALK_BOT_WEBHOOK="钉钉自定义机器人 Webhook"
-export DINGTALK_BOT_SECRET="钉钉加签 Secret"
-```
-
-群机器人 Webhook 仍作为兼容模式保留，显式设置 `BOT_PROVIDER=wechat_work_webhook` 后可使用：
-
-- `WECHAT_WORK_BOT_WEBHOOK`
-- `WECHAT_WORK_BOT_SECRET`
-- `WECHAT_BOT_WEBHOOK`
-
 ### 启动 API
 
 ```bash
@@ -296,10 +145,10 @@ python -m uvicorn darkweb_collector.api_app:app --host 127.0.0.1 --port 8000
 
 项目里还保留了一些兼容或辅助脚本：
 
-- [fetch_dragonforce.py](./scripts/fetch_dragonforce.py)
-- [fetch_darkforums.py](./scripts/fetch_darkforums.py)
-- [fetch_onion_playwright.py](./scripts/fetch_onion_playwright.py)
-- [fetch_onion_playwright_windows.py](./scripts/fetch_onion_playwright_windows.py)
+- [fetch_dragonforce.py](/D:/bishe/darkweb_collector/scripts/fetch_dragonforce.py)
+- [fetch_darkforums.py](/D:/bishe/darkweb_collector/scripts/fetch_darkforums.py)
+- [fetch_onion_playwright.py](/D:/bishe/darkweb_collector/scripts/fetch_onion_playwright.py)
+- [fetch_onion_playwright_windows.py](/D:/bishe/darkweb_collector/scripts/fetch_onion_playwright_windows.py)
 
 其中：
 
@@ -316,21 +165,13 @@ python -m uvicorn darkweb_collector.api_app:app --host 127.0.0.1 --port 8000
 export REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
-Windows 一键启动未显式配置 `REDIS_URL` 时会自动准备项目托管的 Microsoft Garnet，并使用 `redis://127.0.0.1:6380/0`。该兼容路径固定使用 DB 0，支持本项目当前 Celery 与状态锁命令，不应扩展为 Redis Streams 或其他未经验证的命令。
-
 启动 worker：
 
 ```bash
 python scripts/crawl.py worker --queue seed_http
 python scripts/crawl.py worker --queue detail_http
-python scripts/crawl.py worker --queue browser_public
-python scripts/crawl.py worker --queue browser_onion
+python scripts/crawl.py worker --queue browser_render
 ```
-
-一键启动脚本默认启动两个公网浏览器 worker 和一个 Onion 浏览器 worker。
-可用 `DARKWEB_BROWSER_PUBLIC_CONCURRENCY`、`DARKWEB_BROWSER_ONION_CONCURRENCY`
-分别扩容；旧的 `DARKWEB_BROWSER_CONCURRENCY` 仍作为总量兼容配置。
-为保证两个队列都可消费，隔离模式下浏览器 worker 总数最低为 `2`。
 
 投递到期任务：
 
@@ -338,7 +179,7 @@ python scripts/crawl.py worker --queue browser_onion
 python scripts/crawl.py enqueue-due
 ```
 
-详细说明可参考 [QUEUE_WORKFLOW.md](./QUEUE_WORKFLOW.md)。
+详细说明可参考 [QUEUE_WORKFLOW.md](/D:/bishe/darkweb_collector/QUEUE_WORKFLOW.md)。
 
 ## 输出与数据
 
@@ -367,11 +208,6 @@ python scripts/crawl.py enqueue-due
 SQLite 默认路径：
 
 - `data/collector.db`
-
-激活 PostgreSQL 数据发布后，API 和 worker 在各自进程内复用线程安全连接池，
-归还连接前会回滚未结束事务。默认每进程最少 `1`、最多 `8` 个连接，等待连接
-最长 `10` 秒；可分别通过 `DARKWEB_POSTGRES_POOL_MIN`、
-`DARKWEB_POSTGRES_POOL_MAX`、`DARKWEB_POSTGRES_POOL_WAIT_SECONDS` 调整。
 
 主要包含：
 
@@ -405,8 +241,8 @@ SQLite 默认路径：
 
 1. 在 `src/darkweb_collector/sites/<site>.py` 中实现 parser
 2. 在 `src/darkweb_collector/adapters/<site>.py` 中实现 `SiteAdapter`
-3. 在 [registry.py](./src/darkweb_collector/adapters/registry.py) 中注册
-4. 在 [sites.yaml](./sites.yaml) 中新增站点配置
+3. 在 [registry.py](/D:/bishe/darkweb_collector/src/darkweb_collector/adapters/registry.py) 中注册
+4. 在 [sites.yaml](/D:/bishe/darkweb_collector/sites.yaml) 中新增站点配置
 5. 通过：
 
 ```bash
@@ -422,9 +258,9 @@ python scripts/crawl.py run-site --site <site_name> --once
 ```bash
 python scripts/import_html_sample.py \
   --site dragonforce \
-  --input /mnt/d/project/darkweb_collector/output/dragonforce/latest.html \
+  --input /mnt/d/bishe/darkweb_collector/output/dragonforce/latest.html \
   --source-url http://dragonforxxbp3awc7mzs5dkswrua3znqyx5roefmi4smjrsdi22xwqd.onion/ \
-  --output-json /mnt/d/project/darkweb_collector/output/imported/dragonforce_from_sample.json
+  --output-json /mnt/d/bishe/darkweb_collector/output/imported/dragonforce_from_sample.json
 ```
 
 这个模式适合：
@@ -449,6 +285,56 @@ python scripts/import_html_sample.py \
 - `browser` 模式资源开销高于非浏览器模式，应只在确实需要 JS 渲染时使用
 - 当前持续运行模式是“轮询式持续运行”，不是无间隔高频抓取
 
-## 数据库与镜像文件迁移
+## Agent code-leak API
 
-项目支持用确定性的外部工具生成 `.dwti` 迁移包，再由管理员页面一次性导入 PostgreSQL 和镜像文件。Windows、Debian / Ubuntu、WSL 和 Codespaces 首次启动会自动准备 PostgreSQL 16；显式配置外部目标时不会安装本机服务。外部打包工具和迁移包应独立存放在项目目录之外；项目内只保留 PostgreSQL 运行时准备、导入、校验、激活和回退功能。部署前提和导入流程见 [DATA_MIGRATION.md](./DATA_MIGRATION.md)。
+Set a dedicated key before starting the API process:
+
+```bash
+export DARKWEB_AGENT_API_KEY='replace-with-a-long-random-key'
+python scripts/serve_api.py
+```
+
+The agent endpoints accept either `X-API-Key` or `Authorization: Bearer`:
+
+```bash
+curl -H "X-API-Key: $DARKWEB_AGENT_API_KEY" \
+  "http://127.0.0.1:8000/api/agent/code-leaks?limit=20"
+
+curl -H "Authorization: Bearer $DARKWEB_AGENT_API_KEY" \
+  "http://127.0.0.1:8000/api/agent/code-leaks/123"
+```
+
+These endpoints intentionally return the complete stored evidence without redaction:
+`rawPayload`, all snapshots, raw `findings[].value`, and each snapshot's parsed
+`rawArtifactContent`. If `DARKWEB_AGENT_API_KEY` is not configured, the
+endpoints return HTTP 503.
+
+## AI聚合（项目内模块）
+
+AI聚合已接入现有 FastAPI 与权限系统，账号需拥有 `ai_aggregation` 模块权限；
+接口统一位于 `/api/ai-aggregation`。Profile、Run、报告索引和逐目标投递记录均写入
+主库 `collector.db` 的 `ai_aggregation_*` 表，Markdown 报告写入项目
+`output/ai-aggregation/reports/`，不会创建独立数据库或服务端口。
+
+Profile 会整体保存 `prompt_template` 与换行输入形成的 `keywords[]`。默认模板为
+`搜索 {{keywords}} {{time_range}} 的威胁情报`；运行时关键词以顿号连接，时间变量渲染为
+`最近 N 天`。调用 `POST /api/ai-aggregation/profiles/{profile_id}/run` 可用
+`keywords` 和 `search_window_days` 覆盖本次快照，不改写 Profile；多个关键词进入同一个
+query，只创建一次 Run、一次 Flocks execution 和一份聚合报告，不按关键词 fan-out。
+响应仍以 `keyword=keywords[0]`
+兼容旧客户端。
+
+默认 `DARKWEB_AI_AGGREGATION_MODE=mock`，同时最多分析 2 份、排队 50 份。
+分析与投递可以分别切换；真实分析设置 `DARKWEB_AI_AGGREGATION_MODE=live`，真实
+Callback/企微投递还需设置 `DARKWEB_AI_AGGREGATION_DELIVERY_MODE=live`。Live 模式
+同时需要 `FLOCKS_BASE_URL` 和 `FLOCKS_API_KEY`。工作流默认使用
+`threat_intel_search_pipeline`，可通过 `DARKWEB_AI_AGGREGATION_WORKFLOW_ID` 覆盖。
+
+本机 Flocks 可避免复制 Token：设置 `FLOCKS_SECRET_FILE` 指向 Flocks 的
+`.secret.json`，项目会读取其中的 `server_api_token`。如需使用其他 secret id，设置
+`FLOCKS_API_TOKEN_SECRET_ID`。显式设置的 `FLOCKS_API_KEY` 优先级更高。
+
+企业微信投递只保存已有 Flocks 会话的 `session_id`，不会复制 Bot Token 或通道凭据。
+Callback Live 投递默认只允许 `localhost`、`127.0.0.1`、`::1`，可用
+`DARKWEB_AI_AGGREGATION_CALLBACK_ALLOWED_HOSTS` 显式扩充。关键词仍属于不可信输入，
+模板渲染不能消除语义提示注入；Live 报告必须结合来源覆盖和原始证据人工复核。

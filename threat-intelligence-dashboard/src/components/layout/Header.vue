@@ -1,6 +1,8 @@
 <template>
   <header class="header">
     <div class="header__actions">
+      <span class="header__version">版本 <strong>{{ appVersion }}</strong></span>
+
       <el-badge :value="6" class="header__badge">
         <el-button circle class="header__action-btn" aria-label="通知">
           <el-icon><Bell /></el-icon>
@@ -78,6 +80,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuth } from '@/composables/useAuth'
+import packageMetadata from '../../../package.json'
 
 const router = useRouter()
 const { state, loadCurrentUser, changePassword, logout } = useAuth()
@@ -92,6 +95,7 @@ const passwordForm = reactive({
 
 const username = computed(() => state.user?.username || 'admin')
 const displayName = computed(() => state.user?.display_name || username.value)
+const appVersion = `v${packageMetadata.version}`
 
 const passwordRules = {
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
@@ -183,6 +187,18 @@ async function submitPasswordChange() {
   gap: 12px;
 }
 
+.header__version {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(224, 154, 27, 0.5);
+  border-radius: 5px;
+  color: #9a5d00;
+  font-size: 12px;
+}
+
 .header__action-btn,
 .header__profile-btn {
   height: 42px;
@@ -236,6 +252,10 @@ async function submitPasswordChange() {
   .header {
     min-height: 72px;
     padding: 14px 18px 12px;
+  }
+
+  .header__version {
+    display: none;
   }
 
   .header__profile-btn {

@@ -2,16 +2,13 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from html import unescape
 from hashlib import sha1
 import json
-import logging
 from pathlib import Path
 import re
 import sqlite3
 import socket
-from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -25,21 +22,44 @@ except Exception:  # pragma: no cover - optional until dependencies are installe
     Locale = None
 
 from darkweb_collector.config import get_site_config
-from darkweb_collector.detail_i18n import translate_event_title_cached
+from darkweb_collector.detail_i18n import translate_event_title_live
 from darkweb_collector.db import (
-    list_document_hit_snapshots,
-    list_document_hits,
     get_normalized_intelligence_cache_state,
     get_normalized_intelligence_event,
     list_ransomware_live_victims,
     list_normalized_intelligence_events,
+    list_normalized_intelligence_event_page,
+    mark_normalized_intelligence_applied,
     replace_normalized_intelligence_events,
     upsert_normalized_intelligence_cache_state,
 )
-from darkweb_collector.runtime import output_root, project_root
-from darkweb_collector.sites.cracked import normalize_cracked_timestamp
-from darkweb_collector.sites.darkforums import clean_extracted_attackers, normalize_darkforums_timestamp
+from darkweb_collector.runtime import project_root
+from darkweb_collector.sites.darkforums import normalize_darkforums_timestamp
+from darkweb_collector.sites.breached import normalize_breached_timestamp
 from darkweb_collector.sites.pwnfrm import normalize_pwnfrm_timestamp
+from darkweb_collector.sites.updap import normalize_updap_timestamp
+
+# Per-site fallback timestamp normalisers. The shared `forum_details` table
+# stores raw timestamp strings whose format depends on which site they came
+# from (darkforums uses DD-MM-YY, pwnfrm/breached use other shapes), so we
+# dispatch on `site_name` rather than blindly invoking the darkforums parser
+# — which would otherwise crash on a pwnfrm MM-DD-YYYY string with the
+# infamous "month must be in 1..12".
+_FORUM_TIMESTAMP_NORMALISERS = {
+    "darkforums": normalize_darkforums_timestamp,
+    "pwnfrm": normalize_pwnfrm_timestamp,
+    "breached": normalize_breached_timestamp,
+    "updap": normalize_updap_timestamp,
+}
+
+
+def _normalise_forum_timestamp(site_name: str | None, raw: str | None, *, collected_at_utc: str | None) -> str:
+    fn = _FORUM_TIMESTAMP_NORMALISERS.get(str(site_name or "").lower(), normalize_darkforums_timestamp)
+    try:
+        return fn(raw, collected_at_utc=collected_at_utc) or ""
+    except Exception as exc:
+        print(f"[normalized_intelligence] timestamp normalise failed for site={site_name!r}: {exc}")
+        return ""
 from darkweb_collector.utils import safe_stem
 from darkweb_collector.vulnerability_i18n import (
     build_affected_version_items,
@@ -54,48 +74,16 @@ from darkweb_collector.vulnerability_i18n import (
 )
 
 
-logger = logging.getLogger(__name__)
-NORMALIZED_REFRESH_ADVISORY_LOCK_ID = int.from_bytes(b"DWTINORM", "big")
-_NORMALIZED_REFRESH_LOCK = Lock()
 DOMAIN_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
 WORD_RE = re.compile(r"[A-Za-z0-9]+")
 
 SOURCE_LABELS = {
-    "changan": "长安不夜城",
-    "cracked": "Cracked",
     "darkforums": "DarkForums",
+    "updap": "UpDap",
     "dragonforce": "DragonForce",
     "dragonforceblog": "DragonForce",
     "chaos": "Chaos",
     "lynx": "Lynx",
-    "pwnfrm": "PwnedForums",
-    "raidforums": "RaidForums",
-    "baidu_wenku": "百度文库",
-    "docin": "豆丁",
-    "doc88": "道客巴巴",
-    "book118": "原创力文档",
-    "iask_share": "爱问共享资料",
-    "panhub": "PanHub",
-    "pikasoo": "皮卡搜索",
-    "lzpanx": "懒盘搜索",
-    "esoua": "爱搜",
-    "xiaobaipan": "小白盘",
-    "xiaobudian": "小不点搜索",
-    "lingfengyun": "凌风云",
-    "dalipan": "大力盘",
-    "pandashi": "盘大师",
-    "panyq": "盘友圈",
-    "baidupan_share": "百度网盘",
-    "aliyundrive_share": "阿里云盘",
-    "quark_share": "夸克网盘",
-    "tianyi_share": "天翼云盘",
-    "pan123_share": "123云盘",
-    "onedrive_share": "OneDrive",
-    "xunlei_share": "迅雷云盘",
-    "uc_share": "UC网盘",
-    "mobile_share": "移动云盘",
-    "pan115_share": "115网盘",
-    "pikpak_share": "PikPak",
     "ransomware_live": "ransomware.live",
     "cisa_kev": "CISA KEV",
     "nvd": "NVD",
@@ -406,42 +394,15 @@ NOISY_VICTIM_DOMAINS = {
 }
 
 SOURCE_HOSTNAME_KEYWORDS = {
-    "cracked",
     "darkforums",
+    "updap",
     "dragonforce",
     "chaos",
     "lynx",
-    "pwnfrm",
-    "raidforums",
     "blogspot",
     "wordpress",
     "onion",
 }
-
-
-_FORUM_TIMESTAMP_NORMALIZERS = {
-    "cracked": normalize_cracked_timestamp,
-    "darkforums": normalize_darkforums_timestamp,
-    "pwnfrm": normalize_pwnfrm_timestamp,
-    "raidforums": normalize_pwnfrm_timestamp,
-}
-
-
-def _normalize_forum_timestamp(
-    site_name: str | None,
-    value: str | None,
-    *,
-    collected_at_utc: str | None,
-) -> str:
-    normalizer = _FORUM_TIMESTAMP_NORMALIZERS.get(
-        str(site_name or "").lower(),
-        normalize_darkforums_timestamp,
-    )
-    try:
-        return normalizer(value, collected_at_utc=collected_at_utc) or ""
-    except Exception as exc:
-        logger.warning("timestamp normalization failed for site=%r: %s", site_name, exc)
-        return ""
 
 INDUSTRY_PRIORITY = [
     "军事",
@@ -549,7 +510,7 @@ REGION_KEYWORDS = {
 
 RECENT_EVENT_HOURS = 72
 SPIKE_WINDOW_DAYS = 7
-NORMALIZATION_VERSION = "2026-08-19-resource-preservation-v7"
+NORMALIZATION_VERSION = "2026-04-10-darkforums-artifacts-industry-v1"
 NORMALIZATION_SCHEMA_VERSION = NORMALIZATION_VERSION
 DOMAIN_ENRICHMENT_BUDGET = 20
 DOMAIN_ENRICHMENT_TIMEOUT = 2
@@ -786,7 +747,7 @@ def _normalize_domain(value: str | None) -> str:
 
 def _canonical_key(value: str | None) -> str:
     cleaned = _normalize_label(value).lower()
-    return re.sub(r"[\W_]+", "-", cleaned, flags=re.UNICODE).strip("-")
+    return re.sub(r"[^a-z0-9.]+", "-", cleaned).strip("-")
 
 
 def _label_industry(value: str | None) -> str:
@@ -936,7 +897,7 @@ def _pick_display_subject(event: dict[str, Any]) -> str:
     return raw_title or "该目标"
 
 
-def build_display_title(event: dict[str, Any]) -> str:
+def build_display_title(event: dict[str, Any], *, allow_live_translate: bool = False) -> str:
     raw_title = _normalize_label(event.get("title"))
     event_type = str(event.get("event_type") or "")
     subject = _pick_display_subject(event)
@@ -955,7 +916,11 @@ def build_display_title(event: dict[str, Any]) -> str:
             "数据泄露": "疑似数据泄露",
         }
         suffix = leak_title_map.get(leak_type, "疑似数据泄露")
-        translated_title = translate_event_title_cached(raw_title, fallback=subject)
+        if allow_live_translate:
+            translated_title = translate_event_title_live(raw_title, fallback=subject)
+        else:
+            # 仅使用缓存的翻译结果，避免网络请求阻塞列表构建
+            translated_title = _translate_title_cached_only(raw_title, fallback=subject)
         if any(token in translated_title for token in ("泄露", "售卖", "数据库", "凭证", "证件", "文档", "源代码", "源码")):
             return translated_title
         return f"{translated_title}{suffix}"
@@ -964,6 +929,23 @@ def build_display_title(event: dict[str, Any]) -> str:
         return raw_title or "公开源漏洞预警"
 
     return raw_title or subject or "未命名事件"
+
+
+def _translate_title_cached_only(value: str | None, *, fallback: str | None = None) -> str:
+    """仅从缓存获取翻译结果，不发起网络请求。用于列表构建场景。"""
+    from darkweb_collector.detail_i18n import _normalize_text, _load_cache, _CACHE_LOCK
+
+    raw = _normalize_text(value)
+    fallback_text = _normalize_text(fallback) or raw
+    if not raw:
+        return fallback_text
+
+    with _CACHE_LOCK:
+        cache = _load_cache()
+        if raw in cache:
+            return cache[raw]
+
+    return fallback_text
 
 
 def _is_noisy_domain(domain: str | None) -> bool:
@@ -1242,17 +1224,12 @@ def _filter_country_candidate_domains(domains: list[str], *source_urls: str) -> 
     return list(dict.fromkeys(filtered))
 
 
-@lru_cache(maxsize=None)
-def _keyword_match_pattern(keyword: str) -> re.Pattern[str]:
-    escaped = re.escape(keyword.lower())
-    return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])")
-
-
 def _count_keyword_matches(text: str, keyword: str) -> int:
-    return len(_keyword_match_pattern(keyword).findall(text))
+    escaped = re.escape(keyword.lower())
+    pattern = rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
+    return len(re.findall(pattern, text.lower()))
 
 
-@lru_cache(maxsize=8192)
 def _infer_industry_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
     scores: dict[str, int] = defaultdict(int)
     sources: dict[str, list[str]] = defaultdict(list)
@@ -1289,7 +1266,6 @@ def _infer_industry_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
     return {"industry": industry, "source": source, "score": scores[industry]}
 
 
-@lru_cache(maxsize=8192)
 def _infer_country_bundle(*texts: tuple[str, int]) -> dict[str, Any]:
     scores: dict[str, int] = defaultdict(int)
     sources: dict[str, list[str]] = defaultdict(list)
@@ -1385,7 +1361,7 @@ def _propagate_entity_context(events: list[dict[str, Any]]) -> None:
         best_country_event = max(
             victim_events,
             key=lambda item: (
-                str(item.get("country") or "").strip() not in {"", "未知"},
+                item.get("country") != "未知",
                 int(item.get("metadata", {}).get("country_score") or 0),
                 int(item.get("confidence_score") or 0),
             ),
@@ -1393,32 +1369,30 @@ def _propagate_entity_context(events: list[dict[str, Any]]) -> None:
         best_industry_event = max(
             victim_events,
             key=lambda item: (
-                str(item.get("industry") or "").strip() not in {"", "未知"},
+                item.get("industry") != "未知",
                 int(item.get("metadata", {}).get("industry_score") or 0),
                 int(item.get("confidence_score") or 0),
             ),
         )
-        best_country = str(best_country_event.get("country") or "").strip()
-        best_industry = str(best_industry_event.get("industry") or "").strip()
         for event in victim_events:
             metadata = event.setdefault("metadata", {})
             best_country_meta = best_country_event.get("metadata", {}) or {}
             best_country_source = str(best_country_meta.get("country_source") or "")
             best_country_score = int(best_country_meta.get("country_score") or 0)
             can_propagate_country = (
-                best_country not in {"", "未知"}
+                best_country_event.get("country") not in {"", "未知"}
                 and (best_country_source != "ip_geo" or best_country_score >= 6)
             )
-            if str(event.get("country") or "").strip() in {"", "未知"} and can_propagate_country:
-                event["country"] = best_country
+            if event.get("country") in {"", "未知"} and can_propagate_country:
+                event["country"] = best_country_event["country"]
                 event["country_code"] = best_country_event.get("country_code") or ""
                 event["region"] = best_country_event.get("region") or event.get("region") or "未知"
                 metadata["country_source"] = f"{metadata.get('country_source', 'unknown')}+victim_group"
                 metadata.setdefault("tag_sources", []).append("victim_group:country")
                 event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 8, 100)
                 event["completeness_score"] = min(int(event.get("completeness_score") or 0) + 10, 100)
-            if str(event.get("industry") or "").strip() in {"", "未知"} and best_industry not in {"", "未知"}:
-                event["industry"] = best_industry
+            if event.get("industry") in {"", "未知"} and best_industry_event.get("industry") not in {"", "未知"}:
+                event["industry"] = best_industry_event["industry"]
                 metadata["industry_source"] = f"{metadata.get('industry_source', 'unknown')}+victim_group"
                 metadata.setdefault("tag_sources", []).append("victim_group:industry")
                 event["confidence_score"] = min(int(event.get("confidence_score") or 0) + 6, 100)
@@ -1490,19 +1464,17 @@ def _coerce_resource_list(value: Any) -> list[dict[str, str]]:
     return []
 
 
-@lru_cache(maxsize=None)
 def _site_output_dir(site_name: str) -> Path | None:
     try:
         return get_site_config(site_name).output_dir
     except Exception:
-        legacy_name = safe_stem(site_name, fallback="")
-        return (output_root() / legacy_name).resolve() if legacy_name else None
+        return None
 
 
 def _public_output_url(path: Path) -> str:
-    root = output_root()
+    output_root = project_root() / "output"
     try:
-        relative_path = path.resolve().relative_to(root.resolve())
+        relative_path = path.resolve().relative_to(output_root.resolve())
     except ValueError:
         return path.resolve().as_uri()
     return f"/collector-output/{relative_path.as_posix()}"
@@ -1571,7 +1543,6 @@ def _forum_output_resources(row_dict: dict[str, Any]) -> tuple[list[dict[str, st
         detail_dir,
         [artifact_stem],
         [artifact_stem, _clean_display_subject(row_dict.get("title")), topic_url.rsplit("/", 1)[-1]],
-        allow_fuzzy=False,
     )
 
 
@@ -1865,18 +1836,6 @@ def _source_signature_payload(connection) -> dict[str, Any]:
         FROM vulnerability_records
         """
     ).fetchone()
-    document_hit_stats = connection.execute(
-        """
-        SELECT COUNT(*) AS count, MAX(id) AS max_id, MAX(last_seen_at) AS latest_at
-        FROM document_hits
-        """
-    ).fetchone()
-    document_snapshot_stats = connection.execute(
-        """
-        SELECT COUNT(*) AS count, MAX(id) AS max_id, MAX(fetched_at) AS latest_at
-        FROM document_hit_snapshots
-        """
-    ).fetchone()
     return {
         "normalization_version": NORMALIZATION_VERSION,
         "forum_details": dict(forum_stats),
@@ -1885,8 +1844,6 @@ def _source_signature_payload(connection) -> dict[str, Any]:
         "victims": dict(victim_stats),
         "victim_details": dict(victim_detail_stats),
         "vulnerability_records": dict(vulnerability_stats),
-        "document_hits": dict(document_hit_stats),
-        "document_hit_snapshots": dict(document_snapshot_stats),
     }
 
 
@@ -1912,25 +1869,13 @@ def should_refresh_normalized_intelligence(connection) -> bool:
         return _normalized_event_count(connection) == 0
     if cache_state is None:
         return True
+    if int(cache_state.get("source_revision") or 0) > int(cache_state.get("applied_revision") or 0):
+        return True
     if cache_state.get("source_signature") != current_signature:
         return True
     if int(cache_state.get("event_count") or 0) != current_event_count:
         return True
     return False
-
-
-def _try_acquire_normalized_refresh_lock(connection) -> tuple[bool, bool]:
-    if getattr(connection, "backend_name", "") == "postgresql":
-        row = connection.execute(
-            "SELECT pg_try_advisory_xact_lock(?) AS acquired",
-            (NORMALIZED_REFRESH_ADVISORY_LOCK_ID,),
-        ).fetchone()
-        return bool(row and row["acquired"]), False
-    return _NORMALIZED_REFRESH_LOCK.acquire(blocking=False), True
-
-
-def _load_normalized_rows_without_refresh(connection) -> list[dict[str, Any]]:
-    return [_hydrate_event_row(row) for row in list_normalized_intelligence_events(connection)]
 
 
 def _forum_rows(connection) -> list[dict[str, Any]]:
@@ -1949,7 +1894,7 @@ def _forum_rows(connection) -> list[dict[str, Any]]:
          AND t.url = d.topic_url
         LEFT JOIN forum_victims fv
           ON fv.forum_detail_id = d.id
-        GROUP BY d.id, t.title
+        GROUP BY d.id
         ORDER BY d.id DESC
         """
     ).fetchall()
@@ -1961,10 +1906,8 @@ def _victim_rows(connection) -> list[dict[str, Any]]:
         """
         SELECT v.id, v.site_name, v.source_url, v.detail_url, v.name, v.display_label, v.domain,
                v.status, v.published_at_utc, v.claimed_size, v.claimed_size_gb, v.content_hash,
-               v.raw_json, vd.text_excerpt, vd.page_title, vd.fetched_at_utc,
-               cr.collected_at_utc AS last_seen_at_utc, vd.raw_json AS detail_raw_json
+               v.raw_json, vd.text_excerpt, vd.page_title, vd.fetched_at_utc, vd.raw_json AS detail_raw_json
         FROM victims v
-        LEFT JOIN collection_runs cr ON cr.id = v.last_seen_run_id
         LEFT JOIN victim_details vd
           ON vd.id = (
               SELECT vd2.id
@@ -1997,10 +1940,6 @@ def _vulnerability_rows(connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _document_hit_rows(connection) -> list[dict[str, Any]]:
-    return list_document_hits(connection, limit=None)
-
-
 def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | None = None) -> dict[str, Any]:
     title = _normalize_label(row.get("title")) or _normalize_label(row.get("topic_url")) or "未命名论坛帖子"
     content = _normalize_whitespace(row.get("content"))
@@ -2008,7 +1947,7 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
     raw_json = _parse_json(row.get("raw_json"))
     disclosure_time = (
         raw_json.get("published_at_utc")
-        or _normalize_forum_timestamp(
+        or _normalise_forum_timestamp(
             row.get("site_name"),
             raw_json.get("timestamp") or row.get("timestamps"),
             collected_at_utc=row.get("fetched_at"),
@@ -2027,9 +1966,7 @@ def _build_forum_base_event(row: dict[str, Any], domain_cache: dict[str, Any] | 
         topic_url,
     )
     victim, victim_key = _pick_primary_victim(victim_candidates, title, content, domain_candidates)
-    attacker_candidates = clean_extracted_attackers(
-        [_normalize_label(item) for item in str(row.get("attackers") or "").split(",") if _normalize_label(item)]
-    )
+    attacker_candidates = [_normalize_label(item) for item in str(row.get("attackers") or "").split(",") if _normalize_label(item)]
     attacker = attacker_candidates[0] if attacker_candidates else _label_source(row.get("site_name"))
     industry_candidates = [
         _label_industry(item)
@@ -2168,15 +2105,9 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
     status = _normalize_label(row.get("status") or raw_json.get("status") or "unknown").lower()
     category = STATUS_LABELS.get(status, _normalize_label(row.get("status")) or "未知")
     detail_text = _normalize_whitespace(row.get("text_excerpt") or detail_raw_json.get("text_excerpt") or raw_json.get("description"))
-    detail_url = _normalize_label(row.get("detail_url") or raw_json.get("detail_url"))
-    website_url = _normalize_label(
-        raw_json.get("website_url") or detail_raw_json.get("website") or raw_json.get("website")
-    )
-    if website_url and not re.match(r"^[a-z][a-z0-9+.-]*://", website_url, re.IGNORECASE):
-        website_url = f"https://{website_url.lstrip('/')}"
+    website_url = _normalize_label(raw_json.get("website_url"))
     location = _normalize_label(raw_json.get("location"))
-    source_url = _normalize_label(row.get("source_url") or raw_json.get("source_url"))
-    disclosure_url = detail_url or source_url
+    detail_url = _normalize_label(row.get("detail_url") or raw_json.get("detail_url"))
     domain = _normalize_label(row.get("domain"))
     title = _normalize_label(row.get("display_label")) or victim
     industry_bundle = _infer_industry_bundle(
@@ -2223,10 +2154,9 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
     mirror_resources.extend(local_resources)
     screenshot_resources = _coerce_resource_list(raw_json.get("thumbnails"))
     screenshot_resources.extend(local_screenshots)
-    last_seen_at = row.get("last_seen_at_utc") or row.get("fetched_at_utc") or ""
-    disclosure_time = row.get("published_at_utc") or row.get("fetched_at_utc") or last_seen_at
+    disclosure_time = row.get("published_at_utc") or row.get("fetched_at_utc") or ""
     if isinstance(disclosure_time, str) and disclosure_time.strip().upper() in {"PUBLISHED", "GOING", "TRANSFERING", "TRANSFERRING", "STOPPED"}:
-        disclosure_time = row.get("fetched_at_utc") or last_seen_at
+        disclosure_time = row.get("fetched_at_utc") or ""
     event = {
         "event_id": f"victim:{row['site_name']}:{_event_hash(str(detail_url or victim))}",
         "source_kind": "victim",
@@ -2246,7 +2176,7 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
         "region": region,
         "disclosure_time": disclosure_time,
         "severity": severity,
-        "source_url": disclosure_url,
+        "source_url": detail_url or _normalize_label(row.get("source_url")),
         "detail_text": detail_text,
         "mirror_resources": mirror_resources,
         "screenshot_resources": screenshot_resources,
@@ -2263,9 +2193,8 @@ def _build_victim_base_event(row: dict[str, Any], domain_cache: dict[str, Any] |
             "claimed_size_gb": row.get("claimed_size_gb"),
             "source": str(row.get("site_name") or ""),
             "source_label": _label_source(row.get("site_name")),
-            "updated_time": last_seen_at or detail_raw_json.get("fetched_at_utc") or disclosure_time,
+            "updated_time": row.get("fetched_at_utc") or detail_raw_json.get("fetched_at_utc") or disclosure_time,
             "published_label": _format_date(disclosure_time),
-            "website_url": website_url,
             "resource_count": len(mirror_resources),
             "country_source": geo_bundle["source"],
             "country_score": geo_bundle["score"],
@@ -2464,6 +2393,11 @@ def _infer_vendor_product_from_text(title: str, summary: str) -> tuple[str, str]
     patterns = [
         (r"WordPress 的 ([^，。]+?) 插件", "WordPress 插件", None),
         (r"Openfind开发的([A-Za-z0-9/_ .-]+)", "Openfind", None),
+        (r"\bZyxel\s+([A-Z0-9-]+)", "Zyxel", None),
+        (r"\bGL\.iNet\s+(GL-[A-Za-z0-9-]+)", "GL.iNet", None),
+        (r"\bMicrosoft\s+Office\s+Excel\b", "Microsoft", "Microsoft Office Excel"),
+        (r"\bMicrosoft\s+Edge\b", "Microsoft", "Microsoft Edge"),
+        (r"\bGIMP\b", "GIMP", "GIMP"),
         (r"(?:思科|Cisco)\s*身份服务引擎\s*\(ISE\)", "Cisco", "Cisco ISE"),
         (r"(?:思科|Cisco)\s*ISE(?:-PIC)?", "Cisco", "Cisco ISE"),
         (r"(?:思科|Cisco)\s*Webex", "Cisco", "Cisco Webex"),
@@ -2479,10 +2413,70 @@ def _infer_vendor_product_from_text(title: str, summary: str) -> tuple[str, str]
         if not match:
             continue
         if product is None and match.groups():
-            product = humanize_product_token(match.group(1))
+            raw_product = match.group(1)
+            product = raw_product if vendor == "GL.iNet" else humanize_product_token(raw_product)
         return vendor, product or ""
 
     return "", ""
+
+
+def _is_cve_placeholder_title(value: str, cve_id: str) -> bool:
+    normalized = re.sub(r"\s+", "", value or "").upper()
+    normalized_cve = re.sub(r"\s+", "", cve_id or "").upper()
+    return bool(normalized_cve) and normalized in {normalized_cve, f"{normalized_cve}漏洞"}
+
+
+def _infer_vulnerability_type_from_summary(summary: str) -> str:
+    lowered = (summary or "").lower()
+    for keywords, label in (
+        (("heap-buffer-overflow", "heap buffer overflow", "堆缓冲区溢出"), "堆缓冲区溢出"),
+        (("stack-buffer-overflow", "stack buffer overflow", "栈缓冲区溢出"), "栈缓冲区溢出"),
+        (("buffer overflow", "缓冲区溢出"), "缓冲区溢出"),
+        (("path traversal", "路径遍历"), "路径遍历"),
+        (("command injection", "命令注入"), "命令注入"),
+        (("sql injection", "sql 注入"), "SQL 注入"),
+        (("use-after-free", "use after free", "释放后重用"), "释放后重用"),
+        (("type confusion", "类型混淆"), "类型混淆"),
+        (("origin validation error", "来源验证"), "来源验证错误"),
+        (("external control of file name or path", "文件名或路径"), "文件名或路径外部控制"),
+        (("remote code execution", "远程代码执行"), "远程代码执行"),
+        (("authentication bypass", "身份认证绕过"), "身份认证绕过"),
+        (("information disclosure", "disclose information", "信息泄露"), "信息泄露"),
+    ):
+        if any(keyword in lowered for keyword in keywords):
+            return label
+    return ""
+
+
+def _build_rule_based_vulnerability_title(
+    *,
+    cve_id: str,
+    vendor: str,
+    product: str,
+    vulnerability_type: str,
+    summary: str,
+) -> str:
+    usable_vendor = "" if vendor in {"", "未知厂商"} else vendor
+    usable_product = "" if product in {"", "未知产品"} else product
+    subject = usable_product
+    if usable_vendor and usable_product and usable_vendor.casefold() not in usable_product.casefold():
+        subject = f"{usable_vendor} {usable_product}"
+    elif usable_vendor and not usable_product:
+        subject = usable_vendor
+
+    type_label = vulnerability_type.strip()
+    if not type_label or type_label == "公开源漏洞" or re.fullmatch(r"CWE-\d+", type_label, re.IGNORECASE):
+        type_label = _infer_vulnerability_type_from_summary(summary)
+    if type_label and not type_label.endswith("漏洞"):
+        type_label = f"{type_label}漏洞"
+
+    if subject and type_label:
+        return f"{subject}{type_label}"
+    if subject:
+        return f"{subject}漏洞"
+    if type_label:
+        return f"{cve_id} {type_label}".strip()
+    return ""
 
 
 def _resolve_vulnerability_vendor_product(row: dict[str, Any], raw_json: dict[str, Any]) -> tuple[str, str]:
@@ -2510,6 +2504,16 @@ def _build_vulnerability_base_event(row: dict[str, Any]) -> dict[str, Any]:
     original_title = _normalize_label(row.get("title")) or f"{cve_id} {vendor} {product}"
     original_summary = _normalize_whitespace(row.get("summary"))
     title = translate_vulnerability_title(original_title, vendor=vendor, product=product)
+    if _is_cve_placeholder_title(original_title, cve_id):
+        inferred_title = _build_rule_based_vulnerability_title(
+            cve_id=cve_id,
+            vendor=vendor,
+            product=product,
+            vulnerability_type=vulnerability_type,
+            summary=original_summary,
+        )
+        if inferred_title:
+            title = inferred_title
     summary = translate_vulnerability_summary(original_summary)
     affected_versions = _coerce_string_list(row.get("affected_versions"))
     affected_version_items = build_affected_version_items(affected_versions)
@@ -3021,31 +3025,21 @@ def _merge_duplicate_events(existing: dict[str, Any], current: dict[str, Any]) -
     return merged
 
 
-def _new_normalized_events(
-    events: list[dict[str, Any]],
-    previous_event_ids: set[str],
+def refresh_normalized_intelligence(
+    connection,
+    *,
+    target_revision: int | None = None,
 ) -> list[dict[str, Any]]:
-    return [
-        event
-        for event in events
-        if (event_id := str(event.get("event_id") or ""))
-        and event_id not in previous_event_ids
-    ]
-
-
-def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None = None) -> list[dict[str, Any]]:
-    previous_resources = {
-        str(row.get("event_id") or ""): {
-            "mirror_resources": _coerce_resource_list(_parse_json(row.get("mirror_resources_json"))),
-            "screenshot_resources": _coerce_resource_list(_parse_json(row.get("screenshot_resources_json"))),
-            "json_preview_url": str(row.get("json_preview_url") or ""),
-        }
-        for row in list_normalized_intelligence_events(connection)
-    }
+    cache_state = get_normalized_intelligence_cache_state(connection) or {}
+    source_revision = int(cache_state.get("source_revision") or 0)
+    captured_target_revision = (
+        source_revision
+        if target_revision is None
+        else min(max(0, int(target_revision)), source_revision)
+    )
     source_signature = _build_source_signature(connection)
     domain_cache = _load_domain_enrichment_cache()
-    effective_enrichment_budget = DOMAIN_ENRICHMENT_BUDGET if enrichment_budget is None else max(0, int(enrichment_budget))
-    domain_cache["__remaining__"] = effective_enrichment_budget
+    domain_cache["__remaining__"] = DOMAIN_ENRICHMENT_BUDGET
     base_events: list[dict[str, Any]] = []
     for row in _forum_rows(connection):
         base_events.append(_build_forum_base_event(row, domain_cache=domain_cache))
@@ -3057,7 +3051,7 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
         base_events.append(_build_vulnerability_base_event(row))
 
     _propagate_entity_context(base_events)
-    domain_cache["__remaining__"] = effective_enrichment_budget
+    domain_cache["__remaining__"] = DOMAIN_ENRICHMENT_BUDGET
     _apply_domain_enrichment(base_events, domain_cache)
     _score_events(base_events)
     deduped_events: dict[str, dict[str, Any]] = {}
@@ -3084,18 +3078,6 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
     updated_at = _now_utc().isoformat()
     persisted_rows: list[dict[str, Any]] = []
     for event in title_deduped_events.values():
-        previous = previous_resources.get(str(event.get("event_id") or ""), {})
-        mirror_resources = _merge_unique_resources(
-            previous.get("mirror_resources") or [],
-            event.get("mirror_resources") or [],
-        )
-        screenshot_resources = _merge_unique_resources(
-            previous.get("screenshot_resources") or [],
-            event.get("screenshot_resources") or [],
-        )
-        json_preview_url = str(
-            event.get("json_preview_url") or previous.get("json_preview_url") or ""
-        )
         metadata_payload = {
             **event["metadata"],
             "country": event.get("country") or "未知",
@@ -3103,7 +3085,6 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
             "macro_region": event.get("region") or "未知",
             "confidence_score": int(event.get("confidence_score") or 0),
             "completeness_score": int(event.get("completeness_score") or 0),
-            "resource_count": len(mirror_resources),
         }
         persisted_rows.append(
             {
@@ -3126,14 +3107,16 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
                 "risk_score": int(event["risk_score"]),
                 "source_url": event.get("source_url") or "",
                 "detail_text": event.get("detail_text") or "",
-                "mirror_resources_json": _json_dumps(mirror_resources),
-                "screenshot_resources_json": _json_dumps(screenshot_resources),
-                "json_preview_url": json_preview_url,
+                "mirror_resources_json": _json_dumps(event.get("mirror_resources") or []),
+                "screenshot_resources_json": _json_dumps(event.get("screenshot_resources") or []),
+                "json_preview_url": event.get("json_preview_url") or "",
                 "risk_reasons_json": _json_dumps(event["metadata"].get("risk_reasons") or []),
                 "event_metadata_json": _json_dumps(metadata_payload),
                 "updated_at": updated_at,
             }
         )
+    # Keep filesystem cache I/O outside the SQLite write transaction.
+    _save_domain_enrichment_cache(domain_cache)
     replace_normalized_intelligence_events(connection, persisted_rows)
     upsert_normalized_intelligence_cache_state(
         connection,
@@ -3141,47 +3124,55 @@ def refresh_normalized_intelligence(connection, *, enrichment_budget: int | None
         event_count=len(persisted_rows),
         refreshed_at=updated_at,
     )
-    _save_domain_enrichment_cache(domain_cache)
+    mark_normalized_intelligence_applied(
+        connection,
+        target_revision=captured_target_revision,
+        normalization_version=NORMALIZATION_VERSION,
+        finished_at=updated_at,
+    )
     connection.commit()
-    refreshed_events = load_normalized_events(connection, refresh=False)
+    refreshed_events = load_normalized_events(connection, refresh=False, allow_refresh=False)
     try:
-        from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_watchlists
+        from darkweb_collector.monitoring_rules import persist_monitoring_snapshot
 
-        new_events = _new_normalized_events(refreshed_events, set(previous_resources))
-        if new_events:
-            notify_keyword_matches_for_watchlists(connection, new_events)
+        persist_monitoring_snapshot(connection, refreshed_events)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        logger.exception("failed to persist monitoring analysis snapshot after normalized intelligence refresh")
+    try:
+        from darkweb_collector.monitoring_notifications import notify_keyword_matches_for_events
+
+        notify_keyword_matches_for_events(connection, refreshed_events)
     except Exception:
         logger.exception("failed to send monitoring keyword notifications after normalized intelligence refresh")
     return refreshed_events
 
 
-def ensure_normalized_intelligence(
+def ensure_normalized_intelligence(connection, force: bool = False) -> list[dict[str, Any]]:
+    if force or should_refresh_normalized_intelligence(connection):
+        return refresh_normalized_intelligence(connection)
+    return load_normalized_events(connection, refresh=False, allow_refresh=False)
+
+
+def load_normalized_events(
     connection,
-    force: bool = False,
+    refresh: bool = False,
     *,
-    enrichment_budget: int | None = None,
+    allow_refresh: bool = True,
 ) -> list[dict[str, Any]]:
-    if not force and not should_refresh_normalized_intelligence(connection):
-        return load_normalized_events(connection, refresh=False)
-    acquired, release_local = _try_acquire_normalized_refresh_lock(connection)
-    if not acquired:
-        return _load_normalized_rows_without_refresh(connection)
-    try:
-        if not force and not should_refresh_normalized_intelligence(connection):
-            return _load_normalized_rows_without_refresh(connection)
-        return refresh_normalized_intelligence(connection, enrichment_budget=enrichment_budget)
-    finally:
-        if release_local:
-            _NORMALIZED_REFRESH_LOCK.release()
-
-
-def load_normalized_events(connection, refresh: bool = False) -> list[dict[str, Any]]:
     if refresh:
         return ensure_normalized_intelligence(connection, force=True)
     rows = list_normalized_intelligence_events(connection)
     if rows:
         return [_hydrate_event_row(row) for row in rows]
-    if get_normalized_intelligence_cache_state(connection) is None:
+    cache_state = get_normalized_intelligence_cache_state(connection)
+    pending_revision = bool(
+        cache_state
+        and int(cache_state.get("source_revision") or 0)
+        > int(cache_state.get("applied_revision") or 0)
+    )
+    if allow_refresh and (cache_state is None or pending_revision):
         return ensure_normalized_intelligence(connection, force=True)
     return []
 
@@ -3189,41 +3180,49 @@ def load_normalized_events(connection, refresh: bool = False) -> list[dict[str, 
 def load_normalized_event_page(
     connection,
     *,
-    event_type: str = "",
-    limit: int = 500,
-    offset: int = 0,
-    query: str = "",
-    sort: str = "latest",
-) -> list[dict[str, Any]]:
-    rows = list_normalized_intelligence_events(
-        connection,
-        event_type=event_type,
-        limit=limit,
-        offset=offset,
-        query=query,
-        sort=sort,
-    )
-    if rows:
-        return [_hydrate_event_row(row) for row in rows]
-    if get_normalized_intelligence_cache_state(connection) is None:
-        ensure_normalized_intelligence(connection, force=True)
-        rows = list_normalized_intelligence_events(
+    event_type: str,
+    page: int,
+    page_size: int,
+    keyword: str = "",
+    category: str = "",
+) -> tuple[list[dict[str, Any]], int, list[str], int, int, int]:
+    rows, total, categories, normalized_page, victim_mentions, all_total = (
+        list_normalized_intelligence_event_page(
             connection,
             event_type=event_type,
-            limit=limit,
-            offset=offset,
-            query=query,
-            sort=sort,
+            page=page,
+            page_size=page_size,
+            keyword=keyword,
+            category=category,
         )
-        return [_hydrate_event_row(row) for row in rows]
-    return []
+    )
+    return (
+        [_hydrate_event_row(row) for row in rows],
+        total,
+        categories,
+        normalized_page,
+        victim_mentions,
+        all_total,
+    )
 
 
-def load_normalized_event_detail(connection, event_id: str, refresh: bool = False) -> dict[str, Any] | None:
+def load_normalized_event_detail(
+    connection,
+    event_id: str,
+    refresh: bool = False,
+    *,
+    allow_refresh: bool = True,
+) -> dict[str, Any] | None:
     if refresh:
         ensure_normalized_intelligence(connection, force=True)
     row = get_normalized_intelligence_event(connection, event_id)
-    if row is None and get_normalized_intelligence_cache_state(connection) is None:
+    cache_state = get_normalized_intelligence_cache_state(connection)
+    pending_revision = bool(
+        cache_state
+        and int(cache_state.get("source_revision") or 0)
+        > int(cache_state.get("applied_revision") or 0)
+    )
+    if row is None and allow_refresh and (cache_state is None or pending_revision):
         ensure_normalized_intelligence(connection, force=True)
         row = get_normalized_intelligence_event(connection, event_id)
     if row is None:
@@ -3235,7 +3234,6 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata") or {}
     display_title = build_display_title(event)
     updated_time_raw = _event_updated_time(event)
-    summary = str(metadata.get("summary") or event.get("detail_text") or "")
     return {
         "id": event["event_id"],
         "event_type": event["source_kind"],
@@ -3252,6 +3250,7 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
         "category": event["category"],
         "attacker": event["attacker"],
         "sourceSite": metadata.get("source_label") or _label_source(event.get("source_site_name")),
+        "sourceTags": metadata.get("source_tags") or [],
         "industry": _label_industry(event["industry"]),
         "country": event.get("country") or "未知",
         "countryCode": event.get("country_code") or "",
@@ -3276,7 +3275,7 @@ def normalized_event_to_list_item(event: dict[str, Any]) -> dict[str, Any]:
         "cvss": metadata.get("cvss"),
         "isExploited": bool(metadata.get("is_exploited")),
         "patchAvailable": bool(metadata.get("patch_available")),
-        "summary": summary[:500],
+        "summary": metadata.get("summary") or event.get("detail_text") or "",
     }
 
 
@@ -3316,7 +3315,7 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "disclosure_url": event.get("source_url") or "",
         "detail_text": event.get("detail_text") or "",
         "category": event["category"],
-        "source": _label_source(event["source"]),
+        "source": event["source"],
         "industry": _label_industry(event["industry"]),
         "country": event.get("country") or "未知",
         "country_code": event.get("country_code") or "",
@@ -3356,6 +3355,7 @@ def normalized_event_to_detail(event: dict[str, Any]) -> dict[str, Any]:
         "summary": metadata.get("summary") or event.get("detail_text") or "",
         "reference_urls": metadata.get("reference_urls") or event.get("mirror_resources") or [],
         "source_labels": metadata.get("source_labels") or [],
+        "source_tags": metadata.get("source_tags") or [],
         "source_type_label": metadata.get("source_type_label") or humanize_source_type(metadata.get("source_type")),
         "original_title": metadata.get("original_title") or event["title"],
         "original_summary": metadata.get("original_summary") or "",

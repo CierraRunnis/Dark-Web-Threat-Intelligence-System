@@ -1,6 +1,6 @@
 import countryCentroidsJson from 'world-countries-centroids/dist/countries.geojson?raw'
-import { createRemoteBrowserStream } from '@/utils/remoteBrowserStream'
-import { shouldRenderResourceAsImage } from '@/prototype/resourceRendering'
+import { hydrateAiAggregationScreen } from './aiAggregationRuntime.js'
+import { hydrateAiAggregationTemplatesScreen } from './aiAggregationTemplatesRuntime.js'
 
 const COUNTRY_COORDINATES = JSON.parse(countryCentroidsJson).features.reduce((coordinates, feature) => {
   const code = feature.properties.ISO
@@ -9,24 +9,20 @@ const COUNTRY_COORDINATES = JSON.parse(countryCentroidsJson).features.reduce((co
 }, {})
 
 const INCIDENT_FILES = new Set([
-  'event-detail.html',
   'ransomware-detail.html',
   'data-leak-detail.html',
   'vulnerability-detail.html',
 ])
 
-const REVIEW_FILES = new Set(['netdisk-detail.html', 'library-detail.html', 'code-detail.html'])
-
 const DATA_FILES = new Set([
   'dashboard.html',
   'intelligence.html',
+  'ai-aggregation.html',
+  'ai-aggregation-templates.html',
   'ransomware.html',
   'data-leak.html',
   'vulnerabilities.html',
-  'monitoring.html',
-  'collector-run-detail.html',
   ...INCIDENT_FILES,
-  ...REVIEW_FILES,
 ])
 
 function query(root, selector) {
@@ -47,23 +43,28 @@ function showToast(message) {
 }
 
 const JSON_CACHE_TTL_MS = 15_000
-const INTELLIGENCE_PAGE_SIZE = 20
-const PAGE_EVENT_LIMIT = 500
 const CACHEABLE_JSON_PATHS = new Set([
+  '/api/dashboard/overview',
   '/api/intelligence',
-  '/api/intelligence/dashboard',
   '/api/intelligence/ransomware',
   '/api/intelligence/data-leak',
-  '/api/events/search',
+  '/api/events',
 ])
+
+function isCacheableJsonUrl(url) {
+  try {
+    return CACHEABLE_JSON_PATHS.has(new URL(url, window.location.origin).pathname)
+  } catch {
+    return false
+  }
+}
 const jsonResponseCache = new Map()
 const inFlightJsonRequests = new Map()
 
 async function requestJson(url, options = {}) {
   const { preferCached = false, ...fetchOptions } = options
   const method = String(fetchOptions.method || 'GET').toUpperCase()
-  const pathname = new URL(url, window.location.origin).pathname
-  const cacheable = method === 'GET' && CACHEABLE_JSON_PATHS.has(pathname)
+  const cacheable = method === 'GET' && isCacheableJsonUrl(url)
   if (cacheable) {
     const cached = jsonResponseCache.get(url)
     const fresh = cached && Date.now() - cached.storedAt < JSON_CACHE_TTL_MS
@@ -71,7 +72,12 @@ async function requestJson(url, options = {}) {
       if (!fresh && !inFlightJsonRequests.has(url)) {
         const refresh = requestJsonUncached(url, fetchOptions)
           .then((payload) => {
-            jsonResponseCache.set(url, { storedAt: Date.now(), payload })
+            const refreshed = jsonResponseCache.get(url)
+            jsonResponseCache.set(url, {
+              storedAt: Date.now(),
+              payload,
+              etag: refreshed?.etag || cached.etag || '',
+            })
             return payload
           })
           .catch(() => cached.payload)
@@ -89,7 +95,8 @@ async function requestJson(url, options = {}) {
   inFlightJsonRequests.set(url, request)
   try {
     const payload = await request
-    jsonResponseCache.set(url, { storedAt: Date.now(), payload })
+    const existing = jsonResponseCache.get(url)
+    jsonResponseCache.set(url, { storedAt: Date.now(), payload, etag: existing?.etag || '' })
     return payload
   } finally {
     inFlightJsonRequests.delete(url)
@@ -98,8 +105,15 @@ async function requestJson(url, options = {}) {
 
 async function requestJsonUncached(url, options = {}) {
   const headers = new Headers(options.headers || {})
+  const method = String(options.method || 'GET').toUpperCase()
+  const cached = method === 'GET' ? jsonResponseCache.get(url) : null
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (cached?.etag && !headers.has('If-None-Match')) headers.set('If-None-Match', cached.etag)
   const response = await fetch(url, { ...options, headers })
+  if (response.status === 304 && cached) {
+    jsonResponseCache.set(url, { ...cached, storedAt: Date.now() })
+    return cached.payload
+  }
   if (!response.ok) {
     let detail = ''
     try {
@@ -111,7 +125,15 @@ async function requestJsonUncached(url, options = {}) {
     throw new Error(detail || `请求失败（${response.status}）`)
   }
   if (response.status === 204) return null
-  return response.json()
+  const payload = await response.json()
+  if (method === 'GET' && isCacheableJsonUrl(url)) {
+    jsonResponseCache.set(url, {
+      storedAt: Date.now(),
+      payload,
+      etag: response.headers.get('etag') || cached?.etag || '',
+    })
+  }
+  return payload
 }
 
 function number(value) {
@@ -192,11 +214,12 @@ function eventType(item) {
   if (item?.cveId || item?.cve_id || value.includes('vulnerab')) return 'vulnerability'
   if (value.includes('ransom') || value === 'victim') return 'ransomware'
   if (value.includes('leak') || value === 'forum') return 'data-leak'
+  if (value.includes('document')) return 'document-exposure'
   return ''
 }
 
 function eventTypeLabel(type) {
-  return { vulnerability: '漏洞', ransomware: '勒索', 'data-leak': '数据泄露' }[type] || '情报'
+  return { vulnerability: '漏洞', ransomware: '勒索', 'data-leak': '数据泄露', 'document-exposure': '文件监测' }[type] || '情报'
 }
 
 function detailHref(item) {
@@ -613,6 +636,7 @@ function prepareDataPage(root, file) {
   queryAll(root, '[data-pagination-for]').forEach((pagination) => {
     pagination.hidden = true
     setText(pagination, '.table-pagination-summary', '')
+    setText(pagination, '.table-pagination-current', '')
   })
   setConicChart(query(root, '.situation-donut'), [], ['var(--danger)'], '--runtime-donut')
   queryAll(root, '.severity-donut, .monitor-donut, .code-risk-donut, .signal-ring').forEach((node) => setConicChart(node, [], ['var(--border)']))
@@ -641,10 +665,10 @@ function prepareDataPage(root, file) {
       list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
       list.replaceChildren()
     }
-    queryAll(root, '.intel-result-tabs b, [data-intel-total]').forEach((node) => { node.textContent = '0' })
+    queryAll(root, '.intel-result-tabs b, [data-table-count="intel-results"]').forEach((node) => { node.textContent = '0' })
   }
 
-  if (INCIDENT_FILES.has(file) || REVIEW_FILES.has(file) || file === 'collector-run-detail.html') {
+  if (INCIDENT_FILES.has(file)) {
     setText(root, 'main h1', '正在加载记录…')
     queryAll(root, '.detail-summary strong, .detail-kpi strong, .definition-grid strong').forEach((node) => { node.textContent = '—' })
     queryAll(root, '.detail-list, .detail-matrix, .timeline').forEach((container) => replaceRecordContainer(container, []))
@@ -724,7 +748,7 @@ function fillNamedRows(container, items) {
     if (!item) return
     const labels = queryAll(row, 'span')
     const name = labels.find((node) => !node.classList.contains('source-logo')) || query(row, 'strong')
-    const value = query(row, ':scope > strong:last-child, :scope > b:last-child') || query(row, 'strong:last-child')
+    const value = query(row, 'b, strong:last-child')
     if (name) name.textContent = item.name
     if (value && value !== name) value.textContent = number(item.value)
     const bar = query(row, 'i, .bar-fill-v2')
@@ -746,7 +770,7 @@ function fillRankCard(card, items, subtitle) {
   fillNamedRows(query(card, '.bar-list-v2'), items)
 }
 
-function markExports(root, state, tableSelectors) {
+function markExports(root, state, tableSelectors, serverUrl = '') {
   queryAll(root, 'button[data-toast]').forEach((button) => {
     if (!button.textContent.includes('导出')) return
     const panel = button.closest('article, section')
@@ -754,8 +778,20 @@ function markExports(root, state, tableSelectors) {
     if (!table) return
     button.dataset.runtimeExport = table.id || tableSelectors[0]
     state.tables.set(button.dataset.runtimeExport, table)
+    if (serverUrl) state.exportUrls.set(button.dataset.runtimeExport, serverUrl)
     setActionAvailable(button, true)
   })
+}
+
+function downloadServerExport(url) {
+  if (!url) return
+  const link = document.createElement('a')
+  link.href = url
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  showToast('已开始流式导出完整筛选结果')
 }
 
 function exportTable(table, filename = '玄鉴数据.csv') {
@@ -792,6 +828,7 @@ function installActionGuard(root, state) {
       || target.dataset.runtimeSource
       || target.dataset.runtimeOpen
       || target.dataset.runtimeDownload
+      || target.dataset.runtimePage
     const unsupported = target.matches('[data-toast], [data-disposition]') && !handled
     if (!handled && !unsupported) return
 
@@ -802,8 +839,16 @@ function installActionGuard(root, state) {
       return
     }
     try {
-      if (target.dataset.runtimeExport) {
-        exportTable(state.tables.get(target.dataset.runtimeExport))
+      if (target.dataset.runtimePage) {
+        const table = query(root, `#${CSS.escape(target.dataset.runtimePageTarget || '')}`)
+        if (!table) return
+        const currentPage = Math.max(1, Number(table.dataset.serverPage || 1))
+        table.dataset.serverPage = String(target.dataset.runtimePage === 'previous' ? currentPage - 1 : currentPage + 1)
+        await state.refresh?.()
+      } else if (target.dataset.runtimeExport) {
+        const serverUrl = state.exportUrls.get(target.dataset.runtimeExport)
+        if (serverUrl) downloadServerExport(serverUrl)
+        else exportTable(state.tables.get(target.dataset.runtimeExport))
       } else if (target.dataset.runtimeRefresh) {
         await state.refresh?.()
         showToast('实时数据已刷新')
@@ -830,11 +875,14 @@ function installActionGuard(root, state) {
         await state.toggleTranslation?.()
       } else if (target.dataset.runtimeSource) {
         const source = target.dataset.runtimeSource
-        queryAll(root, '[data-runtime-source]').forEach((button) => button.classList.toggle('active', button === target))
         if (state.sourceTable) {
-          state.sourceTable.dataset.activeTab = source
-          state.sourceTable.dataset.page = '1'
-          state.sourceTable.dispatchEvent(new CustomEvent('prototype:rows-updated'))
+          const selectedSource = state.sourceTable.dataset.serverSource === source ? '' : source
+          state.sourceTable.dataset.serverSource = selectedSource
+          state.sourceTable.dataset.serverPage = '1'
+          queryAll(root, '[data-runtime-source]').forEach((button) => {
+            button.classList.toggle('active', button.dataset.runtimeSource === selectedSource)
+          })
+          await state.refresh?.()
         }
       } else if (target.dataset.runtimeOpen) {
         window.open(target.dataset.runtimeOpen, '_blank', 'noopener,noreferrer')
@@ -860,27 +908,299 @@ function showLoadError(root, error) {
   showToast(message)
 }
 
+function serverStateKey(tableId) {
+  return `dwti-server-list:${window.location.pathname}:${tableId}`
+}
+
+function restoreServerState(root, table) {
+  if (!table || table.dataset.serverStateRestored) return
+  table.dataset.serverStateRestored = '1'
+  let saved = null
+  try {
+    saved = JSON.parse(sessionStorage.getItem(serverStateKey(table.id)) || 'null')
+  } catch {
+    sessionStorage.removeItem(serverStateKey(table.id))
+  }
+  if (!saved) return
+  table.dataset.serverPage = String(Math.max(1, Number(saved.page || 1)))
+  const search = query(root, `[data-table-search="${table.id}"]`)
+  if (search) search.value = saved.query || ''
+  queryAll(root, `[data-filter-target="${table.id}"]`).forEach((control) => {
+    const value = String(saved.filters?.[control.dataset.filterKey || ''] || '')
+    if (!value) return
+    control.dataset.pendingValue = value
+    if (queryAll(control, 'option').some((option) => option.value === value)) control.value = value
+  })
+  const date = query(root, `[data-date-filter-target="${table.id}"]`)
+  if (date && saved.days) date.value = String(saved.days)
+  const tabs = query(root, `.tabs[data-target="${table.id}"]`)
+  if (tabs && saved.tab) {
+    queryAll(tabs, '.tab').forEach((tab) => {
+      const active = tab.dataset.tab === saved.tab
+      tab.classList.toggle('active', active)
+      tab.setAttribute('aria-selected', String(active))
+    })
+  }
+  const sort = query(root, '[data-intel-sort]')
+  if (sort && saved.sort) sort.value = saved.sort
+  table.dataset.serverSource = saved.source || ''
+}
+
+function serverControlValue(control) {
+  return String(control?.value || control?.dataset.pendingValue || '').trim()
+}
+
+function serverQueryState(root, table) {
+  restoreServerState(root, table)
+  const filters = Object.fromEntries(
+    queryAll(root, `[data-filter-target="${table.id}"]`).map((control) => [
+      control.dataset.filterKey || '',
+      serverControlValue(control),
+    ]),
+  )
+  return {
+    page: Math.max(1, Number(table.dataset.serverPage || 1)),
+    pageSize: Math.min(100, Math.max(1, Number(table.dataset.serverPageSize || 20))),
+    query: String(query(root, `[data-table-search="${table.id}"]`)?.value || '').trim(),
+    tab: query(root, `.tabs[data-target="${table.id}"] .tab.active`)?.dataset.tab || 'all',
+    filters,
+    days: Number(query(root, `[data-date-filter-target="${table.id}"]`)?.value || 0) || null,
+    source: String(table.dataset.serverSource || ''),
+    sort: query(root, '[data-intel-sort]')?.value || 'latest',
+  }
+}
+
+function restoreFilterValue(select, value) {
+  if (!select || !value) return
+  if (!queryAll(select, 'option').some((option) => option.value === value)) {
+    select.append(new Option(value, value))
+  }
+  select.value = value
+  select.dataset.pendingValue = value
+}
+
+function updateServerPagination(root, table, payload) {
+  if (!table) return
+  const page = Math.max(1, Number(payload.page || 1))
+  const pageSize = Math.max(1, Number(payload.pageSize || 20))
+  const total = Math.max(0, Number(payload.total || 0))
+  const totalPages = Math.max(0, Number(payload.totalPages || 0))
+  table.dataset.serverPage = String(page)
+  table.dataset.serverPageSize = String(pageSize)
+  table.dataset.serverTotal = String(total)
+  let footer = query(root, `[data-server-pagination-for="${table.id}"]`)
+  if (!footer) {
+    footer = document.createElement('footer')
+    footer.className = 'pagination table-pagination server-table-pagination'
+    footer.dataset.serverPaginationFor = table.id
+    footer.innerHTML = `
+      <span class="table-pagination-summary" aria-live="polite"></span>
+      <div class="table-pagination-actions">
+        <button type="button" data-runtime-page="previous" data-runtime-page-target="${table.id}" aria-label="上一页">‹</button>
+        <span class="table-pagination-current" aria-live="polite"></span>
+        <button type="button" data-runtime-page="next" data-runtime-page-target="${table.id}" aria-label="下一页">›</button>
+      </div>`
+    const empty = query(root, `[data-table-empty="${table.id}"]`)
+    if (empty) empty.insertAdjacentElement('afterend', footer)
+    else table.insertAdjacentElement('afterend', footer)
+  }
+  footer.hidden = total === 0
+  setText(footer, '.table-pagination-summary', total ? `第 ${(page - 1) * pageSize + 1}–${Math.min(total, page * pageSize)} 条，共 ${number(total)} 条` : '共 0 条')
+  setText(footer, '.table-pagination-current', `${page} / ${Math.max(1, totalPages)} 页`)
+  const previous = query(footer, '[data-runtime-page="previous"]')
+  const next = query(footer, '[data-runtime-page="next"]')
+  if (previous) previous.disabled = page <= 1
+  if (next) next.disabled = totalPages === 0 || page >= totalPages
+  queryAll(root, `[data-table-count="${table.id}"]`).forEach((node) => { node.textContent = number(total) })
+
+  const state = serverQueryState(root, table)
+  sessionStorage.setItem(serverStateKey(table.id), JSON.stringify({ ...state, page }))
+}
+
+function queryParameters(state) {
+  const params = new URLSearchParams({ page: String(state.page), page_size: String(state.pageSize) })
+  if (state.query) params.set('keyword', state.query)
+  if (state.days) params.set('days', String(state.days))
+  if (state.sort) params.set('sort', state.sort)
+  return params
+}
+
+function exportParameters(state) {
+  const params = queryParameters(state)
+  params.delete('page')
+  params.delete('page_size')
+  return params
+}
+
+function beginStateRequest(root, state) {
+  state.requestController?.abort()
+  const controller = new AbortController()
+  state.requestController = controller
+  if (root.__dataRuntimeAbort?.signal.aborted) controller.abort()
+  else root.__dataRuntimeAbort?.signal.addEventListener('abort', () => controller.abort(), { once: true })
+  return { signal: controller.signal }
+}
+
+function renderIntelligenceItems(root, events) {
+  const list = query(root, '#intel-results')
+  if (!list) return
+  const template = list.__runtimeItemTemplate?.cloneNode(true)
+    || query(list, '.intel-result-item')?.cloneNode(true)
+  if (!template) return
+  const rows = events.map((item) => {
+    const row = template.cloneNode(true)
+    const type = eventType(item)
+    const severity = severityOf(item)
+    const eventTime = item.updatedTimeRaw || item.updated_time_raw || item.disclosureTimeRaw || item.disclosure_time_raw || item.disclosure_time || ''
+    row.hidden = false
+    row.dataset.category = type
+    row.dataset.severity = severity
+    row.dataset.industry = item.industry || ''
+    row.dataset.status = item.is_exploited || item.isExploited ? 'exploited' : 'new'
+    row.dataset.date = String(Date.parse(eventTime) || 0)
+    row.dataset.severityRank = String({ critical: 4, high: 3, medium: 2, low: 1 }[severity] || 0)
+    const thumb = query(row, '.intel-result-thumb')
+    if (thumb) {
+      const thumbType = type === 'data-leak' ? 'leak' : type
+      thumb.className = `intel-result-thumb thumb-${thumbType}`
+      thumb.innerHTML = type === 'vulnerability'
+        ? '<svg viewBox="0 0 24 24" fill="none"><rect x="7" y="6" width="10" height="13" rx="4"/><path d="M9 6V4m6 2V4M4 10h3m10 0h3M4 15h3m10 0h3M9 12h6m-6 3h6"/></svg>'
+        : type === 'ransomware'
+          ? '<svg viewBox="0 0 24 24" fill="none"><path d="M6.5 3.5h7l4 4V20h-11Z"/><path d="M13.5 3.5V8h4"/><rect x="9" y="12" width="6.5" height="5.5" rx="1.2"/><path d="M10.6 12v-1a1.65 1.65 0 0 1 3.3 0v1M12.25 14.2v1.2"/></svg>'
+          : '<svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>'
+    }
+    const time = query(row, 'time')
+    if (time) {
+      time.textContent = formatDate(eventTime)
+      if (eventTime) time.dateTime = new Date(eventTime).toISOString()
+      else time.removeAttribute('datetime')
+    }
+    const relative = queryAll(row, '.intel-result-meta > span').find((node) => !node.classList.contains('badge'))
+    if (relative) relative.textContent = relativeTime(eventTime)
+    const badges = queryAll(row, '.intel-result-meta .badge')
+    if (badges[0]) badges[0].textContent = severityLabel(severity)
+    if (badges[1]) badges[1].textContent = eventTypeLabel(type)
+    const title = query(row, 'h2 a')
+    if (title) {
+      title.textContent = item.title || '未命名事件'
+      title.href = detailHref(item)
+    }
+    setText(row, 'p', excerpt(item.summary || item.detail_text, 260) || '暂无摘要')
+    const context = queryAll(row, '.intel-result-context > *')
+    const values = [item.attacker || item.vendor || item.source, item.cveId || item.cve_id || item.category, item.industry, item.region || item.country]
+    context.forEach((node, index) => { node.textContent = values[index] || '—' })
+    return row
+  })
+  list.replaceChildren(...rows)
+  list.dispatchEvent(new CustomEvent('prototype:rows-updated'))
+  for (const type of ['all', 'ransomware', 'data-leak', 'vulnerability']) {
+    const count = type === 'all' ? rows.length : rows.filter((row) => row.dataset.category === type).length
+    setText(root, `.intel-result-tabs [data-tab="${type}"] b`, count)
+  }
+}
+
+const DASHBOARD_DAY_MS = 24 * 60 * 60 * 1000
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
+
+function dashboardRangeStart(days, now = Date.now()) {
+  const shanghaiNow = new Date(now + SHANGHAI_OFFSET_MS)
+  const todayStart = Date.UTC(
+    shanghaiNow.getUTCFullYear(),
+    shanghaiNow.getUTCMonth(),
+    shanghaiNow.getUTCDate(),
+  ) - SHANGHAI_OFFSET_MS
+  return todayStart - (Math.max(1, Number(days) || 1) - 1) * DASHBOARD_DAY_MS
+}
+
+function filterDashboardEventsByDays(items, days, now = Date.now()) {
+  const start = dashboardRangeStart(days, now)
+  return (items || []).filter((item) => {
+    const timestamp = parseTimestamp(itemDateValue(item))
+    return Number.isFinite(timestamp) && timestamp >= start && timestamp <= now
+  })
+}
+
+function dashboardDayLabel(timestamp) {
+  const date = new Date(timestamp + SHANGHAI_OFFSET_MS)
+  return `${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`
+}
+
+function buildDashboardDailySeries(items, days, now = Date.now()) {
+  const start = dashboardRangeStart(days, now)
+  const buckets = Array.from({ length: days }, (_, index) => ({
+    date: dashboardDayLabel(start + index * DASHBOARD_DAY_MS),
+    value: 0,
+  }))
+  for (const item of items || []) {
+    const timestamp = parseTimestamp(itemDateValue(item))
+    const index = Math.floor((timestamp - start) / DASHBOARD_DAY_MS)
+    if (Number.isFinite(timestamp) && index >= 0 && index < buckets.length) buckets[index].value += 1
+  }
+  return buckets
+}
+
+function dashboardEventSearchText(item) {
+  return [
+    item?.title,
+    item?.summary,
+    item?.region,
+    item?.country,
+    item?.industry,
+    item?.vendor,
+    item?.product,
+    item?.victim,
+    item?.attacker,
+    item?.cveId,
+    item?.cve_id,
+  ].filter(Boolean).join(' ').toLocaleLowerCase()
+}
+
 async function hydrateDashboard(root, state) {
   const table = clearTable(root, '#dashboard-events-table')
   const range = state.dashboardRange || query(root, '.situation-range .tab.active')?.dataset.tab || '7d'
   const days = { today: 1, '7d': 7, '30d': 30 }[range] || 7
   state.dashboardRange = range
-  const payload = await requestJson(`/api/intelligence/dashboard?days=${days}`)
-  const kpis = payload.kpis || []
-  setCounts(query(root, '.situation-kpi-grid'), kpis.map((item) => item.value || 0))
-
+  const selectedType = query(root, '.situation-table-toolbar .tabs .tab.active')?.dataset.tab || 'all'
+  const selectedSeverity = query(root, '[data-filter-target="dashboard-events-table"][data-filter-key="severity"]')?.value || ''
+  const searchText = String(query(root, '[data-table-search="dashboard-events-table"]')?.value || '').trim()
+  const params = new URLSearchParams({ days: String(days) })
+  params.set('event_type', selectedType === 'leak' ? 'data_leak' : selectedType)
+  if (selectedSeverity) params.set('severity', selectedSeverity)
+  if (searchText) params.set('keyword', searchText)
+  const payload = await requestJson(`/api/dashboard/overview?${params.toString()}`, beginStateRequest(root, state))
+  const kpis = payload.kpis || {}
+  const highlights = payload.highlights || {}
+  const trend = payload.dailyTrend || {}
+  const events = payload.events || []
+  setCounts(query(root, '.situation-kpi-grid'), [
+    kpis.dataLeak || 0,
+    kpis.ransomware || 0,
+    kpis.vulnerability || 0,
+    kpis.highRisk || 0,
+  ])
   const dashboardCards = queryAll(root, '.situation-kpi-grid .situation-kpi')
+  const leakTop = highlights.dataLeakTop
+  const kpiHighlights = [
+    leakTop ? `${leakTop.name} ${number(leakTop.value)} 条` : '本期无新增',
+    `${number(highlights.activeRansomwareActors)} 个活跃团伙`,
+    `${number(highlights.exploitedVulnerabilities)} 项已利用`,
+    `${number(highlights.highRisk)} 条需优先研判`,
+  ]
   dashboardCards.forEach((card, index) => {
-    setText(card, '.situation-kpi-head b', kpis[index]?.highlight || '本期无新增')
+    setText(card, '.situation-kpi-head b', kpiHighlights[index])
   })
-  kpis.forEach((item, index) => {
+  ;[
+    trend.dataLeak || [],
+    trend.ransomware || [],
+    trend.vulnerability || [],
+    trend.highRisk || [],
+  ].forEach((values, index) => {
     const path = query(dashboardCards[index], '.situation-spark path')
     if (!path) return
-    const points = chartPoints(item.trend || [], { xStart: 2, xEnd: 118, yTop: 4, yBottom: 24 })
+    const points = chartPoints(values, { xStart: 2, xEnd: 118, yTop: 4, yBottom: 24 })
     path.setAttribute('d', linePath(points))
   })
 
-  const events = payload.priorityEvents || []
   replaceRows(table, events, (row, item) => {
     const cells = queryAll(row, 'td')
     const type = eventType(item)
@@ -896,10 +1216,7 @@ async function hydrateDashboard(root, state) {
     setActionCell(cells[7], '查看', detailHref(item))
   })
 
-  const mapFallback = Boolean(payload.fallback?.geo)
-  setText(root, '.situation-live-label span', mapFallback ? '累计地域分布' : '本期地域分布')
-  setText(root, '.situation-region-rank .region-rank-head span:last-child', '事件数')
-  const countries = payload.geo?.countries || []
+  const countries = payload.countries || []
   const maxCountryValue = Math.max(1, ...countries.map((item) => Number(item.value || 0)))
   queryAll(root, '.situation-region-rank .compact-bar').forEach((row, index) => {
     const item = countries[index]
@@ -971,11 +1288,15 @@ async function hydrateDashboard(root, state) {
   if (typeof ResizeObserver !== 'undefined' && mapWorld) {
     root.__situationMapObserver = new ResizeObserver(positionMapAnnotations)
     root.__situationMapObserver.observe(mapWorld)
+    root.__dataRuntimeAbort?.signal.addEventListener('abort', () => root.__situationMapObserver?.disconnect(), { once: true })
   }
   if (mapImage?.complete) positionMapAnnotations()
   else mapImage?.addEventListener('load', positionMapAnnotations, { once: true })
   queryAll(root, '.situation-route').forEach((routeNode) => { routeNode.hidden = true })
-  setText(root, '.situation-map-foot > b strong', number(payload.geo?.averageRisk || 0))
+  const averageRisk = countries.length
+    ? Math.round(countries.reduce((sum, item) => sum + Number(item.risk || 0), 0) / countries.length)
+    : 0
+  setText(root, '.situation-map-foot > b strong', number(averageRisk))
   const industries = payload.industries || []
   queryAll(root, '.industry-heat-list > div').forEach((row, index) => {
     const item = industries[index]
@@ -1000,19 +1321,26 @@ async function hydrateDashboard(root, state) {
     setText(link, ':scope > b', severityLabel(severityOf(item)))
   })
   setText(root, '.situation-watch-card .panel-header .badge', number(Math.min(4, events.length)))
-  const distribution = payload.distribution24h || [0, 0, 0, 0]
+  const distributionState = payload.distribution || {}
+  const distribution = [
+    distributionState.ransomware || 0,
+    distributionState.dataLeak || 0,
+    distributionState.vulnerability || 0,
+    distributionState.documentExposure || 0,
+  ]
+  const periodLabel = { today: '今日', '7d': '近 7 天', '30d': '近 30 天' }[range] || '近 7 天'
   queryAll(root, '.situation-donut-legend .legend-item b').forEach((node, index) => {
     node.textContent = number(distribution[index] ?? 0)
   })
+  setText(root, '.situation-donut-card .meta', periodLabel)
   setText(root, '.situation-donut-legend .legend-item:nth-child(4) span', '文件监测')
   const distributionTotal = distribution.reduce((sum, value) => sum + value, 0)
   setText(root, '.situation-donut .donut-core strong', number(distributionTotal))
   const donut = query(root, '.situation-donut')
   if (donut) {
-    donut.setAttribute('aria-label', `近 24 小时情报类型分布：勒索 ${distribution[0]}，数据泄露 ${distribution[1]}，漏洞 ${distribution[2]}，文件监测 ${distribution[3]}`)
+    donut.setAttribute('aria-label', `${periodLabel}情报类型分布：勒索 ${distribution[0]}，数据泄露 ${distribution[1]}，漏洞 ${distribution[2]}，文件监测 ${distribution[3]}`)
     setConicChart(donut, distribution, ['var(--danger)', 'var(--warning)', 'var(--accent)', 'var(--secondary)'], '--runtime-donut')
   }
-  const trend = payload.threatTrend || {}
   const labels = trend.labels || []
   const totalTrend = trend.total || []
   const highTrend = trend.highRisk || []
@@ -1021,7 +1349,12 @@ async function hydrateDashboard(root, state) {
   query(root, '.situation-trend-chart .trend-line.total')?.setAttribute('d', linePath(totalPoints))
   query(root, '.situation-trend-chart .trend-line.critical')?.setAttribute('d', linePath(highPoints))
   query(root, '.situation-trend-chart .trend-area')?.setAttribute('d', areaPath(highPoints, 160))
-  const trendTotals = trend.severityTotals || [0, 0, 0]
+  const severityDistribution = payload.severityDistribution || {}
+  const trendTotals = [
+    severityDistribution.critical || 0,
+    severityDistribution.high || 0,
+    severityDistribution.mediumLow || 0,
+  ]
   queryAll(root, '.trend-summary > div strong').forEach((node, index) => { node.textContent = number(trendTotals[index] || 0) })
   const trendLabels = ['严重', '高危', '中低危']
   queryAll(root, '.trend-summary > div span').forEach((node, index) => { node.textContent = trendLabels[index] || node.textContent })
@@ -1037,15 +1370,17 @@ async function hydrateDashboard(root, state) {
   const monitoring = payload.monitoringStatus || {}
   setText(root, '.situation-status-strip > div:first-child strong', monitoring.statusLabel || monitoring.statusValue || '监测状态未提供')
   setText(root, '.situation-status-strip > div:first-child small', monitoring.subtitle || monitoring.refreshedValue || '实时接口数据')
-  const statusValues = payload.statusCounts || [countries.length, industries.length, 0]
+  const pendingCount = Number(kpis.highRisk || 0)
+  const statusValues = [countries.length, industries.length, pendingCount]
   queryAll(root, '.situation-status-strip > div').slice(1).forEach((item, index) => {
     setText(item, 'strong', number(statusValues[index] || 0))
   })
 
   const cards = queryAll(root, '.rank-card')
-  fillRankCard(cards[0], payload.rankings?.ransomwareActors || [], payload.fallback?.ransomware ? '当前库累计' : '当前周期最活跃')
-  fillRankCard(cards[1], payload.rankings?.sensitiveTypes || [], payload.fallback?.dataLeak ? '当前库累计' : '当前周期占比最高')
-  fillRankCard(cards[2], payload.rankings?.vulnerabilityVendors || [], '当前周期重点厂商')
+  const rankings = payload.rankings || {}
+  fillRankCard(cards[0], rankings.ransomwareActors || [], '当前周期最活跃')
+  fillRankCard(cards[1], rankings.dataLeakTypes || [], '当前周期占比最高')
+  fillRankCard(cards[2], rankings.vulnerabilityVendors || [], '当前周期重点厂商')
   const refresh = queryAll(root, 'button[data-toast]').find((button) => button.textContent.includes('刷新总览'))
   if (refresh) {
     refresh.dataset.runtimeRefresh = 'dashboard'
@@ -1056,6 +1391,11 @@ async function hydrateDashboard(root, state) {
     button.dataset.runtimeRangeBound = '1'
     button.addEventListener('click', async () => {
       state.dashboardRange = button.dataset.tab || '7d'
+      queryAll(root, '.situation-range .tab').forEach((candidate) => {
+        const active = candidate === button
+        candidate.classList.toggle('active', active)
+        candidate.setAttribute('aria-selected', String(active))
+      })
       setDataState(root, 'loading', '正在按统计周期刷新真实数据…')
       try {
         await hydrateDashboard(root, state)
@@ -1068,173 +1408,57 @@ async function hydrateDashboard(root, state) {
   state.refresh = () => hydrateDashboard(root, state)
 }
 
-function renderIntelligenceItems(root, events, counts = null) {
+async function hydrateIntelligence(root, state) {
   const list = query(root, '#intel-results')
   if (!list) return
-  const template = list.__runtimeItemTemplate?.cloneNode(true)
-    || query(list, '.intel-result-item')?.cloneNode(true)
-  if (!template) return
-  const rows = events.map((item) => {
-    const row = template.cloneNode(true)
-    const type = eventType(item)
-    const severity = severityOf(item)
-    const eventTime = item.updatedTimeRaw || item.updated_time_raw || item.disclosureTimeRaw || item.disclosure_time_raw || item.disclosure_time || ''
-    row.hidden = false
-    row.dataset.category = type
-    row.dataset.severity = severity
-    row.dataset.industry = item.industry || ''
-    row.dataset.status = item.is_exploited || item.isExploited ? 'exploited' : 'new'
-    row.dataset.date = String(Date.parse(eventTime) || 0)
-    row.dataset.severityRank = String({ critical: 4, high: 3, medium: 2, low: 1 }[severity] || 0)
-    const thumb = query(row, '.intel-result-thumb')
-    if (thumb) {
-      const thumbType = type === 'data-leak' ? 'leak' : type
-      thumb.className = `intel-result-thumb thumb-${thumbType}`
-      thumb.innerHTML = type === 'vulnerability'
-        ? '<svg viewBox="0 0 24 24" fill="none"><rect x="7" y="6" width="10" height="13" rx="4"/><path d="M9 6V4m6 2V4M4 10h3m10 0h3M4 15h3m10 0h3M9 12h6m-6 3h6"/></svg>'
-        : type === 'ransomware'
-          ? '<svg viewBox="0 0 24 24" fill="none"><path d="M6.5 3.5h7l4 4V20h-11Z"/><path d="M13.5 3.5V8h4"/><rect x="9" y="12" width="6.5" height="5.5" rx="1.2"/><path d="M10.6 12v-1a1.65 1.65 0 0 1 3.3 0v1M12.25 14.2v1.2"/></svg>'
-          : '<svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>'
-    }
-    const time = query(row, 'time')
-    if (time) {
-      time.textContent = formatDate(eventTime)
-      if (eventTime) time.dateTime = new Date(eventTime).toISOString()
-      else time.removeAttribute('datetime')
-    }
-    const relative = queryAll(row, '.intel-result-meta > span').find((node) => !node.classList.contains('badge'))
-    if (relative) relative.textContent = relativeTime(eventTime)
-    const badges = queryAll(row, '.intel-result-meta .badge')
-    if (badges[0]) badges[0].textContent = severityLabel(severity)
-    if (badges[1]) badges[1].textContent = eventTypeLabel(type)
-    const title = query(row, 'h2 a')
-    if (title) {
-      title.textContent = item.title || '未命名事件'
-      title.href = detailHref(item)
-    }
-    setText(row, 'p', excerpt(item.summary || item.detail_text, 260) || '暂无摘要')
-    const context = queryAll(row, '.intel-result-context > *')
-    const values = [item.attacker || item.vendor || item.source, item.cveId || item.cve_id || item.category, item.industry, item.region || item.country]
-    context.forEach((node, index) => { node.textContent = values[index] || '—' })
-    return row
-  })
-  list.replaceChildren(...rows)
-  list.dispatchEvent(new CustomEvent('prototype:rows-updated'))
-  const resolvedCounts = counts || {
-    all: rows.length,
-    ransomware: rows.filter((row) => row.dataset.category === 'ransomware').length,
-    'data-leak': rows.filter((row) => row.dataset.category === 'data-leak').length,
-    vulnerability: rows.filter((row) => row.dataset.category === 'vulnerability').length,
-  }
+  list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
+  restoreServerState(root, list)
+  const listState = serverQueryState(root, list)
+  const params = queryParameters(listState)
+  if (listState.tab !== 'all') params.set('types', listState.tab)
+  const payload = await requestJson(`/api/intelligence/search?${params.toString()}`, beginStateRequest(root, state))
+  const events = payload.items || []
+  renderIntelligenceItems(root, events)
+  const typeCounts = payload.typeCounts || {}
   for (const type of ['all', 'ransomware', 'data-leak', 'vulnerability']) {
-    setText(root, `.intel-result-tabs [data-tab="${type}"] b`, Number(resolvedCounts[type] || 0))
+    const count = type === 'all'
+      ? Number(payload.total || 0)
+      : Number(typeCounts[type.replace('-', '_')] || 0)
+    setText(root, `.intel-result-tabs [data-tab="${type}"] b`, number(count))
   }
-  setText(root, '[data-intel-total]', Number(resolvedCounts.all || 0))
-}
-
-async function hydrateIntelligence(root) {
-  const list = query(root, '#intel-results')
-  if (list) {
-    list.__runtimeItemTemplate ||= query(list, '.intel-result-item')?.cloneNode(true)
-    list.replaceChildren()
-  }
-  if (!list) return
-
-  const locationParameters = new URLSearchParams(window.location.search)
-  const searchQuery = locationParameters.get('q')?.trim() || ''
-  const requestedPage = Math.max(1, Number(locationParameters.get('page') || 1) || 1)
-  const requestedType = ['ransomware', 'data-leak', 'vulnerability'].includes(locationParameters.get('type'))
-    ? locationParameters.get('type')
-    : 'all'
-  const requestedSort = ['oldest', 'severity'].includes(locationParameters.get('sort'))
-    ? locationParameters.get('sort')
-    : 'latest'
-
-  const searchInput = query(root, '[data-table-search="intel-results"]')
-  if (searchInput) searchInput.value = searchQuery
-  const sortControl = query(root, '[data-intel-sort]')
-  if (sortControl) sortControl.value = requestedSort
-  list.dataset.activeTab = requestedType
-  queryAll(root, '.intel-result-tabs .tab').forEach((button) => {
-    const active = button.dataset.tab === requestedType
-    button.classList.toggle('active', active)
-    button.setAttribute('aria-selected', String(active))
-  })
-
-  const navigate = (changes, resetPage = false) => {
-    const url = new URL(window.location.href)
-    Object.entries(changes).forEach(([key, value]) => {
-      if (value == null || value === '' || value === 'all' || (key === 'sort' && value === 'latest')) {
-        url.searchParams.delete(key)
-      } else {
-        url.searchParams.set(key, String(value))
-      }
-    })
-    if (resetPage) url.searchParams.delete('page')
-    const target = `${url.pathname}${url.search}`
-    if (target === `${window.location.pathname}${window.location.search}`) return
-    const link = document.createElement('a')
-    link.href = target
-    link.hidden = true
-    root.appendChild(link)
-    link.click()
-    link.remove()
-  }
-
-  list.addEventListener('prototype:server-page', (event) => {
-    navigate({ page: Math.max(1, Number(event.detail?.page || 1)) })
-  })
-  list.addEventListener('prototype:server-filter', (event) => {
-    navigate({ type: event.detail?.eventType || 'all' }, true)
-  })
-  list.addEventListener('prototype:server-sort', (event) => {
-    navigate({ sort: event.detail?.sort || 'latest' }, true)
-  })
-
-  const parameters = new URLSearchParams({
-    page: String(requestedPage),
-    page_size: String(INTELLIGENCE_PAGE_SIZE),
-    event_type: requestedType,
-    sort: requestedSort,
-  })
-  if (searchQuery) parameters.set('q', searchQuery)
-  const payload = await requestJson(`/api/events/search?${parameters}`, { preferCached: true })
-  const events = (payload.items || []).filter((item) => eventType(item))
-  list.dataset.serverTotal = String(payload.total || 0)
-  list.dataset.serverPage = String(payload.page || 1)
-  list.dataset.serverPageSize = String(payload.page_size || INTELLIGENCE_PAGE_SIZE)
-  list.dataset.serverPageCount = String(payload.page_count || 1)
-  if (Number(payload.page || 1) !== requestedPage) {
-    const normalizedUrl = new URL(window.location.href)
-    if (Number(payload.page || 1) > 1) normalizedUrl.searchParams.set('page', String(payload.page))
-    else normalizedUrl.searchParams.delete('page')
-    window.history.replaceState({}, '', `${normalizedUrl.pathname}${normalizedUrl.search}`)
-  }
-  renderIntelligenceItems(root, events, payload.counts || {})
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000
-  const recent = events.filter((item) => {
-    const timestamp = new Date(item.updatedTimeRaw || item.updated_time_raw || item.disclosureTimeRaw || item.disclosure_time_raw || 0).getTime()
-    return Number.isFinite(timestamp) && timestamp >= cutoff
-  })
+  const recent = payload.recent24hByType || {}
   const values = [
-    recent.filter((item) => eventType(item) === 'ransomware').length,
-    recent.filter((item) => eventType(item) === 'data-leak').length,
-    recent.filter((item) => eventType(item) === 'vulnerability' && (item.is_exploited || item.isExploited)).length,
-    new Set(recent.flatMap((item) => [item.victim, item.attacker, item.vendor]).filter(Boolean)).size,
+    recent.ransomware || 0,
+    recent.data_leak || 0,
+    recent.vulnerability || 0,
+    payload.recent24h || 0,
   ]
   queryAll(root, '.intel-corpus-item b').forEach((node, index) => { node.textContent = number(values[index]) })
+  updateServerPagination(root, list, payload)
+  state.refresh = () => hydrateIntelligence(root, state)
+  const exportParams = exportParameters(listState)
+  if (listState.tab !== 'all') exportParams.set('types', listState.tab)
+  markExports(root, state, ['#intel-results'], `/api/intelligence/export?dataset=search&${exportParams.toString()}`)
 }
 
 async function hydrateRansomware(root, state) {
   const table = clearTable(root, '#ransomware-table')
-  const payload = await requestJson(`/api/intelligence/ransomware?limit=${PAGE_EVENT_LIMIT}`)
-  const items = payload.ransomwareEvents || []
+  if (!table) return
+  restoreServerState(root, table)
+  const listState = serverQueryState(root, table)
+  const params = queryParameters(listState)
+  if (listState.tab !== 'all') params.set('stage', listState.tab)
+  if (listState.filters.industry) params.set('industry', listState.filters.industry)
+  const payload = await requestJson(`/api/intelligence/ransomware?${params.toString()}`, beginStateRequest(root, state))
+  const items = payload.items || payload.ransomwareEvents || []
+  const industrySelect = query(root, '[data-filter-target="ransomware-table"][data-filter-key="industry"]')
   replaceFilterOptions(
     root,
     '[data-filter-target="ransomware-table"][data-filter-key="industry"]',
     '全部行业',
-    items.map((item) => item.industry).filter(Boolean),
+    (payload.ransomwareIndustryImpact || []).map((item) => item.name),
   )
+  restoreFilterValue(industrySelect, listState.filters.industry)
   const stageOf = (item) => {
     const stage = String(`${item.category || ''} ${item.title || ''}`).toLowerCase()
     if (/发布|公开|published|released|leak/.test(stage)) return { key: 'published', label: item.category || '已发布', tone: 'critical' }
@@ -1254,45 +1478,39 @@ async function hydrateRansomware(root, state) {
     setCell(cells[5], item.region || item.country)
     setActionCell(cells[6], '查看', detailHref(item))
   })
-  const actorCounts = new Map()
-  for (const actor of payload.ransomwareActorRanking || []) {
-    const name = String(actor.name || '').trim()
-    if (!name) continue
-    const key = name.toLocaleLowerCase()
-    const current = actorCounts.get(key) || { name, value: 0 }
-    current.value += Number(actor.value || 0)
-    actorCounts.set(key, current)
-  }
-  const actors = [...actorCounts.values()].sort((a, b) => b.value - a.value).slice(0, 4)
+  const actors = (payload.ransomwareActorRanking || []).slice(0, 4)
   const actorRows = queryAll(root, '.actor-rank')
-  setText(root, '.actor-focus .panel-header .meta', `累计 ${number(items.length)} 条`)
+  setText(root, '.actor-focus .panel-header .meta', `累计 ${number(payload.total)} 条`)
   actorRows.forEach((row, index) => {
     const item = actors[index]
     row.hidden = !item
     if (!item) return
     setText(row, 'b', String(index + 1).padStart(2, '0'))
     setText(row, 'strong', item.name)
-    setText(row, 'span', `${number(item.value)} 起 · 占比 ${Math.round(item.value / Math.max(1, items.length) * 100)}%`)
-    query(row, 'i')?.style.setProperty('--score', `${Math.round(item.value / Math.max(1, actors[0].value) * 100)}%`)
+    setText(row, 'span', `${number(item.value)} 起 · 占比 ${Math.round(item.value / Math.max(1, payload.total) * 100)}%`)
+    const score = `${Math.round(item.value / Math.max(1, actors[0]?.value || 1) * 100)}%`
+    const scoreBar = query(row, 'i')
+    scoreBar?.style.setProperty('--score', score)
+    if (scoreBar) scoreBar.style.width = score
   })
-  if (!actors.length && actorRows[0]) {
-    actorRows[0].hidden = false
-    setText(actorRows[0], 'b', '—')
-    setText(actorRows[0], 'strong', '暂无团伙统计')
-    setText(actorRows[0], 'span', '尚未同步包含团伙字段的勒索记录')
-    query(actorRows[0], 'i')?.style.setProperty('--score', '0%')
-  }
+  const timeline = payload.timeline || []
   queryAll(root, '.timeline-feed li').forEach((row, index) => {
-    const item = items[index]
+    const item = timeline[timeline.length - 1 - index]
     row.hidden = !item
     if (!item) return
-    setText(row, 'time', formatDate(item.updatedTimeRaw || item.disclosureTimeRaw))
-    setText(row, 'strong', item.title)
-    setText(row, 'span', item.category || item.region || '—')
+    setText(row, 'time', item.date)
+    setText(row, 'strong', `${number(item.value)} 起事件`)
+    setText(row, 'span', '数据库聚合')
   })
   setText(root, '.action-feed .pulse-label', '接口数据')
-  markExports(root, state, ['#ransomware-table'])
+  updateServerPagination(root, table, payload)
+  state.refresh = () => hydrateRansomware(root, state)
+  const exportParams = exportParameters(listState)
+  if (listState.tab !== 'all') exportParams.set('stage', listState.tab)
+  if (listState.filters.industry) exportParams.set('industry', listState.filters.industry)
+  markExports(root, state, ['#ransomware-table'], `/api/intelligence/export?dataset=ransomware&${exportParams.toString()}`)
 }
+
 
 function leakSource(item) {
   const raw = String(item.raw_source_type || item.event_type || item.sourceSite || '').toLowerCase()
@@ -1304,11 +1522,25 @@ function leakSource(item) {
 
 async function hydrateDataLeak(root, state) {
   const table = clearTable(root, '#data-leak-table')
-  const payload = await requestJson(`/api/intelligence/data-leak?limit=${PAGE_EVENT_LIMIT}`)
-  const items = payload.dataLeakEvents || []
-  replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="classification"]', '全部事件分类', items.map((item) => item.category).filter(Boolean))
-  replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="attacker"]', '全部攻击者', items.map((item) => item.attacker || item.sourceSite || '未披露'))
-  replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="industry"]', '全部行业', items.map((item) => item.industry).filter(Boolean))
+  if (!table) return
+  restoreServerState(root, table)
+  const listState = serverQueryState(root, table)
+  const params = queryParameters(listState)
+  if (listState.filters.classification) params.set('category', listState.filters.classification)
+  if (listState.filters.attacker) params.set('attacker', listState.filters.attacker)
+  if (listState.filters.industry) params.set('industry', listState.filters.industry)
+  if (listState.source) params.set('source', listState.source)
+  const payload = await requestJson(`/api/intelligence/data-leak?${params.toString()}`, beginStateRequest(root, state))
+  const items = payload.items || payload.dataLeakEvents || []
+  const classificationSelect = query(root, '[data-filter-target="data-leak-table"][data-filter-key="classification"]')
+  const attackerSelect = query(root, '[data-filter-target="data-leak-table"][data-filter-key="attacker"]')
+  const industrySelect = query(root, '[data-filter-target="data-leak-table"][data-filter-key="industry"]')
+  replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="classification"]', '全部事件分类', payload.categories || [])
+  replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="attacker"]', '全部攻击者', (payload.attackers || items.map((item) => item.attacker || item.sourceSite)).filter(Boolean))
+  replaceFilterOptions(root, '[data-filter-target="data-leak-table"][data-filter-key="industry"]', '全部行业', (payload.industries || items.map((item) => item.industry)).filter(Boolean))
+  restoreFilterValue(classificationSelect, listState.filters.classification)
+  restoreFilterValue(attackerSelect, listState.filters.attacker)
+  restoreFilterValue(industrySelect, listState.filters.industry)
   replaceRows(table, items, (row, item) => {
     const cells = queryAll(row, 'td')
     const disclosedAt = item.disclosureTimeRaw || item.disclosureDate
@@ -1330,43 +1562,45 @@ async function hydrateDataLeak(root, state) {
   })
   const sourceRows = queryAll(root, '.source-row')
   const sourceKeys = ['forum', 'chat', 'ransom', 'public']
-  const recentItems = filterByDays(items, 1)
-  setText(root, '.source-monitor .panel-header .meta', '近 24 小时')
+  const sourceCounts = payload.sourceCounts || {}
+  const sourceTotal = Object.values(sourceCounts).reduce((sum, value) => sum + Number(value || 0), 0)
   sourceRows.forEach((button, index) => {
-    const key = sourceKeys[index]
-    const sourceItems = recentItems.filter((item) => leakSource(item) === key)
-    const count = sourceItems.length
-    const trusted = sourceItems.filter((item) => Number(item.confidenceScore || item.confidence_score || 0) >= 70).length
-    const total = Math.max(1, recentItems.length)
-    setText(button, 'small', `${number(count)} 条 · 可信 ${number(trusted)}`)
-    setText(button, 'b', `${Math.round(count / total * 100)}%`)
-    button.dataset.runtimeSource = key
+    const sourceKey = sourceKeys[index]
+    const sourceCount = Number(sourceCounts[sourceKey] || 0)
+    setText(button, 'small', `${number(sourceCount)} 条`)
+    setText(button, 'b', `${Math.round(sourceCount / Math.max(1, sourceTotal) * 100)}%`)
+    button.dataset.runtimeSource = sourceKey
+    button.classList.toggle('active', sourceKey === listState.source)
     setActionAvailable(button, true)
   })
   state.sourceTable = table
-  const activeSource = query(root, '.source-row.active')?.dataset.runtimeSource
-  if (activeSource) {
-    table.dataset.activeTab = activeSource
-    table.dispatchEvent(new CustomEvent('prototype:rows-updated'))
-  }
-  markExports(root, state, ['#data-leak-table'])
+  updateServerPagination(root, table, payload)
+  state.refresh = () => hydrateDataLeak(root, state)
+  const exportParams = exportParameters(listState)
+  if (listState.filters.classification) exportParams.set('category', listState.filters.classification)
+  if (listState.filters.attacker) exportParams.set('attacker', listState.filters.attacker)
+  if (listState.filters.industry) exportParams.set('industry', listState.filters.industry)
+  if (listState.source) exportParams.set('source', listState.source)
+  markExports(root, state, ['#data-leak-table'], `/api/intelligence/export?dataset=data_leak&${exportParams.toString()}`)
 }
 
 async function hydrateVulnerabilities(root, state) {
   const table = clearTable(root, '#vulnerability-table')
-  const days = Number(state.vulnerabilityDays || 7)
+  if (!table) return
+  restoreServerState(root, table)
+  const listState = serverQueryState(root, table)
+  const days = Number(state.vulnerabilityDays || listState.days || 7)
   state.vulnerabilityDays = days
-  const items = await requestJson(`/api/vulnerabilities?limit=500&days=${days}`)
-  replaceFilterOptions(
-    root,
-    '[data-filter-target="vulnerability-table"][data-filter-key="industry"]',
-    '全部行业',
-    items.map((item) => item.industry).filter(Boolean),
-  )
-  const severe = items.filter((item) => Number(item.cvss || 0) >= 9).length
-  const exploited = items.filter((item) => item.isExploited || item.is_exploited).length
-  const patched = items.filter((item) => item.patchAvailable || item.patch_available).length
-  setCounts(query(root, '.vuln-intel-kpis'), [items.length, severe, exploited, patched])
+  const params = queryParameters({ ...listState, days })
+  if (listState.tab !== 'all') params.set('severity', listState.tab)
+  if (listState.filters.industry) params.set('industry', listState.filters.industry)
+  const payload = await requestJson(`/api/vulnerabilities?${params.toString()}`, beginStateRequest(root, state))
+  const items = payload.items || []
+  const summary = payload.summary || {}
+  const industrySelect = query(root, '[data-filter-target="vulnerability-table"][data-filter-key="industry"]')
+  replaceFilterOptions(root, '[data-filter-target="vulnerability-table"][data-filter-key="industry"]', '全部行业', ['基础设施软件'])
+  restoreFilterValue(industrySelect, listState.filters.industry)
+  setCounts(query(root, '.vuln-intel-kpis'), [summary.total || payload.total, summary.criticalCvss, summary.exploited, summary.patched])
   replaceRows(table, items, (row, item) => {
     const cells = queryAll(row, 'td')
     const severity = severityOf(item)
@@ -1382,15 +1616,14 @@ async function hydrateVulnerabilities(root, state) {
     setCell(cells[6], item.patchAvailable || item.patch_available ? '可用' : '暂无')
     setActionCell(cells[7], '查看', detailHref(item))
   })
-  const severityCounts = ['critical', 'high', 'medium', 'low'].map((key) => ({ name: severityLabel(key), value: items.filter((item) => severityOf(item) === key).length }))
-  setText(root, '.severity-donut strong', number(items.length))
-  setText(root, '.severity-donut-card .meta', `${number(items.length)} 条`)
+  const severityCounts = ['critical', 'high', 'medium', 'low'].map((key) => ({ name: severityLabel(key), value: Number(payload.severityCounts?.[key] || 0) }))
+  setText(root, '.severity-donut strong', number(payload.total))
+  setText(root, '.severity-donut-card .meta', `${number(payload.total)} 条`)
   fillNamedRows(query(root, '.severity-legend'), severityCounts)
   setConicChart(query(root, '.severity-donut'), severityCounts.map((item) => item.value), ['var(--danger)', 'var(--warning)', 'var(--accent)', 'var(--secondary)'])
-  fillNamedRows(query(root, '.vendor-bars'), countBy(items, (item) => item.vendor).slice(0, 5))
-  const industry = countBy(items, (item) => item.industry).slice(0, 5)
+  fillNamedRows(query(root, '.vendor-bars'), payload.vendorRanking || [])
   queryAll(root, '.industry-block').forEach((button, index) => {
-    const item = industry[index]
+    const item = index === 0 ? { name: '基础设施软件', value: payload.total } : null
     button.hidden = !item
     if (!item) return
     setText(button, 'strong', item.name)
@@ -1400,9 +1633,8 @@ async function hydrateVulnerabilities(root, state) {
     button.removeAttribute('data-toast')
     setActionAvailable(button, true)
   })
-  const products = countBy(items, (item) => item.product).slice(0, 5)
   queryAll(root, '.product-bubble').forEach((button, index) => {
-    const item = products[index]
+    const item = (payload.productRanking || [])[index]
     button.hidden = !item
     if (!item) return
     setText(button, 'strong', item.name)
@@ -1412,53 +1644,38 @@ async function hydrateVulnerabilities(root, state) {
     button.removeAttribute('data-toast')
     setActionAvailable(button, true)
   })
+  const exploited = Number(summary.exploited || 0)
+  const patched = Number(summary.patched || 0)
   setText(root, '.ring-kev strong', exploited)
-  setConicChart(query(root, '.ring-kev'), [exploited, Math.max(0, items.length - exploited)], ['var(--danger)', 'var(--bg)'])
+  setConicChart(query(root, '.ring-kev'), [exploited, Math.max(0, payload.total - exploited)], ['var(--danger)', 'var(--bg)'])
   setText(root, '.ring-poc strong', '—')
   setConicChart(query(root, '.ring-poc'), [], ['var(--warning)'])
-  const signalRows = queryAll(root, '.signal-source-list > div')
-  const signalValues = [
-    ['已确认利用', number(exploited)],
-    ['补丁可用', number(patched)],
-    ['PoC 数据', '—'],
-  ]
-  signalRows.forEach((row, index) => {
-    const item = signalValues[index]
-    row.hidden = !item
-    if (!item) return
-    setText(row, 'span', item[0])
-    setText(row, 'b', item[1])
+  const signalValues = [['已确认利用', number(exploited)], ['补丁可用', number(patched)], ['PoC 数据', '—']]
+  queryAll(root, '.signal-source-list > div').forEach((row, index) => {
+    setText(row, 'span', signalValues[index]?.[0] || '—')
+    setText(row, 'b', signalValues[index]?.[1] || '—')
   })
-
-  const trend = buildDailyTrend(items, days)
+  const trend = (payload.timeline || []).map((item) => ({ date: item.date, value: Number(item.value || 0) }))
   const values = trend.map((item) => item.value)
   const points = chartPoints(values, { xStart: 34, xEnd: 700, yTop: 35, yBottom: 185 })
   query(root, '.vuln-line-path')?.setAttribute('d', linePath(points))
   query(root, '.vuln-area-path')?.setAttribute('d', areaPath(points, 205))
   const markerPoints = evenlySample(points, queryAll(root, '.vuln-points circle').length)
   setChartMarkers(query(root, '.vuln-points'), 'circle', markerPoints, (circle, point) => {
-    circle.setAttribute('cx', point.x.toFixed(1))
-    circle.setAttribute('cy', point.y.toFixed(1))
+    circle.setAttribute('cx', point.x.toFixed(1)); circle.setAttribute('cy', point.y.toFixed(1))
   })
   setChartMarkers(query(root, '.vuln-chart-values'), 'text', markerPoints, (node, point) => {
-    node.textContent = number(point.value)
-    node.setAttribute('x', point.x.toFixed(1))
-    node.setAttribute('y', Math.max(20, point.y - 10).toFixed(1))
+    node.textContent = number(point.value); node.setAttribute('x', point.x.toFixed(1)); node.setAttribute('y', Math.max(20, point.y - 10).toFixed(1))
   })
   const sampledTrend = evenlySample(trend, queryAll(root, '.chart-labels text').length)
   queryAll(root, '.chart-labels text').forEach((node, index) => {
-    const point = markerPoints[index]
-    const item = sampledTrend[index]
+    const point = markerPoints[index]; const item = sampledTrend[index]
     node.hidden = !item
-    if (!item) return
-    node.textContent = item.date.slice(5)
-    node.setAttribute('x', point.x.toFixed(1))
+    if (!item || !point) return
+    node.textContent = item.date.slice(5); node.setAttribute('x', point.x.toFixed(1))
   })
-  setText(root, '.vuln-trend-card .trend-summary strong', number(items.length))
+  setText(root, '.vuln-trend-card .trend-summary strong', number(payload.total))
   setText(root, '.vuln-trend-card .panel-header .meta', `近 ${days} 天`)
-  const chart = query(root, '.vuln-trend-chart')
-  if (chart) chart.setAttribute('aria-label', `近 ${days} 天真实漏洞披露趋势，共 ${items.length} 条`)
-
   const periodButtons = queryAll(root, '[data-od-id="vulnerability-action-section"] .page-actions button')
   periodButtons.forEach((button) => {
     const buttonDays = button.textContent.includes('今日') ? 1 : button.textContent.includes('30') ? 30 : 7
@@ -1468,516 +1685,18 @@ async function hydrateVulnerabilities(root, state) {
     button.dataset.runtimePeriodBound = '1'
     button.addEventListener('click', async () => {
       state.vulnerabilityDays = buttonDays
-      setDataState(root, 'loading', '正在按统计周期刷新真实漏洞数据…')
-      try {
-        await hydrateVulnerabilities(root, state)
-        setDataState(root, 'ready')
-      } catch (error) {
-        showLoadError(root, error)
-      }
+      table.dataset.serverPage = '1'
+      await hydrateVulnerabilities(root, state)
     })
   })
+  updateServerPagination(root, table, payload)
   state.refresh = () => hydrateVulnerabilities(root, state)
-  markExports(root, state, ['#vulnerability-table'])
+  const exportParams = exportParameters({ ...listState, days })
+  if (listState.tab !== 'all') exportParams.set('severity', listState.tab)
+  if (listState.filters.industry) exportParams.set('industry', listState.filters.industry)
+  markExports(root, state, ['#vulnerability-table'], `/api/vulnerabilities/export?${exportParams.toString()}`)
 }
 
-function fillDistribution(container, items, total, percentage = false) {
-  if (!container) return
-  const rows = [...container.children]
-  rows.forEach((row, index) => {
-    const item = items[index]
-    row.hidden = !item
-    if (!item) return
-    const labels = queryAll(row, 'span')
-    const name = labels[labels.length - 1]
-    if (name) name.textContent = item.name || item.label || item.key
-    const value = query(row, 'b, strong')
-    if (value) value.textContent = percentage ? `${Math.round(item.value / Math.max(1, total) * 100)}%` : number(item.value)
-  })
-}
-
-function renderMonitorTrend(surface, trendItems) {
-  const trend = (trendItems || []).map((item) => ({ date: String(item.date || ''), value: Number(item.value || 0) }))
-  const values = trend.map((item) => item.value)
-  const points = chartPoints(values, { xStart: 42, xEnd: 718, yTop: 30, yBottom: 184 })
-  query(surface, '.monitor-line')?.setAttribute('d', linePath(points))
-  query(surface, '.monitor-area')?.setAttribute('d', areaPath(points, 184))
-  setChartMarkers(query(surface, '.monitor-points'), 'circle', points, (circle, point) => {
-    circle.setAttribute('cx', point.x.toFixed(1))
-    circle.setAttribute('cy', point.y.toFixed(1))
-  })
-  setChartMarkers(query(surface, '.monitor-columns'), 'rect', points, (rect, point) => {
-    rect.setAttribute('x', (point.x - 15).toFixed(1))
-    rect.setAttribute('y', point.y.toFixed(1))
-    rect.setAttribute('width', '30')
-    rect.setAttribute('height', Math.max(0, 184 - point.y).toFixed(1))
-  })
-  queryAll(surface, '.monitor-chart-values text').forEach((node, index) => {
-    const point = points[index]
-    node.hidden = !point
-    if (!point) return
-    node.textContent = number(point.value)
-    node.setAttribute('x', Math.min(718, Math.max(42, point.x)).toFixed(1))
-    node.setAttribute('y', Math.max(18, point.y - 12).toFixed(1))
-  })
-  queryAll(surface, '.monitor-chart-dates text').forEach((node, index) => {
-    const item = trend[index]
-    const point = points[index]
-    node.hidden = !item
-    if (!item) return
-    node.textContent = item.date.slice(5) || '—'
-    node.setAttribute('x', Math.min(718, Math.max(42, point.x)).toFixed(1))
-  })
-  const peakValue = values.length ? Math.max(...values) : 0
-  const peakIndex = peakValue > 0 ? values.indexOf(peakValue) : -1
-  const peakPoint = points[peakIndex]
-  const peak = query(surface, '.monitor-peak-ring')
-  if (peak) {
-    peak.style.opacity = peakPoint ? '1' : '0'
-    if (peakPoint) {
-      peak.setAttribute('cx', peakPoint.x.toFixed(1))
-      peak.setAttribute('cy', peakPoint.y.toFixed(1))
-    }
-  }
-  const total = values.reduce((sum, value) => sum + value, 0)
-  const average = values.length ? Math.round(total / values.length) : 0
-  const first = values[0] || 0
-  const last = values.at(-1) || 0
-  const change = first > 0 ? (last - first) / first * 100 : null
-  const summaryCards = queryAll(surface, '.monitor-trend-summary > div')
-  const summaryValues = [number(total), number(average), number(peakValue), change == null ? '—' : `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`]
-  summaryCards.forEach((card, index) => {
-    setText(card, 'strong', summaryValues[index])
-    if (index === 2) setText(card, 'small', trend[peakIndex]?.date?.slice(5) || '—')
-    if (index === 3) {
-      const value = query(card, 'strong')
-      value?.classList.toggle('is-up', change != null && change > 0)
-      value?.classList.toggle('is-down', change != null && change < 0)
-    }
-  })
-  const chart = query(surface, '.monitor-trend-chart')
-  if (chart) chart.setAttribute('aria-label', `近七天真实监测趋势：共 ${total} 条，峰值 ${peakValue}`)
-}
-
-function renderCodeTrend(root, trendItems) {
-  const trend = (trendItems || []).map((item) => ({ date: String(item.date || ''), value: Number(item.value || 0) }))
-  const points = chartPoints(trend.map((item) => item.value), { xStart: 42, xEnd: 678, yTop: 36, yBottom: 180 })
-  query(root, '.code-line')?.setAttribute('d', linePath(points))
-  setChartMarkers(query(root, '.code-dots'), 'circle', points, (circle, point) => {
-    circle.setAttribute('cx', point.x.toFixed(1))
-    circle.setAttribute('cy', point.y.toFixed(1))
-  })
-  queryAll(root, '.code-chart-values text').forEach((node, index) => {
-    const point = points[index]
-    node.hidden = !point
-    if (!point) return
-    node.textContent = number(point.value)
-    node.setAttribute('x', point.x.toFixed(1))
-    node.setAttribute('y', Math.max(18, point.y - 14).toFixed(1))
-  })
-  queryAll(root, '.code-chart-dates text').forEach((node, index) => {
-    const item = trend[index]
-    const point = points[index]
-    node.hidden = !item
-    if (!item) return
-    node.textContent = item.date.slice(5) || '—'
-    node.setAttribute('x', point.x.toFixed(1))
-  })
-  const chart = query(root, '.code-trend-chart')
-  if (chart) chart.setAttribute('aria-label', `近七天真实代码监测趋势，共 ${trend.reduce((sum, item) => sum + item.value, 0)} 条`)
-}
-
-function accessStatusMeta(item) {
-  const state = String(item?.accessState || '').toLowerCase()
-  const label = item?.accessStateLabel || item?.reviewStatusLabel || reviewStatusLabel(item?.reviewStatus)
-  if (['removed', 'forbidden', 'invalid'].includes(state)) return { label, className: 'result-status expired' }
-  if (['captcha', 'login_required', 'rate_limited', 'unknown'].includes(state)) return { label, className: 'result-status pending' }
-  if (state === 'public') return { label, className: 'result-status active' }
-  return { label, className: 'result-status processing' }
-}
-
-const DOCUMENT_HIT_PAGE_SIZE = 20
-
-function documentHitPageUrl(root, source, page) {
-  const surface = query(root, `.${source === 'netdisk' ? 'netdisk' : 'library'}-surface`)
-  const params = new URLSearchParams({
-    source_family: source === 'netdisk' ? 'netdisk_aggregator' : 'document_library',
-    offset: String((page - 1) * DOCUMENT_HIT_PAGE_SIZE),
-    limit: String(DOCUMENT_HIT_PAGE_SIZE),
-  })
-  queryAll(surface, '[data-document-hit-filter]').forEach((control) => {
-    const key = control.dataset.documentHitFilter
-    const value = String(control.value || '').trim()
-    if (!value) return
-    if (key === 'recent_days') params.set('recent_hours', String(Math.max(1, Number(value)) * 24))
-    else params.set(key, value)
-  })
-  return `/api/document-exposures/page?${params.toString()}`
-}
-
-async function reloadDocumentMonitoringData(root, state, source, pageState) {
-  if (pageState.loading) return
-  pageState.loading = true
-  const sourceFamily = source === 'netdisk' ? 'netdisk_aggregator' : 'document_library'
-  const tableSelector = source === 'netdisk' ? '#netdisk-table' : '#library-table'
-  const table = clearTable(root, tableSelector)
-  const surface = query(root, `.${source === 'netdisk' ? 'netdisk' : 'library'}-surface`)
-  try {
-    const [summary, pagePayload] = await Promise.all([
-      pageState.summary || requestJson(`/api/document-exposures/summary?source_family=${sourceFamily}`),
-      requestJson(documentHitPageUrl(root, source, pageState.page)),
-    ])
-    pageState.summary = summary
-    const items = pagePayload.items || []
-    setCodeServerPage(table, pagePayload)
-    replaceFilterOptions(
-      root,
-      `[data-filter-target="${source === 'netdisk' ? 'netdisk-table' : 'library-table'}"][data-filter-key="${source === 'netdisk' ? 'platform' : 'source'}"]`,
-      source === 'netdisk' ? '全部平台' : '全部来源',
-      summary.platformOptions || [],
-    )
-    const kpis = source === 'netdisk'
-      ? [summary.totalHits, summary.highRiskCount, summary.passwordShareCount, summary.invalidCount]
-      : [summary.publicCount, summary.totalHits, summary.highRiskCount, summary.recentCount]
-    setCounts(query(surface, '.monitor-kpi-grid'), kpis)
-    replaceRows(table, items, (row, item) => {
-      const cells = queryAll(row, 'td')
-      const severity = severityOf(item)
-      row.dataset.platform = item.platform
-      if (source === 'library') row.dataset.source = item.platform
-      row.dataset.severity = severity
-      row.dataset.discoveredAt = item.lastSeenAt || item.firstSeenAt || ''
-      if (source === 'netdisk') {
-        setCell(cells[0], item.primaryFileName || item.title)
-        setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
-        setClassTextCell(cells[2], item.shareCode ? '口令分享' : '公开分享', `share-type ${item.shareCode ? 'password' : 'public'}`)
-        setCell(cells[3], item.shareCode || '—')
-        setCell(cells[4], item.primaryFileSize || '—')
-        setCell(cells[5], (item.matchedTerms || []).map((term) => term.term).join('、'))
-        setBadgeCell(cells[6], severityLabel(severity), severity)
-        setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
-        const status = accessStatusMeta(item)
-        setClassTextCell(cells[8], status.label, status.className)
-        setActionCell(cells[9], '查看', `/document-exposure/detail/netdisk_aggregator/${encodeURIComponent(item.id)}`)
-      } else {
-        setDocumentTitleCell(cells[0], item.title, item.primaryFileType)
-        setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
-        setCell(cells[2], item.primaryFileType || '—')
-        setCell(cells[3], '—')
-        setCell(cells[4], (item.matchedTerms || []).map((term) => term.term).join('、'))
-        setCell(cells[5], item.shareOwner || '—')
-        setBadgeCell(cells[6], severityLabel(severity), severity)
-        setCell(cells[7], formatDate(item.lastSeenAt || item.firstSeenAt))
-        const review = item.reviewStatusLabel || reviewStatusLabel(item.reviewStatus)
-        const access = item.accessStateLabel || ''
-        setResultStatusCell(cells[8], [review, access && access !== review ? access : ''].filter(Boolean).join(' · '))
-        setActionCell(cells[9], '详情', `/document-exposure/detail/document_library/${encodeURIComponent(item.id)}`)
-      }
-    })
-    setText(surface, '.monitor-donut strong', number(summary.totalHits))
-    setText(surface, '.monitor-donut-card .meta', `总计 ${number(summary.totalHits)}`)
-    const distribution = summary.platformDistribution || []
-    fillSourceDistribution(query(surface, '.monitor-donut-legend'), distribution, summary.totalHits, source === 'library')
-    setConicChart(query(surface, '.monitor-donut'), distribution.map((item) => item.value), ['var(--accent)', 'var(--warning)', 'var(--secondary)', 'var(--success)', 'var(--violet)'])
-    renderMonitorTrend(surface, summary.trend || [])
-    markExports(surface, state, [tableSelector])
-    if (source === 'library') {
-      const batchReview = queryAll(surface, 'button[data-toast]').find((button) => button.textContent.includes('批量复核'))
-      if (batchReview) setActionAvailable(batchReview, false, '后端未提供批量复核接口')
-    }
-  } finally {
-    pageState.loading = false
-  }
-}
-
-function setupDocumentMonitoringFilters(root, source, pageState, reload) {
-  const surface = query(root, `.${source === 'netdisk' ? 'netdisk' : 'library'}-surface`)
-  let searchTimer = null
-  queryAll(surface, '[data-document-hit-filter]').forEach((control) => {
-    const eventName = control.dataset.documentHitFilter === 'query' ? 'input' : 'change'
-    control.addEventListener(eventName, () => {
-      window.clearTimeout(searchTimer)
-      searchTimer = window.setTimeout(() => {
-        pageState.page = 1
-        reload()
-      }, eventName === 'input' ? 300 : 0)
-    })
-  })
-  const table = query(root, source === 'netdisk' ? '#netdisk-table' : '#library-table')
-  table?.addEventListener('prototype:server-page', (event) => {
-    pageState.page = Math.max(1, Number(event.detail?.page || 1))
-    reload()
-  })
-}
-
-async function hydrateDocumentMonitoring(root, state, source) {
-  const pageState = { page: 1, loading: false, summary: null }
-  const reload = () => reloadDocumentMonitoringData(root, state, source, pageState)
-  setupDocumentMonitoringFilters(root, source, pageState, reload)
-  await reload()
-}
-
-const CODE_CONTINUOUS_INTERVAL_SECONDS = 3600
-const CODE_HIT_PAGE_SIZE = 20
-
-function renderCodeContinuousStatus(root, status = {}, errorMessage = '') {
-  const stateNode = query(root, '[data-code-scan-state]')
-  const toggle = query(root, '[data-code-scan-toggle]')
-  const lastSuccess = query(root, '[data-code-scan-last-success]')
-  const result = query(root, '[data-code-scan-result]')
-  const evidence = query(root, '[data-code-scan-evidence]')
-  const error = query(root, '[data-code-scan-error]')
-  const enabled = Boolean(status.enabled)
-  const running = Boolean(status.running)
-  const configurationMissing = Boolean(status.configuration_missing)
-
-  if (stateNode) {
-    stateNode.textContent = configurationMissing ? '待配置' : errorMessage ? '状态异常' : running ? '扫描中' : enabled ? '运行中' : '未启动'
-    stateNode.className = `badge ${configurationMissing ? 'badge-info' : errorMessage ? 'badge-high' : enabled ? 'badge-success' : 'badge-info'}`
-  }
-  if (lastSuccess) lastSuccess.textContent = status.last_success_at ? formatDate(status.last_success_at) : '暂无'
-  if (result) result.textContent = `主表 ${number(status.new_primary_hit_count)} / 压制 ${number(status.new_suppressed_hit_count)} / 更新 ${number(status.updated_hit_count)}`
-  if (evidence) evidence.textContent = `敏感 ${number(status.new_sensitive_hit_count)} / 线索 ${number(status.new_clue_hit_count)}`
-  if (toggle) {
-    toggle.dataset.enabled = enabled ? '1' : '0'
-    toggle.textContent = configurationMissing ? '请先配置' : enabled ? '停止扫描' : '开始扫描'
-    toggle.classList.toggle('btn-primary', !enabled)
-    toggle.classList.toggle('btn-danger', enabled)
-  }
-  if (error) {
-    const message = errorMessage || status.last_error || ''
-    error.textContent = message
-    error.hidden = !message
-  }
-}
-
-async function setupCodeContinuousScan(root, watchlists = [], onScanCompleted = null) {
-  const panel = query(root, '[data-code-scan-panel]')
-  const select = query(root, '[data-code-scan-watchlist]')
-  const toggle = query(root, '[data-code-scan-toggle]')
-  if (!panel || !select || !toggle) return
-  window.clearInterval(root.__codeContinuousStatusTimer)
-  root.__codeContinuousStatusTimer = null
-
-  const enabledWatchlists = watchlists.filter((item) => item.enabled !== false)
-  select.replaceChildren(...enabledWatchlists.map((item) => new Option(item.name || `监测对象 ${item.id}`, String(item.id))))
-  if (!enabledWatchlists.length) {
-    select.replaceChildren(new Option('请先配置监测对象', ''))
-    toggle.disabled = true
-    renderCodeContinuousStatus(root, { configuration_missing: true }, '请先在设置中心创建并启用代码监测对象。')
-    return
-  }
-
-  let loading = false
-  const lastSuccessByWatchlist = new Map()
-  const refreshStatus = async (preferredStatus = null) => {
-    const watchlistId = Number(select.value || 0)
-    if (!watchlistId || loading) return
-    try {
-      const status = preferredStatus || await requestJson(`/api/code-monitoring/continuous-status?watchlist_id=${encodeURIComponent(watchlistId)}`)
-      renderCodeContinuousStatus(root, status)
-      const currentSuccess = String(status.last_success_at || '')
-      const hadBaseline = lastSuccessByWatchlist.has(watchlistId)
-      const previousSuccess = lastSuccessByWatchlist.get(watchlistId) || ''
-      lastSuccessByWatchlist.set(watchlistId, currentSuccess)
-      if (hadBaseline && currentSuccess && previousSuccess !== currentSuccess && onScanCompleted) {
-        await onScanCompleted()
-      }
-    } catch (error) {
-      renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
-    } finally {
-      toggle.disabled = false
-    }
-  }
-
-  try {
-    const activeStatus = await requestJson('/api/code-monitoring/continuous-status')
-    const activeId = Number(activeStatus.target_watchlist_id || 0)
-    if (activeId && enabledWatchlists.some((item) => Number(item.id) === activeId)) select.value = String(activeId)
-    await refreshStatus(activeId === Number(select.value) ? activeStatus : null)
-  } catch (error) {
-    renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
-    toggle.disabled = false
-  }
-
-  if (!root.isConnected) return
-  select.addEventListener('change', () => { refreshStatus() })
-  toggle.addEventListener('click', async () => {
-    const watchlistId = Number(select.value || 0)
-    if (!watchlistId || loading) return
-    loading = true
-    toggle.disabled = true
-    toggle.textContent = toggle.dataset.enabled === '1' ? '正在停止…' : '正在启动…'
-    try {
-      const enabled = toggle.dataset.enabled === '1'
-      const endpoint = enabled ? '/api/code-monitoring/continuous/stop' : '/api/code-monitoring/continuous/start'
-      const status = await requestJson(endpoint, {
-        method: 'POST',
-        body: JSON.stringify(enabled
-          ? { watchlist_id: watchlistId }
-          : { watchlist_id: watchlistId, interval_seconds: CODE_CONTINUOUS_INTERVAL_SECONDS }),
-      })
-      renderCodeContinuousStatus(root, status)
-      showToast(status.message || (enabled ? '长期扫描已停止' : '长期扫描已启动'))
-    } catch (error) {
-      renderCodeContinuousStatus(root, { enabled: toggle.dataset.enabled === '1' }, error.message || '长期扫描操作失败')
-    } finally {
-      loading = false
-      toggle.disabled = false
-    }
-  })
-
-  root.__codeContinuousStatusTimer = window.setInterval(() => {
-    if (!root.isConnected || !query(root, '[data-code-scan-panel]')) {
-      window.clearInterval(root.__codeContinuousStatusTimer)
-      root.__codeContinuousStatusTimer = null
-      return
-    }
-    refreshStatus()
-  }, 15_000)
-}
-
-function codeHitPageUrl(root, codeState, bucket) {
-  const params = new URLSearchParams({
-    bucket,
-    offset: String((codeState.pages[bucket] - 1) * CODE_HIT_PAGE_SIZE),
-    limit: String(CODE_HIT_PAGE_SIZE),
-  })
-  queryAll(root, '[data-code-hit-filter]').forEach((control) => {
-    const value = String(control.value || '').trim()
-    if (value) params.set(control.dataset.codeHitFilter, value)
-  })
-  return `/api/code-monitoring/hits/page?${params.toString()}`
-}
-
-function setCodeServerPage(table, payload) {
-  if (!table) return
-  const total = Math.max(0, Number(payload.total || 0))
-  const limit = Math.max(1, Number(payload.limit || CODE_HIT_PAGE_SIZE))
-  const offset = Math.max(0, Number(payload.offset || 0))
-  table.dataset.serverPagination = 'true'
-  table.dataset.serverTotal = String(total)
-  table.dataset.serverPageSize = String(limit)
-  table.dataset.serverPage = String(Math.floor(offset / limit) + 1)
-  table.dataset.serverPageCount = String(Math.max(1, Math.ceil(total / limit)))
-}
-
-function fillPrimaryCodeRows(table, items) {
-  replaceRows(table, items, (row, item) => {
-    const cells = queryAll(row, 'td')
-    const severity = severityOf(item)
-    row.dataset.target = item.watchlistName || item.organizationName || ''
-    row.dataset.platform = item.platform
-    row.dataset.severity = severity === 'critical' ? 'high' : severity
-    row.dataset.hit = item.resultLayer
-    row.dataset.type = item.sensitiveType
-    row.dataset.discoveredAt = item.firstSeenAt || ''
-    setCell(cells[0], item.repositoryFullName || item.repositoryName)
-    setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
-    setCell(cells[2], item.filePath)
-    if (cells[2]) cells[2].title = item.filePath || ''
-    setCell(cells[3], item.sensitiveLabel)
-    setCell(cells[4], item.matchedTerm)
-    setClassTextCell(cells[5], item.resultLayerLabel, `hit-level ${item.resultLayer || ''}`)
-    setBadgeCell(cells[6], severityLabel(severity), severity)
-    setCell(cells[7], formatDate(item.firstSeenAt))
-    setCell(cells[8], reviewStatusLabel(item.reviewStatus))
-    setActionCell(cells[9], '详情', `/document-exposure/code-monitoring/detail/${encodeURIComponent(item.id)}`)
-  })
-}
-
-function fillSuppressedCodeRows(table, items) {
-  if (!table) return
-  replaceRows(table, items, (row, item) => {
-    const cells = queryAll(row, 'td')
-    row.dataset.target = item.watchlistName || item.organizationName || ''
-    setCell(cells[0], item.repositoryFullName || item.repositoryName)
-    row.dataset.discoveredAt = item.firstSeenAt || ''
-    setDocumentSourceCell(cells[1], item.platform, item.platformLabel)
-    setCell(cells[2], item.filePath)
-    if (cells[2]) cells[2].title = item.filePath || ''
-    setCell(cells[3], item.matchedTerm)
-    setCell(cells[4], item.resultLayerLabel)
-    const suppressionReason = (item.suppressionReasons || []).join('；') || '规则压制'
-    setCell(cells[5], suppressionReason)
-    if (cells[5]) cells[5].title = suppressionReason
-    setBadgeCell(cells[6], severityLabel(severityOf(item)), severityOf(item))
-    setCell(cells[7], formatDate(item.firstSeenAt))
-    setCell(cells[8], reviewStatusLabel(item.reviewStatus))
-    setActionCell(cells[9], '详情', `/document-exposure/code-monitoring/detail/${encodeURIComponent(item.id)}`)
-  })
-}
-
-async function reloadCodeMonitoringData(root, state, codeState, resetPages = false) {
-  if (codeState.loading) return
-  if (resetPages) codeState.pages = { primary: 1, suppressed: 1 }
-  codeState.loading = true
-  try {
-    const [summary, primaryPage, suppressedPage] = await Promise.all([
-      requestJson('/api/code-monitoring/summary'),
-      requestJson(codeHitPageUrl(root, codeState, 'primary')),
-      requestJson(codeHitPageUrl(root, codeState, 'suppressed')),
-    ])
-    const table = clearTable(root, '#code-table')
-    const suppressedTable = clearTable(root, '#suppressed-code-table')
-    setCodeServerPage(table, primaryPage)
-    setCodeServerPage(suppressedTable, suppressedPage)
-    fillPrimaryCodeRows(table, primaryPage.items || [])
-    fillSuppressedCodeRows(suppressedTable, suppressedPage.items || [])
-    const primaryCount = query(root, '[data-table-count="code-table"]')
-    const suppressedCount = query(root, '[data-table-count="suppressed-code-table"]')
-    if (primaryCount) primaryCount.textContent = number(primaryPage.total)
-    if (suppressedCount) suppressedCount.textContent = number(suppressedPage.total)
-    setCounts(query(root, '.code-kpi-layout'), [summary.publicRepositoryCount, summary.sensitiveSnippetCount, summary.clueHitCount, summary.highRiskRepositoryCount])
-    fillSourceDistribution(query(root, '.code-source-grid'), summary.platformDistribution || [], summary.totalHits)
-    const repositoryRisk = summary.repositoryRiskDistribution || []
-    const repositoryCount = Number(summary.repositoryCount || 0)
-    setText(root, '.code-risk-donut strong', number(repositoryCount))
-    setText(root, '.code-risk-card .meta', `总仓库 ${number(repositoryCount)}`)
-    fillDistribution(query(root, '.code-risk-legend'), repositoryRisk, repositoryCount, true)
-    setConicChart(query(root, '.code-risk-donut'), repositoryRisk.map((item) => item.value), ['var(--danger)', 'var(--warning)', 'var(--secondary)'])
-    fillNamedRows(query(root, '.code-secret-rank'), summary.sensitiveTypeTop || [])
-    renderCodeTrend(root, summary.trend || [])
-    markExports(root, state, ['#code-table'])
-  } finally {
-    codeState.loading = false
-  }
-}
-
-function setupCodeHitFilters(root, codeState, reload) {
-  let searchTimer = null
-  queryAll(root, '[data-code-hit-filter]').forEach((control) => {
-    const eventName = control.dataset.codeHitFilter === 'query' ? 'input' : 'change'
-    control.addEventListener(eventName, () => {
-      window.clearTimeout(searchTimer)
-      searchTimer = window.setTimeout(() => { reload(true) }, eventName === 'input' ? 300 : 0)
-    })
-  })
-  for (const [bucket, selector] of [['primary', '#code-table'], ['suppressed', '#suppressed-code-table']]) {
-    query(root, selector)?.addEventListener('prototype:server-page', (event) => {
-      codeState.pages[bucket] = Math.max(1, Number(event.detail?.page || 1))
-      reload(false)
-    })
-  }
-}
-
-async function hydrateCodeMonitoring(root, state) {
-  const codeState = { pages: { primary: 1, suppressed: 1 }, loading: false }
-  const reload = (resetPages = false) => reloadCodeMonitoringData(root, state, codeState, resetPages)
-  setupCodeHitFilters(root, codeState, reload)
-  const [watchlistsPayload] = await Promise.all([
-    requestJson('/api/code-monitoring/watchlists'),
-    reload(false),
-  ])
-  const watchlists = Array.isArray(watchlistsPayload) ? watchlistsPayload : (watchlistsPayload.items || watchlistsPayload.watchlists || [])
-  const watchlistFilter = query(root, '[data-code-hit-filter="watchlist_id"]')
-  if (watchlistFilter) {
-    watchlistFilter.replaceChildren(new Option('全部监测对象', ''), ...watchlists.map((item) => new Option(item.name || `监测对象 ${item.id}`, String(item.id))))
-  }
-  setupCodeContinuousScan(root, watchlists, () => reload(true)).catch((error) => {
-    renderCodeContinuousStatus(root, {}, error.message || '长期扫描状态加载失败')
-  })
-}
 
 function replaceRecordContainer(container, lines) {
   if (!container) return
@@ -2172,7 +1891,7 @@ function configureSourceAccess(root, config) {
     const slot = query(figure, '.mirror-image-slot')
     if (slot && mirror) {
       slot.replaceChildren()
-      if (shouldRenderResourceAsImage(mirror)) {
+      if (mirror.kind === 'screenshot' || /截图|image/i.test(mirror.label)) {
         const image = document.createElement('img')
         image.className = 'runtime-mirror-image'
         image.src = mirror.url
@@ -2226,359 +1945,6 @@ function hydrateAccount(root) {
   } catch {
     queryAll(root, '.avatar').forEach((node) => { node.textContent = '个人' })
   }
-}
-
-function openCollectorRemoteLogin(site, options = {}) {
-  const platform = String(options.platform || site?.auth_platform || '').trim()
-  if (!platform || document.querySelector('.collector-browser-overlay')) return
-  const displayLabel = String(options.label || site?.display_name || site?.site_name || platform).trim()
-
-  const overlay = document.createElement('div')
-  overlay.className = 'collector-browser-overlay'
-  overlay.innerHTML = `
-    <section class="collector-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="collector-browser-title">
-      <header class="collector-browser-head">
-        <div>
-          <h2 id="collector-browser-title" data-browser-dialog-title>登录</h2>
-        </div>
-        <div class="collector-browser-head-actions">
-          <span class="badge" data-browser-status hidden>启动中</span>
-          <button class="btn btn-secondary" type="button" data-browser-captcha hidden>识别验证码</button>
-          <button class="btn btn-secondary" type="button" data-browser-captcha-report hidden>报错返分</button>
-          <button class="btn btn-primary" type="button" data-browser-save>保存会话</button>
-          <button class="btn btn-secondary" type="button" data-browser-close>关闭</button>
-        </div>
-      </header>
-      <div class="collector-browser-layout">
-        <div class="collector-browser-workspace">
-          <div class="collector-browser-canvas" data-browser-canvas tabindex="0" aria-label="内部浏览器画面，点击可操作页面">
-            <img data-browser-screenshot alt="内部浏览器登录页面" hidden>
-            <div class="collector-browser-empty" data-browser-empty>正在通过 Tor 启动内部浏览器…</div>
-          </div>
-          <p class="collector-browser-error" data-browser-error hidden></p>
-        </div>
-      </div>
-    </section>`
-  document.body.appendChild(overlay)
-
-  let sessionId = ''
-  let browserState = null
-  let closed = false
-  let busy = false
-  let refreshTimer = null
-  let browserStream = null
-  let streamPath = ''
-  const statusNode = query(overlay, '[data-browser-status]')
-  const screenshot = query(overlay, '[data-browser-screenshot]')
-  const empty = query(overlay, '[data-browser-empty]')
-  const errorNode = query(overlay, '[data-browser-error]')
-  const canvas = query(overlay, '[data-browser-canvas]')
-  const captchaButton = query(overlay, '[data-browser-captcha]')
-  const captchaReportButton = query(overlay, '[data-browser-captcha-report]')
-
-  const setStatus = (label, tone = '') => {
-    statusNode.textContent = label
-    statusNode.className = `badge ${tone}`.trim()
-  }
-
-  const connectStream = (path) => {
-    if (!path || path === streamPath) return
-    browserStream?.close()
-    streamPath = path
-    const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    browserStream = createRemoteBrowserStream({
-      image: screenshot,
-      focusTarget: canvas,
-      websocketUrl: `${scheme}://${window.location.host}${path}`,
-      onStatus: (status) => {
-        if (status === 'connected') {
-          empty.hidden = true
-          setStatus('实时浏览器已连接', 'badge-success')
-        } else if (status === 'connecting') {
-          setStatus('正在连接实时浏览器')
-        } else if (!closed) {
-          setStatus('实时浏览器已断开', 'badge-high')
-        }
-      },
-      onError: (message) => {
-        errorNode.hidden = false
-        errorNode.textContent = message
-      },
-    })
-  }
-
-  const renderState = (payload) => {
-    browserState = payload || browserState
-    if (!browserState) return
-    captchaButton.hidden = !browserState.captcha_recognition_available
-    captchaReportButton.hidden = !browserState.captcha_error_report_available
-    setText(overlay, '[data-browser-dialog-title]', `${displayLabel}登录`)
-    if (browserState.stream_ws_path) connectStream(browserState.stream_ws_path)
-    if (browserState.screenshot) {
-      screenshot.src = browserState.screenshot
-      screenshot.hidden = false
-      empty.hidden = true
-    } else if (!browserState.stream_ws_path) {
-      screenshot.hidden = true
-      empty.hidden = false
-      empty.textContent = browserState.last_error ? '目标页面暂时无法加载，可点击重新加载页面' : '等待内部浏览器画面'
-    }
-    const lastError = String(browserState.last_error || '').trim()
-    errorNode.hidden = !lastError
-    errorNode.textContent = lastError ? `页面加载提示：${lastError}` : ''
-    setStatus(lastError ? '页面待重试' : '浏览器已连接', lastError ? 'badge-high' : 'badge-success')
-  }
-
-  const control = async (action, payload = {}) => {
-    if (!sessionId || busy) return null
-    busy = true
-    try {
-      const state = await requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}/control`, {
-        method: 'POST',
-        body: JSON.stringify({ action, ...payload }),
-      })
-      renderState(state)
-      return state
-    } catch (error) {
-      setStatus('操作失败', 'badge-high')
-      errorNode.hidden = false
-      errorNode.textContent = error.message || '内部浏览器操作失败'
-      return null
-    } finally {
-      busy = false
-    }
-  }
-
-  const refreshState = async () => {
-    if (!sessionId || busy || closed) return
-    busy = true
-    try {
-      renderState(await requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}`))
-    } catch (error) {
-      setStatus('连接中断', 'badge-high')
-      errorNode.hidden = false
-      errorNode.textContent = error.message || '无法刷新内部浏览器画面'
-    } finally {
-      busy = false
-    }
-  }
-
-  const stopPolling = () => {
-    if (refreshTimer) window.clearInterval(refreshTimer)
-    refreshTimer = null
-  }
-
-  const closeDialog = async (closeSession = true) => {
-    if (closed) return
-    closed = true
-    stopPolling()
-    browserStream?.close()
-    browserStream = null
-    streamPath = ''
-    if (closeSession && sessionId) {
-      await requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }).catch(() => null)
-    }
-    overlay.remove()
-  }
-
-  query(overlay, '[data-browser-close]').addEventListener('click', () => closeDialog())
-  query(overlay, '[data-browser-captcha]').addEventListener('click', async () => {
-    setStatus('正在识别验证码')
-    const state = await control('solve_captcha')
-    if (state?.action_result?.captcha_filled) {
-      setStatus('验证码已填入', 'badge-success')
-      showToast('验证码识别结果已填入登录页面')
-    }
-  })
-  query(overlay, '[data-browser-captcha-report]').addEventListener('click', async () => {
-    setStatus('正在报错返分')
-    const state = await control('report_captcha_error')
-    if (state?.action_result?.reported) {
-      setStatus('已报错返分', 'badge-success')
-      showToast('该次验证码识别已向超级鹰报错')
-    }
-  })
-  overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) closeDialog()
-  })
-  screenshot.addEventListener('click', (event) => {
-    if (streamPath) return
-    const viewport = browserState?.viewport || {}
-    const bounds = screenshot.getBoundingClientRect()
-    if (!bounds.width || !bounds.height || !viewport.width || !viewport.height) return
-    control('click', {
-      x: Math.round((event.clientX - bounds.left) * Number(viewport.width) / bounds.width),
-      y: Math.round((event.clientY - bounds.top) * Number(viewport.height) / bounds.height),
-    })
-  })
-  query(overlay, '[data-browser-save]').addEventListener('click', async () => {
-    if (!sessionId || busy) return
-    busy = true
-    setStatus('正在校验会话')
-    try {
-      await requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}/finish`, {
-        method: 'POST',
-        body: JSON.stringify({ account_label: displayLabel }),
-      })
-      sessionId = ''
-      if (options.runSiteOnSave !== false && site?.site_name) {
-        const runResult = await requestJson('/api/jobs/run-site', {
-          method: 'POST',
-          body: JSON.stringify({ site_name: site.site_name, force: true }),
-        })
-        if (runResult?.reason === 'auth_required') throw new Error(runResult.message || '登录会话尚未生效')
-        setStatus('已保存并重新运行', 'badge-success')
-        showToast('登录会话已保存，站点任务已重新运行')
-        const url = new URL(window.location.href)
-        url.searchParams.delete('login')
-        window.history.replaceState({}, '', url)
-      } else {
-        setStatus('会话已保存', 'badge-success')
-        showToast('平台登录会话已保存')
-      }
-      window.setTimeout(() => window.location.reload(), 900)
-    } catch (error) {
-      setStatus('保存失败', 'badge-high')
-      errorNode.hidden = false
-      errorNode.textContent = error.message || '登录会话保存失败'
-    } finally {
-      busy = false
-    }
-  })
-
-  ;(async () => {
-    try {
-      if (options.initialState?.session_id) {
-        sessionId = String(options.initialState.session_id)
-        renderState(options.initialState)
-        refreshTimer = window.setInterval(refreshState, 3000)
-        return
-      }
-      if (platform === 'changan') {
-        let tor = await requestJson('/api/tor-bridge/status')
-        if (!tor.connected) {
-          setStatus('正在连接 Tor')
-          tor = await requestJson('/api/tor-bridge/start', { method: 'POST' })
-          const deadline = Date.now() + 45_000
-          while (!tor.connected && Date.now() < deadline) {
-            if (tor.connection_state === 'error') throw new Error(tor.last_error || 'Tor 连接失败')
-            await new Promise((resolve) => window.setTimeout(resolve, 1200))
-            tor = await requestJson('/api/tor-bridge/status')
-          }
-          if (!tor.connected) throw new Error('Tor 尚未完成连接，请检查网桥状态后重试')
-        }
-      }
-      const state = await requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/remote-login/start`, { method: 'POST' })
-      sessionId = String(state.session_id || '')
-      renderState(state)
-      refreshTimer = window.setInterval(refreshState, 3000)
-    } catch (error) {
-      setStatus('启动失败', 'badge-high')
-      empty.textContent = '内部浏览器启动失败'
-      errorNode.hidden = false
-      errorNode.textContent = error.message || '无法创建内部浏览器会话'
-    }
-  })()
-}
-
-export function openPlatformRemoteLogin(platform, initialState, options = {}) {
-  const normalizedPlatform = String(platform || '').trim()
-  if (!normalizedPlatform) return
-  openCollectorRemoteLogin(
-    {
-      auth_platform: normalizedPlatform,
-      display_name: options.label || initialState?.label || normalizedPlatform,
-    },
-    {
-      ...options,
-      platform: normalizedPlatform,
-      initialState,
-      runSiteOnSave: false,
-    },
-  )
-}
-
-async function hydrateCollectorRunDetail(root, route) {
-  const payload = await requestJson('/api/jobs')
-  const siteName = String(route?.query?.site || '')
-  const jobType = String(route?.query?.job || '采集任务')
-  const site = (payload.site_health || []).find((item) =>
-    [item.site_name, item.display_name].map(String).includes(siteName),
-  ) || null
-  if (!site) throw new Error(siteName ? `未找到站点运行摘要：${siteName}` : '当前链接未指定可核验的站点')
-  const failure = (payload.recent_failures || []).find((item) =>
-    String(item.site_name || '') === String(site?.site_name || siteName),
-  ) || null
-  const status = site?.overall_status || (failure ? '异常' : '未运行')
-  setText(root, '[data-detail-record-id]', site?.site_name || String(route?.params?.runId || 'latest'))
-  setText(root, 'main h1', `${site?.display_name || siteName || '采集任务'} · ${jobType}`)
-  setText(root, '.lead', failure?.error_message || site?.last_error || '后端当前仅提供站点级运行摘要，未提供单任务进度、日志和控制接口。')
-  setText(root, '.detail-hero .badge', status)
-  setSummary(query(root, '.detail-summary'), [
-    ['运行状态', status],
-    ['种子任务', site?.seed_status || '未运行'],
-    ['已处理', number((site?.forum_details_count || 0) + (site?.victims_count || 0))],
-    ['详情任务', site?.detail_status || '未运行'],
-  ])
-  const kpiValues = [
-    ['最近成功', site?.last_success_at || '—', '站点级状态'],
-    ['运行任务', number(site?.running_jobs || 0), '站点级状态'],
-    ['连续失败', number(site?.consecutive_failures || 0), `阈值 ${number(site?.failure_threshold || 0)}`],
-    ['授权状态', site?.auth_required ? (site?.auth_message || site?.auth_status || '需登录') : '无需登录', '站点级状态'],
-  ]
-  queryAll(root, '.detail-kpi').forEach((card, index) => {
-    const item = kpiValues[index]
-    if (!item) return
-    setText(card, 'span', item[0])
-    setText(card, 'strong', item[1])
-    setText(card, 'small', item[2])
-  })
-  setDetailSection(root, 'collector-run-progress', false)
-  setDetailSection(root, 'collector-run-configuration', false)
-  setDetailSection(root, 'collector-run-log', false)
-  hideDetailRail(root, 'collector-action-rail')
-  const health = setDetailSection(root, 'collector-run-health', Boolean(site))
-  const healthBadge = query(health, '.panel-header .badge')
-  if (healthBadge) {
-    healthBadge.textContent = status
-    healthBadge.classList.remove('badge-success', 'badge-high', 'badge-critical')
-    healthBadge.classList.add(failure || Number(site?.consecutive_failures || 0) > 0 ? 'badge-high' : 'badge-success')
-  }
-  replaceStructuredRows(query(health, '.detail-list'), [
-    { label: '站点状态', value: status, note: payload.updated_at || '' },
-    { label: '授权状态', value: site?.auth_required ? (site?.auth_status || '需登录') : '无需登录', note: site?.auth_platform || '' },
-    { label: '熔断器', value: site?.circuit_breaker_open ? '已开启' : '未开启', note: site?.failure_cooldown_until || '' },
-    { label: '阻塞原因', value: site?.blockingReason || '无', note: site?.error_category || '' },
-  ])
-  if (site?.auth_required && site?.auth_platform) {
-    const header = query(health, '.panel-header')
-    const actions = document.createElement('div')
-    actions.className = 'collector-auth-actions'
-    if (healthBadge) actions.appendChild(healthBadge)
-    const loginButton = document.createElement('button')
-    loginButton.type = 'button'
-    loginButton.className = 'btn btn-primary'
-    loginButton.textContent = '打开内部浏览器登录'
-    loginButton.addEventListener('click', () => openCollectorRemoteLogin(site))
-    actions.appendChild(loginButton)
-    header?.appendChild(actions)
-    if (String(route?.query?.login || '') === '1') openCollectorRemoteLogin(site)
-  }
-  const failures = (payload.recent_failures || []).filter((item) =>
-    String(item.site_name || '') === String(site?.site_name || siteName),
-  )
-  const retrySection = setDetailSection(root, 'collector-run-retries', failures.length > 0)
-  const retryBadge = query(retrySection, '.panel-header .badge')
-  if (retryBadge) {
-    retryBadge.textContent = failures.length ? `${number(failures.length)} 条失败记录` : '无失败记录'
-    retryBadge.classList.remove('badge-success', 'badge-high', 'badge-critical')
-    retryBadge.classList.add(failures.length ? 'badge-high' : 'badge-success')
-  }
-  replaceStructuredRows(query(retrySection, '.detail-list'), failures.map((item) => ({
-    label: item.finished_at || '最近失败',
-    value: item.error_message || item.status || '采集失败',
-    note: item.error_category || item.job_type || '',
-  })))
 }
 
 async function hydrateIncidentDetail(root, state, file, id) {
@@ -2787,381 +2153,36 @@ async function hydrateIncidentDetail(root, state, file, id) {
   hideDetailRail(root, 'data-leak-action-rail')
 }
 
-function configureReviewActions(root, state, file, endpoint, currentStatus) {
-  const supported = file === 'code-detail.html'
-    ? new Map([['确认敏感暴露', 'confirmed'], ['标记误报', 'false_positive']])
-    : file === 'netdisk-detail.html'
-      ? new Map([['确认企业相关', 'confirmed'], ['标记链接失效', 'closed'], ['标记误报', 'false_positive']])
-      : new Map([['确认企业文档', 'confirmed'], ['标记公开资料', 'false_positive'], ['标记误报', 'false_positive']])
-  queryAll(root, '[data-disposition]').forEach((button) => {
-    const status = supported.get(button.textContent.trim())
-    if (status) {
-      button.dataset.runtimeReviewStatus = status
-      setActionAvailable(button, true)
-    } else {
-      setActionAvailable(button, false, '当前后端未提供此操作接口')
-    }
-  })
-  const save = queryAll(root, 'button[data-toast]').find((button) => button.textContent.includes('保存'))
-  if (save) {
-    delete save.dataset.toast
-    save.dataset.runtimeReviewSave = '1'
-    setActionAvailable(save, true)
-  }
-  state.pendingReviewStatus = currentStatus || 'new'
-  setText(root, '[data-review-state]', reviewStatusLabel(state.pendingReviewStatus))
-  state.saveReview = async () => {
-    const note = query(root, 'textarea')?.value.trim() || ''
-    await requestJson(endpoint, {
-      method: 'POST',
-      body: JSON.stringify({ status: state.pendingReviewStatus, reviewer: reviewerName(), note }),
-    })
-    showToast('复核结论已保存')
-    await state.refresh?.()
-  }
-}
-
-function renderRuntimeFileTree(tree, files) {
-  const root = { children: new Map() }
-  const normalizePath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '')
-
-  files.forEach((item, index) => {
-    const path = normalizePath(item.path || item.name || `file-${index}`)
-    const parts = path.split('/').filter(Boolean)
-    if (/^sharelink\d+(?:-|$)/i.test(parts[0] || '')) parts.shift()
-    if (!parts.length) return
-
-    let parent = root
-    let visiblePath = ''
-    parts.forEach((name, partIndex) => {
-      visiblePath = visiblePath ? `${visiblePath}/${name}` : name
-      const leaf = partIndex === parts.length - 1
-      let node = parent.children.get(name)
-      if (!node) {
-        node = { name, path: visiblePath, size: '', type: '', isDir: !leaf, inferred: false, children: new Map() }
-        parent.children.set(name, node)
-      }
-      if (leaf) {
-        node.path = path
-        node.size = item.size || ''
-        node.type = item.type || ''
-        node.inferred = Boolean(item.inferred)
-        node.isDir = Boolean(item.isDir || item.is_dir || ['folder', 'dir', 'directory'].includes(String(item.type || '').toLowerCase()))
-      } else {
-        node.isDir = true
-      }
-      parent = node
-    })
-  })
-
-  const descendantCount = (node) => Array.from(node.children.values())
-    .reduce((count, child) => count + 1 + descendantCount(child), 0)
-
-  const fileIcon = (node) => {
-    const type = String(node.type || node.name.split('.').pop() || '').toLowerCase()
-    if (['xls', 'xlsx', 'csv'].includes(type)) return ['xlsx', 'XLS']
-    if (['doc', 'docx'].includes(type)) return ['doc', 'DOC']
-    if (['ppt', 'pptx'].includes(type)) return ['ppt', 'PPT']
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(type)) return ['image', 'IMG']
-    if (['mp4', 'mov', 'm4v', 'avi', 'mkv'].includes(type)) return ['video', 'VID']
-    if (['zip', 'rar', '7z'].includes(type)) return ['zip', 'ZIP']
-    if (type === 'pdf') return ['pdf', 'PDF']
-    return ['file', 'FILE']
-  }
-
-  const renderNode = (node, level) => {
-    if (node.isDir || node.children.size) {
-      const folder = document.createElement('details')
-      folder.className = `tree-folder${level === 0 ? ' tree-root' : ''}`
-      folder.open = level <= 1
-      folder.dataset.treeEntry = ''
-      folder.dataset.treeKind = 'folder'
-      folder.dataset.treeLevel = String(level)
-
-      const summary = document.createElement('summary')
-      const chevron = document.createElement('span')
-      chevron.className = 'tree-chevron'
-      chevron.ariaHidden = 'true'
-      const icon = document.createElement('span')
-      icon.className = 'tree-folder-icon'
-      icon.ariaHidden = 'true'
-      const name = document.createElement('strong')
-      name.textContent = node.name
-      name.title = node.path
-      const count = document.createElement('span')
-      count.className = 'tree-count'
-      count.textContent = `${descendantCount(node)} 项`
-      summary.append(chevron, icon, name, count)
-
-      const children = document.createElement('div')
-      children.className = 'tree-children'
-      children.append(...Array.from(node.children.values()).map((child) => renderNode(child, level + 1)))
-      folder.append(summary, children)
-      return folder
-    }
-
-    const row = document.createElement('div')
-    row.className = 'tree-file'
-    row.dataset.treeEntry = ''
-    row.dataset.treeKind = 'file'
-    row.dataset.treeLevel = String(level)
-    const branch = document.createElement('span')
-    branch.className = 'tree-branch'
-    branch.ariaHidden = 'true'
-    const [iconClass, iconLabel] = fileIcon(node)
-    const icon = document.createElement('span')
-    icon.className = `tree-file-icon ${iconClass}`
-    icon.textContent = iconLabel
-    const name = document.createElement('strong')
-    name.textContent = node.name
-    name.title = node.path
-    const evidence = document.createElement('span')
-    evidence.className = 'tree-hit'
-    const size = document.createElement('span')
-    size.className = 'tree-size'
-    size.textContent = node.size || ''
-    row.append(branch, icon, name, evidence, size)
-    return row
-  }
-
-  const empty = document.createElement('div')
-  empty.className = 'file-tree-empty'
-  empty.dataset.treeEmpty = ''
-  empty.textContent = '没有匹配的文件或目录'
-  empty.hidden = root.children.size > 0
-  tree.classList.remove('runtime-file-list')
-  tree.replaceChildren(...Array.from(root.children.values()).map((node) => renderNode(node, 0)), empty)
-  document.querySelector(`[data-tree-search="${tree.id}"]`)?.dispatchEvent(new Event('input'))
-}
-
-async function hydrateDocumentDetail(root, state, file, id) {
-  const detail = await requestJson(`/api/document-exposures/${encodeURIComponent(id)}`)
-  const netdisk = file === 'netdisk-detail.html'
-  const platform = detail.platformLabel || detail.platform || '未知平台'
-  const accessLabel = detail.accessStateLabel || detail.accessState || '未提供'
-  const files = detail.fileList || []
-  const terms = (detail.matchedTerms || []).map((item) => typeof item === 'string' ? item : item?.term || item?.label).filter(Boolean)
-  const riskLines = [...new Set(detailRiskLines(detail))]
-  const snapshot = detail.latestSnapshot || {}
-  const resources = normalizedResourceList(detail.previewAssets, [
-    snapshot.screenshotUrl ? { kind: 'screenshot', label: '页面截图', url: snapshot.screenshotUrl } : null,
-    snapshot.htmlUrl ? { kind: 'html', label: '页面镜像', url: snapshot.htmlUrl } : null,
-  ])
-  bindDetailBase(root, detail, [
-    ['风险等级', severityLabel(severityOf(detail))],
-    [netdisk ? '链接状态' : '访问状态', accessLabel],
-    [netdisk ? '文件数量' : '证据数量', number(netdisk ? files.length || detail.fileCount : detail.evidenceCount)],
-    ['复核状态', reviewStatusLabel(detail.reviewStatus)],
-  ], [
-    ['来源平台', platform, '真实来源'],
-    [netdisk ? '分享类型' : '文档类型', netdisk ? (detail.shareMeta?.shareType || '未提供') : (detail.documentMeta?.primaryFileType || '未提供'), netdisk ? (detail.fileListMeta?.label || '') : `${number(detail.evidenceCount || 0)} 条证据`],
-    ['访问状态', accessLabel, `置信度 ${number(detail.confidenceScore || 0)}`],
-    ['发现时间', formatDate(detail.lastSeenAt || detail.firstSeenAt), detail.discoverySourceLabel || '真实采集记录'],
-  ])
-  setHeroSourceLogo(root, platform)
-  setText(root, '.detail-hero .badge', netdisk ? accessLabel : severityLabel(severityOf(detail)))
-
-  if (netdisk) {
-    setDefinitionPairs(query(root, '[data-od-id="netdisk-share-information"] .definition-grid'), [
-      { label: '监测对象', value: detail.watchlistName || detail.organizationName },
-      { label: '来源平台', value: platform },
-      { label: '分享链接', value: detail.canonicalUrl, url: detail.canonicalUrl },
-      { label: '提取码', value: detail.shareMeta?.shareCode ? '已保存' : '未提供' },
-      { label: '分享者', value: detail.shareOwner },
-      { label: '最近复检', value: formatFullDate(detail.lastSeenAt) },
-    ])
-    configureSourceAccess(root, {
-      sectionId: 'netdisk-source-access', openId: 'netdisk-open-source', viewId: 'netdisk-view-mirror', downloadId: 'netdisk-download-mirror',
-      sourceUrl: detail.canonicalUrl, resources, fetchedAt: snapshot.fetchedAt || detail.lastSeenAt,
-    })
-    const tree = query(root, '#netdisk-file-tree')
-    if (tree) {
-      renderRuntimeFileTree(tree, files)
-    }
-    setText(root, '.file-tree-total', `${detail.fileListMeta?.label || '文件清单'} · ${number(files.length)} 项`)
-    const evidenceSection = setDetailSection(root, 'netdisk-keyword-evidence', terms.length > 0 || riskLines.length > 0)
-    replaceStructuredRows(query(evidenceSection, '.detail-list'), [
-      ...terms.map((term) => ({ label: '命中关键词', value: term, note: '监测对象匹配' })),
-      ...riskLines.map((line) => ({ label: '风险依据', value: line, note: '接口分析' })),
-    ].slice(0, 8))
-    const healthSection = setDetailSection(root, 'netdisk-link-health', Boolean(detail.accessState || detail.lastSeenAt))
-    replaceStructuredRows(query(healthSection, '.detail-list'), [
-      { label: '访问状态', value: accessLabel, note: detail.accessState || '' },
-      { label: '最近复检', value: formatFullDate(detail.lastSeenAt), note: platform },
-      { label: '置信度', value: `${number(detail.confidenceScore || 0)} / 100`, note: detail.fileListMeta?.label || '' },
-    ])
-  } else {
-    setDefinitionPairs(query(root, '[data-od-id="library-document-metadata"] .definition-grid'), [
-      { label: '监测对象', value: detail.watchlistName || detail.organizationName },
-      { label: '文档标题', value: detail.title },
-      { label: '上传者', value: detail.shareOwner },
-      { label: '文档类型', value: detail.documentMeta?.primaryFileType },
-      { label: '来源链接', value: detail.canonicalUrl, url: detail.canonicalUrl },
-      { label: '最近复检', value: formatFullDate(detail.lastSeenAt) },
-    ])
-    configureSourceAccess(root, {
-      sectionId: 'library-source-access', openId: 'library-open-source', viewId: 'library-view-mirror', downloadId: 'library-download-mirror',
-      sourceUrl: detail.canonicalUrl, resources, fetchedAt: snapshot.fetchedAt || detail.lastSeenAt,
-    })
-    const previewText = snapshot.ocrText || snapshot.previewText || detail.summary || ''
-    const proofSection = setDetailSection(root, 'library-page-evidence', Boolean(previewText || terms.length))
-    queryAll(proofSection, '.detail-proof').forEach((proof, index) => {
-      const value = index === 0 ? previewText : ''
-      proof.hidden = !value
-      if (!value) return
-      const label = document.createElement('span')
-      label.textContent = snapshot.ocrText ? 'OCR 采集内容' : '页面采集摘要'
-      const content = document.createElement('strong')
-      content.textContent = value.slice(0, 700)
-      const source = document.createElement('code')
-      source.textContent = snapshot.pageTitle || detail.title || platform
-      proof.replaceChildren(label, content, source)
-    })
-    replaceStructuredRows(query(proofSection, '.detail-list'), terms.map((term) => ({
-      label: '命中关键词', value: term, note: '接口匹配',
-    })))
-    const focus = queryAll(proofSection, 'button[data-toast]').find((button) => button.textContent.includes('查看重点页'))
-    if (focus && previewText) {
-      delete focus.dataset.toast
-      focus.dataset.runtimeScroll = '.detail-proof:not([hidden])'
-      setActionAvailable(focus, true)
-    }
-    const ownership = setDetailSection(root, 'library-ownership-check', Boolean(detail.watchlistName || detail.organizationName || terms.length))
-    replaceStructuredRows(query(ownership, '.detail-list'), [
-      { label: '监测对象', value: detail.watchlistName || detail.organizationName, note: '监测配置' },
-      { label: '组织名称', value: detail.organizationName, note: '企业关联' },
-      { label: '命中关键词', value: terms.join(' / '), note: terms.length ? `${terms.length} 个` : '' },
-    ])
-    const reasoning = setDetailSection(root, 'library-risk-reasoning', riskLines.length > 0)
-    replaceStructuredRows(query(reasoning, '.detail-list'), riskLines.map((line) => ({
-      label: '风险依据', value: line, note: `${number(detail.riskScore || 0)} / 100`,
-    })))
-  }
-
-  const exportButton = queryAll(root, 'button[data-toast]').find((button) => button.textContent.includes('导出清单'))
-  if (exportButton && netdisk) {
-    const virtualTable = document.createElement('table')
-    const body = document.createElement('tbody')
-    files.forEach((item) => {
-      const row = document.createElement('tr')
-      ;[item.path || item.name, item.type, item.size].forEach((value) => {
-        const cell = document.createElement('td')
-        cell.textContent = value || '—'
-        row.appendChild(cell)
-      })
-      body.appendChild(row)
-    })
-    virtualTable.appendChild(body)
-    const key = 'document-files'
-    delete exportButton.dataset.toast
-    exportButton.dataset.runtimeExport = key
-    state.tables.set(key, virtualTable)
-    setActionAvailable(exportButton, true)
-  }
-  configureReviewActions(root, state, file, `/api/document-exposures/${encodeURIComponent(id)}/review`, detail.reviewStatus)
-}
-
-async function hydrateCodeDetail(root, state, id) {
-  const detail = await requestJson(`/api/code-monitoring/hits/${encodeURIComponent(id)}`)
-  const platform = detail.platformLabel || detail.platform || '未知平台'
-  const resources = normalizedResourceList(detail.previewAssets, detail.sourceLinks)
-  const riskLines = [...new Set(detailRiskLines(detail))]
-  bindDetailBase(root, detail, [
-    ['命中层级', detail.resultLayerLabel || detail.resultLayer],
-    ['风险等级', severityLabel(severityOf(detail))],
-    ['仓库状态', detail.visibility || '—'],
-    ['复核状态', reviewStatusLabel(detail.reviewStatus)],
-  ], [
-    ['来源平台', platform, '真实来源'],
-    ['文件路径', detail.filePath || '—', detail.branch || '—'],
-    ['敏感发现', `${(detail.findings || []).length} 项`, detail.sensitiveLabel || detail.matchedRule || '—'],
-    ['最近发现', formatDate(detail.lastSeenAt), `${number(detail.evidenceCount || 0)} 条证据`],
-  ])
-  setHeroSourceLogo(root, platform)
-  setDefinitionPairs(query(root, '[data-od-id="code-repository-information"] .definition-grid'), [
-    { label: '监测对象', value: detail.watchlistName || detail.organizationName },
-    { label: '仓库', value: detail.repositoryFullName },
-    { label: '分支', value: detail.branch },
-    { label: '文件路径', value: detail.filePath },
-    { label: '语言', value: detail.language },
-    { label: '发现时间', value: formatFullDate(detail.lastSeenAt || detail.firstSeenAt) },
-  ])
-  configureSourceAccess(root, {
-    sectionId: 'code-source-access', openId: 'code-open-source', viewId: 'code-view-mirror', downloadId: 'code-download-mirror',
-    sourceUrl: detail.fileUrl || detail.repositoryUrl, resources, fetchedAt: detail.latestSnapshot?.fetchedAt || detail.lastSeenAt,
-  })
-  state.copyText = detail.codePreview || ''
-  const copy = queryAll(root, 'button[data-toast]').find((button) => button.textContent.includes('复制片段'))
-  if (copy) {
-    delete copy.dataset.toast
-    copy.dataset.runtimeCopy = detail.codePreview || ''
-    setActionAvailable(copy, Boolean(detail.codePreview), detail.codePreview ? '' : '接口未提供代码片段')
-  }
-  queryAll(root, '.detail-code').forEach((code) => { code.textContent = detail.codePreview || '暂无代码预览' })
-  const findings = setDetailSection(root, 'code-sensitive-findings', (detail.findings || []).length > 0)
-  replaceStructuredRows(query(findings, '.detail-list'), (detail.findings || []).map((item) => ({
-    label: item.label || item.ruleLabel || '敏感发现',
-    value: item.ruleKey || detail.matchedRule || '规则命中',
-    note: item.secretLike ? '秘密值特征' : `权重 ${number(item.weight || 0)}`,
-  })))
-  const anchors = (detail.enterpriseAnchors || []).map((item) => ({
-    label: typeof item === 'string' ? '企业锚点' : (item.label || item.type || '企业锚点'),
-    value: typeof item === 'string' ? item : (item.value || item.term || item.name || '已匹配'),
-    note: detail.enterpriseMatchLevel || '',
-  }))
-  const enterprise = setDetailSection(root, 'code-enterprise-context', anchors.length > 0)
-  replaceStructuredRows(query(enterprise, '.detail-list'), anchors)
-  const context = setDetailSection(root, 'code-context-review', true)
-  replaceStructuredRows(query(context, '.detail-matrix'), [
-    { label: '敏感类型', value: detail.sensitiveLabel || detail.sensitiveType || '未标注' },
-    { label: '匹配规则', value: detail.matchedRule || '未标注' },
-    { label: '企业关联', value: detail.enterpriseMatchLevel || 'none' },
-    { label: '压制状态', value: detail.suppressed ? '已压制' : '未压制' },
-  ])
-  replaceStructuredRows(query(context, '.detail-list'), [
-    ...riskLines.map((line) => ({ label: '风险依据', value: line, note: '接口分析' })),
-    ...(detail.suppressionReasons || []).map((line) => ({ label: '压制依据', value: line, note: '接口分析' })),
-  ])
-  configureReviewActions(root, state, 'code-detail.html', `/api/code-monitoring/hits/${encodeURIComponent(id)}/review`, detail.reviewStatus)
-}
-
-export function disposePrototypeScreen(root) {
-  if (!root) return
-  if (root.__codeContinuousStatusTimer) {
-    window.clearInterval(root.__codeContinuousStatusTimer)
-    root.__codeContinuousStatusTimer = null
-  }
-}
-
 export async function hydratePrototypeScreen({ root, route, file }) {
   if (!root) return
   hydrateAccount(root)
   if (!DATA_FILES.has(file)) return
   prepareDataPage(root, file)
-  const state = { tables: new Map(), refresh: null }
+  const state = { tables: new Map(), exportUrls: new Map(), requestController: null, refresh: null }
   installActionGuard(root, state)
+  root.addEventListener('prototype:query-change', async () => {
+    if (!state.refresh) return
+    setDataState(root, 'loading', '正在加载筛选结果…')
+    try {
+      await state.refresh()
+      setDataState(root, 'ready')
+    } catch (error) {
+      if (error?.name !== 'AbortError') showLoadError(root, error)
+    }
+  }, { signal: root.__dataRuntimeAbort.signal })
   const id = String(route?.params?.eventId || route?.params?.hitId || document.body.dataset.prototypeRecordId || '')
 
   try {
     if (file === 'dashboard.html') await hydrateDashboard(root, state)
-    else if (file === 'intelligence.html') await hydrateIntelligence(root)
+    else if (file === 'intelligence.html') await hydrateIntelligence(root, state)
+    else if (file === 'ai-aggregation.html') await hydrateAiAggregationScreen({ root, signal: root.__dataRuntimeAbort.signal, route })
+    else if (file === 'ai-aggregation-templates.html') await hydrateAiAggregationTemplatesScreen({ root, signal: root.__dataRuntimeAbort.signal, route })
     else if (file === 'ransomware.html') await hydrateRansomware(root, state)
     else if (file === 'data-leak.html') await hydrateDataLeak(root, state)
     else if (file === 'vulnerabilities.html') await hydrateVulnerabilities(root, state)
-    else if (file === 'monitoring.html') {
-      const source = route?.meta?.source || document.body.dataset.prototypeSource || 'netdisk'
-      if (source === 'code') await hydrateCodeMonitoring(root, state)
-      else await hydrateDocumentMonitoring(root, state, source)
-    } else if (INCIDENT_FILES.has(file)) {
-      await hydrateIncidentDetail(root, state, file, id)
-    } else if (REVIEW_FILES.has(file)) {
-      state.refresh = file === 'code-detail.html'
-        ? () => hydrateCodeDetail(root, state, id)
-        : () => hydrateDocumentDetail(root, state, file, id)
-      await state.refresh()
-    } else if (file === 'collector-run-detail.html') await hydrateCollectorRunDetail(root, route)
+    else if (INCIDENT_FILES.has(file)) await hydrateIncidentDetail(root, state, file, id)
     setDataState(root, 'ready')
   } catch (error) {
-    showLoadError(root, error)
+    if (error?.name !== 'AbortError') showLoadError(root, error)
   }
 }

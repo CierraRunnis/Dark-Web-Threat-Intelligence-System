@@ -321,17 +321,8 @@ const router = useRouter()
 const { detail, loading, refreshing, error, load } = useEventDetail()
 const eventDetail = computed(() => detail.value)
 const isVulnerability = computed(() => eventDetail.value?.normalized_event_type === 'vulnerability' || !!eventDetail.value?.cve_id)
-const isDocumentExposure = computed(() => eventDetail.value?.normalized_event_type === 'document_exposure')
-const primarySubjectLabel = computed(() => {
-  if (isVulnerability.value) return '厂商'
-  if (isDocumentExposure.value) return '平台'
-  return '攻击者'
-})
-const primarySubjectValue = computed(() => {
-  if (isVulnerability.value) return eventDetail.value?.vendor || '未知'
-  if (isDocumentExposure.value) return eventDetail.value?.source || eventDetail.value?.attacker || '未知'
-  return eventDetail.value?.attacker || '未知'
-})
+const primarySubjectLabel = computed(() => isVulnerability.value ? '厂商' : '攻击者')
+const primarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.value?.vendor || '未知') : (eventDetail.value?.attacker || '未知'))
 const secondarySubjectLabel = computed(() => isVulnerability.value ? '产品' : '受害实体')
 const secondarySubjectValue = computed(() => isVulnerability.value ? (eventDetail.value?.product || '未知') : (eventDetail.value?.victim || '未知'))
 const affectedVersionItems = computed(() => eventDetail.value?.affected_version_items || [])
@@ -443,12 +434,7 @@ async function toggleDetailTranslation() {
 
 function goBackToList() {
   const eventId = String(route.params.eventId || '')
-  const defaultBackPath = String(eventId).startsWith('vuln:')
-    ? '/vulnerability-alerts'
-    : String(eventId).startsWith('document:')
-      ? '/document-exposure/results'
-      : '/data-leak'
-  const backPath = sessionStorage.getItem(`event-back:${eventId}`) || defaultBackPath
+  const backPath = sessionStorage.getItem(`event-back:${eventId}`) || (String(eventId).startsWith('vuln:') ? '/vulnerability-alerts' : '/data-leak')
   router.push(backPath)
 }
 

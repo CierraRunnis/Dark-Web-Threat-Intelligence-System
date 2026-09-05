@@ -1,0 +1,254 @@
+/* AI聚合只扩展 Prototype 内容区，不覆盖应用壳、主题或全局组件。 */
+.prototype-screen.page-ai-aggregation .ai-aggregation-top-grid,
+.prototype-screen.page-ai-aggregation .ai-aggregation-bottom-grid {
+  align-items: start;
+  gap: 18px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-prompt-preview {
+  display: grid;
+  gap: 4px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .ai-prompt-preview code {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.prototype-screen.page-ai-aggregation .ai-scope-grid,
+.prototype-screen.page-ai-aggregation .ai-status-grid,
+.prototype-screen.page-ai-aggregation .ai-report-meta {
+  margin: 14px 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-scope-item,
+.prototype-screen.page-ai-aggregation .ai-status-grid > div,
+.prototype-screen.page-ai-aggregation .ai-report-meta > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.prototype-screen.page-ai-aggregation .ai-status-grid > div {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+
+.prototype-screen.page-ai-aggregation .ai-run-actions {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-concurrency-summary {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  margin: 18px 0 8px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-concurrency-summary strong {
+  font-family: var(--font-mono, monospace);
+  font-size: 28px;
+  line-height: 1;
+}
+
+.prototype-screen.page-ai-aggregation .ai-meter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--border);
+}
+
+.prototype-screen.page-ai-aggregation .ai-meter span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.prototype-screen.page-ai-aggregation .ai-runtime-note {
+  margin: 16px 0 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-report-panel {
+  margin: 18px 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-report-progress,
+.prototype-screen.page-ai-aggregation .ai-report-failure {
+  display: flex;
+  min-height: 128px;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 28px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-report-progress h3,
+.prototype-screen.page-ai-aggregation .ai-report-failure h3,
+.prototype-screen.page-ai-aggregation .ai-report-progress p,
+.prototype-screen.page-ai-aggregation .ai-report-failure p {
+  margin-top: 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-report-document {
+  padding-top: 12px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-delivery-section {
+  margin: 18px 0;
+  border-top: 1px solid var(--border);
+}
+
+.prototype-screen.page-ai-aggregation .ai-delivery-item {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(160px, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.prototype-screen.page-ai-aggregation .ai-delivery-item > div {
+  display: grid;
+  min-width: 0;
+}
+
+.prototype-screen.page-ai-aggregation .ai-delivery-item small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prototype-screen.page-ai-aggregation .ai-markdown {
+  max-width: 960px;
+  line-height: 1.75;
+}
+
+.prototype-screen.page-ai-aggregation .ai-markdown h2,
+.prototype-screen.page-ai-aggregation .ai-markdown h3,
+.prototype-screen.page-ai-aggregation .ai-markdown h4,
+.prototype-screen.page-ai-aggregation .ai-markdown h5 {
+  margin: 1.3em 0 0.55em;
+  color: var(--fg);
+}
+
+.prototype-screen.page-ai-aggregation .ai-markdown pre {
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.prototype-screen.page-ai-aggregation .ai-markdown code {
+  font-family: var(--font-mono, monospace);
+}
+
+.prototype-screen.page-ai-aggregation .ai-markdown blockquote {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .ai-markdown-spacer {
+  height: 5px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-fieldset {
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.prototype-screen.page-ai-aggregation .ai-fieldset legend {
+  padding: 0 6px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.prototype-screen.page-ai-aggregation .ai-check-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.prototype-screen.page-ai-aggregation .ai-wecom-target {
+  position: relative;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.prototype-screen.page-ai-aggregation .ai-wecom-target > .btn {
+  align-self: end;
+}
+
+.prototype-screen.page-ai-aggregation .badge.warning {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 30%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .badge.info {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .badge.success {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, var(--border));
+  background: color-mix(in srgb, var(--success) 9%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .badge.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+}
+
+.prototype-screen.page-ai-aggregation .status-dot.info {
+  background: var(--accent);
+}
+
+.prototype-screen.page-ai-aggregation .status-dot.danger {
+  background: var(--danger);
+}
+
+.prototype-screen.page-ai-aggregation .empty-state:not([hidden]) {
+  display: block;
+}
+
+.prototype-screen.page-ai-aggregation .toast.show {
+  display: block;
+}
+
+.prototype-screen.page-ai-aggregation [hidden] {
+  display: none !important;
+}
+
+@media (max-width: 800px) {
+  .prototype-screen.page-ai-aggregation .ai-delivery-item {
+    grid-template-columns: 1fr;
+  }
+
+  .prototype-screen.page-ai-aggregation .header-actions {
+    display: none;
+  }
+}

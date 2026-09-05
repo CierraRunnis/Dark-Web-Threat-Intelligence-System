@@ -2,68 +2,68 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.db
+*.sqlite
+*.sqlite3
+*.log
 
 # Virtual environments
 venv/
 .venv/
 darkweb_collector/venv/
-darkweb_collector/venv.broken-*/
 
 # Node / frontend build outputs
 node_modules/
 dist/
-dist-update/
 threat-intelligence-dashboard/node_modules/
 threat-intelligence-dashboard/dist/
 
-# Local validation only; test scripts are not published in production branches
-tests/
-test/
-test_*
-*_test.*
-*.test.*
-*_spec.*
-*.spec.*
-
 # Runtime data and crawler artifacts
-.npm-cache/
-.playwright-cli/
-output/
-*.db
-*.sqlite
-*.sqlite3
-*.rdb
-*.log
-darkweb_collector/.runtime/
 darkweb_collector/data/
 darkweb_collector/output/
-darkweb_collector/logs/
-darkweb_collector/*.log
-darkweb_collector/C*/
-darkweb_collector/samples/dragonforceblog/results/
-darkweb_collector/samples/dragonforceblog/test_*_parsed.json
-threat-intelligence-dashboard/.npm-cache/
-threat-intelligence-dashboard/.codex*.log
-**/storage_state.json
-
-# Local secrets and authentication state
-.env
-.env.*
-!.env.example
+darkweb_collector/samples/
 darkweb_collector/secrets/
-**/auth-password.txt
-**/cookies.json
-**/credentials.json
-**/services.json
-*.pem
-*.p12
-*.pfx
+darkweb_collector/ransomware_api_response.json
+darkweb_collector/C*/
+tor-migration-package/home/
+tor-migration-package/usr/local/bin/lyrebird
+
+# Local secrets and environment
+.env
+*.env
+darkweb_collector/.env
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .codex-backups/
 _tmp_kaiti_report.txt
+
+# Private deployment files and local backups
+.env.*
+!.env.example
+*.orig
+*.bak
+*.backup
+*.old
+*.fixed
+*.new
+*.pem
+*.key
+*.p12
+*.pfx
+node_modules
+tor-migration-package/
+ransomware_api_raw_response.txt
+*.rdb
+output/
+logs/
+.runtime/
+**/storage_state.json
+**/auth-password.txt
+**/cookies.json
+**/credentials.json
+**/services.json
 
 # Archives and downloads
 *.tar.gz

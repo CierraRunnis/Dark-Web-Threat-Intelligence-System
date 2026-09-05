@@ -5,10 +5,10 @@ from collections.abc import Callable
 from darkweb_collector.sites.example_forum import parse_example_forum_homepage
 from darkweb_collector.sites.dragonforce import parse_dragonforce_homepage
 from darkweb_collector.sites.darkforums import parse_darkforums_list, parse_darkforums_detail
+from darkweb_collector.sites.breached import parse_breached_list, parse_breached_detail
 from darkweb_collector.sites.chaos import parse_chaos_homepage, parse_chaos_detail
-from darkweb_collector.sites.cracked import parse_cracked_detail, parse_cracked_list
-from darkweb_collector.sites.pwnfrm import parse_pwnfrm_detail, parse_pwnfrm_list
-from darkweb_collector.sites.raidforums import parse_raidforums_detail, parse_raidforums_list
+from darkweb_collector.sites.pwnfrm import parse_pwnfrm_list, parse_pwnfrm_detail
+from darkweb_collector.sites.updap import parse_updap_list, parse_updap_detail
 
 
 Parser = Callable[[str, str], dict]
@@ -19,14 +19,14 @@ PARSERS: dict[str, Parser] = {
     "example_forum": parse_example_forum_homepage,
     "darkforums_list": parse_darkforums_list,
     "darkforums_detail": parse_darkforums_detail,
+    "breached_list": parse_breached_list,
+    "breached_detail": parse_breached_detail,
     "chaos": parse_chaos_homepage,
     "chaos_detail": parse_chaos_detail,
-    "cracked_list": parse_cracked_list,
-    "cracked_detail": parse_cracked_detail,
     "pwnfrm_list": parse_pwnfrm_list,
     "pwnfrm_detail": parse_pwnfrm_detail,
-    "raidforums_list": parse_raidforums_list,
-    "raidforums_detail": parse_raidforums_detail,
+    "updap_list": parse_updap_list,
+    "updap_detail": parse_updap_detail,
 }
 
 

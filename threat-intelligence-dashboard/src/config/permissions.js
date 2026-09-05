@@ -1,15 +1,18 @@
 export const MODULE_KEYS = Object.freeze({
   DASHBOARD: 'dashboard',
   INTELLIGENCE_SEARCH: 'intelligence_search',
+  AI_AGGREGATION: 'ai_aggregation',
   RANSOMWARE: 'ransomware',
   DATA_LEAK: 'data_leak',
   VULNERABILITY_ALERTS: 'vulnerability_alerts',
+  THREAT_SITUATION: 'threat_situation',
   COLLECTOR_CONTROL: 'collector_control',
   FILE_MONITORING: 'file_monitoring',
 })
 
 export const ASSIGNABLE_MODULES = Object.freeze([
   { key: MODULE_KEYS.INTELLIGENCE_SEARCH, label: '情报检索', path: '/intelligence' },
+  { key: MODULE_KEYS.AI_AGGREGATION, label: 'AI聚合', path: '/ai-aggregation' },
   { key: MODULE_KEYS.RANSOMWARE, label: '勒索情报', path: '/ransomware' },
   { key: MODULE_KEYS.DATA_LEAK, label: '数据泄露情报', path: '/data-leak' },
   { key: MODULE_KEYS.VULNERABILITY_ALERTS, label: '漏洞预警', path: '/vulnerability-alerts' },

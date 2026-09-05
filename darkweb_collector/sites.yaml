@@ -1,68 +1,81 @@
 {
   "sites": [
     {
-      "site_name": "changan",
-      "enabled": true,
-      "seed_urls": [
-        "http://cabyceogpsji73sske5nvo45mdrkbz4m3qd3iommf3zaaa6izg3j2cqd.onion/#/home"
-      ],
-      "seed_fetch_mode": "tor_http",
-      "detail_fetch_mode": "browser",
-      "browser_queue": "browser_onion",
-      "profile": "hot",
-      "max_topics_per_run": 30,
-      "max_detail_pages_per_run": 15,
-      "cooldown_seconds": 1800,
-      "output_dir": "output/changan",
-      "dedupe_window_minutes": 120,
-      "max_concurrent_details": 1,
-      "display_name": "长安不夜城",
-      "auth_platform": "changan",
-      "auth_origin": "http://cabyceogpsji73sske5nvo45mdrkbz4m3qd3iommf3zaaa6izg3j2cqd.onion",
-      "auth_storage_key": "token",
-      "excluded_categories": [
-        "影视音像"
-      ],
-      "fetch_timeout_seconds": 120,
-      "render_wait_seconds": 12
-    },
-    {
       "site_name": "dragonforce",
-      "enabled": true,
+      "enabled": false,
       "seed_urls": [
-        "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog?page=1"
+        "http://dragonforxxbp3awc7mzs5dkswrua3znqyx5roefmi4smjrsdi22xwqd.onion/"
       ],
       "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "browser",
-      "browser_queue": "browser_onion",
-      "profile": "warm",
-      "max_topics_per_run": 15,
-      "max_detail_pages_per_run": 3,
-      "cooldown_seconds": 86400,
+      "detail_fetch_mode": "tor_http",
+      "profile": "hot",
+      "max_topics_per_run": 25,
+      "max_detail_pages_per_run": 15,
+      "cooldown_seconds": 300,
       "output_dir": "output/dragonforce",
-      "dedupe_window_minutes": 120,
-      "max_concurrent_details": 1,
-      "render_wait_seconds": 15
+      "dedupe_window_minutes": 120
     },
     {
       "site_name": "darkforums",
       "enabled": true,
       "seed_urls": [
-        "https://darkforums.as/Forum-Databases",
-        "https://darkforums.as/Forum-Other-Leaks",
-        "https://darkforums.as/Forum-Sellers-Place"
+        "https://darkforums.as/Forum-Databases?sortby=started&order=desc&datecut=9999&prefix=0",
+        "https://darkforums.as/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
+        "https://darkforums.as/Forum-Sellers-Place?sortby=started&order=desc&datecut=9999&prefix=0"
       ],
-      "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "browser",
-      "browser_queue": "browser_public",
-      "profile": "hot",
-      "max_topics_per_run": 20,
-      "max_detail_pages_per_run": 10,
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 10,
+      "max_detail_pages_per_run": 6,
       "cooldown_seconds": 900,
       "output_dir": "output/darkforums",
       "dedupe_window_minutes": 180,
-      "max_concurrent_details": 1,
-      "render_wait_seconds": 12
+      "render_wait_seconds": 20,
+      "fetch_timeout_seconds": 180
+    },
+    {
+      "site_name": "updap",
+      "enabled": true,
+      "seed_urls": [
+        "https://updap.com/Forum-Databases?sortby=started&order=desc&datecut=9999&prefix=0",
+        "https://updap.com/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0"
+      ],
+      "seed_fetch_mode": "http",
+      "detail_fetch_mode": "http",
+      "profile": "cold",
+      "max_topics_per_run": 5,
+      "max_detail_pages_per_run": 2,
+      "cooldown_seconds": 21600,
+      "output_dir": "output/updap",
+      "dedupe_window_minutes": 360,
+      "render_wait_seconds": 8,
+      "fetch_timeout_seconds": 90,
+      "source_family": "pwnfrm",
+      "collection_scope": "public_metadata_and_sanitized_excerpt",
+      "restricted_content_policy": "do_not_unlock"
+    },
+    {
+      "site_name": "breached",
+      "enabled": false,
+      "seed_urls": [
+        "http://breach5yz2b5lepmq4gaqwcon3jippw3bislhvvdavem5git55sy2nid.onion/forums/databases.14/?order=post_date&direction=desc",
+        "http://breach5yz2b5lepmq4gaqwcon3jippw3bislhvvdavem5git55sy2nid.onion/forums/leaks-market.18/?order=post_date&direction=desc"
+      ],
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 10,
+      "max_detail_pages_per_run": 6,
+      "cooldown_seconds": 900,
+      "output_dir": "output/breached",
+      "dedupe_window_minutes": 180,
+      "render_wait_seconds": 20,
+      "fetch_timeout_seconds": 180,
+      "session_cookie_env": "BREACHED_SESSION_COOKIE",
+      "session_cookie_file": "secrets/breached_cookies.txt",
+      "session_cookie_engine": "XenForo",
+      "session_cookie_example": "xf_csrf=...; xf_user=...; xf_session=..."
     },
     {
       "site_name": "cracked",
@@ -71,43 +84,64 @@
         "https://cracked.st/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
         "https://cracked.st/Forum-Combolists--297?sortby=started&order=desc&datecut=9999&prefix=0"
       ],
-      "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "browser",
-      "browser_queue": "browser_public",
-      "profile": "hot",
-      "max_topics_per_run": 20,
-      "max_detail_pages_per_run": 10,
+      "seed_fetch_mode": "tor_http",
+      "detail_fetch_mode": "tor_http",
+      "profile": "warm",
+      "max_topics_per_run": 10,
+      "max_detail_pages_per_run": 6,
       "cooldown_seconds": 900,
       "output_dir": "output/cracked",
       "dedupe_window_minutes": 180,
-      "max_concurrent_details": 1,
-      "display_name": "Cracked",
       "render_wait_seconds": 8,
-      "fetch_timeout_seconds": 90,
-      "browser_engine": "chromium",
-      "browser_storage_state_file": "browser-state/cracked/storage-state.json"
+      "fetch_timeout_seconds": 90
     },
     {
-      "site_name": "raidforums",
-      "enabled": true,
+      "site_name": "chaos",
+      "enabled": false,
       "seed_urls": [
-        "https://raidforums.im/Forum-Databases",
-        "https://raidforums.im/Forum-Other-Leaks",
-        "https://raidforums.im/Forum-Sellers-Place"
+        "http://hptqq2o2qjva7lcaaq67w36jihzivkaitkexorauw7b2yul2z6zozpqd.onion/"
       ],
       "seed_fetch_mode": "browser",
       "detail_fetch_mode": "browser",
-      "browser_queue": "browser_public",
+      "profile": "hot",
+      "max_topics_per_run": 25,
+      "max_detail_pages_per_run": 15,
+      "cooldown_seconds": 300,
+      "output_dir": "output/chao",
+      "dedupe_window_minutes": 120,
+      "render_wait_seconds": 15
+    },
+    {
+      "site_name": "lynx",
+      "enabled": false,
+      "seed_urls": [
+        "http://lynxblogtwatfsrwj3oatpejwxk5bngqcd5f7s26iskagfu7ouaomjad.onion/leaks"
+      ],
+      "seed_fetch_mode": "browser",
+      "detail_fetch_mode": "browser",
       "profile": "warm",
-      "max_topics_per_run": 20,
-      "max_detail_pages_per_run": 10,
-      "cooldown_seconds": 3600,
-      "output_dir": "output/raidforums",
-      "dedupe_window_minutes": 180,
-      "max_concurrent_details": 1,
-      "display_name": "RaidForums",
-      "render_wait_seconds": 8,
-      "fetch_timeout_seconds": 90
+      "max_topics_per_run": 15,
+      "max_detail_pages_per_run": 6,
+      "cooldown_seconds": 600,
+      "output_dir": "output/lynx",
+      "dedupe_window_minutes": 120,
+      "render_wait_seconds": 15
+    },
+    {
+      "site_name": "dragonforceblog",
+      "enabled": false,
+      "seed_urls": [
+        "http://z3wqggtxft7id3ibr7srivv5gjof5fwg76slewnzwwakjuf3nlhukdid.onion/blog?page=1"
+      ],
+      "seed_fetch_mode": "browser",
+      "detail_fetch_mode": "browser",
+      "profile": "warm",
+      "max_topics_per_run": 15,
+      "max_detail_pages_per_run": 6,
+      "cooldown_seconds": 600,
+      "output_dir": "output/dragonforceblog",
+      "dedupe_window_minutes": 120,
+      "render_wait_seconds": 15
     },
     {
       "site_name": "pwnfrm",
@@ -119,56 +153,18 @@
       ],
       "seed_fetch_mode": "tor_http",
       "detail_fetch_mode": "tor_http",
-      "profile": "hot",
-      "max_topics_per_run": 20,
-      "max_detail_pages_per_run": 10,
+      "profile": "warm",
+      "max_topics_per_run": 10,
+      "max_detail_pages_per_run": 6,
       "cooldown_seconds": 900,
       "output_dir": "output/pwnfrm",
       "dedupe_window_minutes": 180,
-      "max_concurrent_details": 1,
-      "display_name": "PwnedForums",
       "render_wait_seconds": 20,
       "fetch_timeout_seconds": 180,
       "session_cookie_env": "PWNFRM_SESSION_COOKIE",
       "session_cookie_file": "secrets/pwnfrm_cookies.txt",
       "session_cookie_engine": "MyBB",
       "session_cookie_example": "mybbuser=...; sid=..."
-    },
-    {
-      "site_name": "chaos",
-      "enabled": true,
-      "seed_urls": [
-        "http://hptqq2o2qjva7lcaaq67w36jihzivkaitkexorauw7b2yul2z6zozpqd.onion/"
-      ],
-      "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "browser",
-      "browser_queue": "browser_onion",
-      "profile": "hot",
-      "max_topics_per_run": 15,
-      "max_detail_pages_per_run": 3,
-      "cooldown_seconds": 86400,
-      "output_dir": "output/chao",
-      "dedupe_window_minutes": 120,
-      "max_concurrent_details": 1,
-      "render_wait_seconds": 15
-    },
-    {
-      "site_name": "lynx",
-      "enabled": true,
-      "seed_urls": [
-        "http://lynxblogtwatfsrwj3oatpejwxk5bngqcd5f7s26iskagfu7ouaomjad.onion/leaks"
-      ],
-      "seed_fetch_mode": "browser",
-      "detail_fetch_mode": "browser",
-      "browser_queue": "browser_onion",
-      "profile": "warm",
-      "max_topics_per_run": 15,
-      "max_detail_pages_per_run": 3,
-      "cooldown_seconds": 86400,
-      "output_dir": "output/lynx",
-      "dedupe_window_minutes": 120,
-      "max_concurrent_details": 1,
-      "render_wait_seconds": 15
     }
   ]
 }

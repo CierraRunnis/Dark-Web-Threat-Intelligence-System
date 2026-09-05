@@ -1,80 +1,85 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import os
 import secrets
 import time
+from hashlib import sha1
 from pathlib import Path
 from threading import Lock, Thread
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, SecretStr
 
-from darkweb_collector.chaojiying import (
-    ChaojiyingConfigError,
-    chaojiying_config_status,
-    chaojiying_configured,
-    delete_chaojiying_config,
-    save_chaojiying_config,
-)
-from darkweb_collector.changan_auto_login import (
-    ChanganAutoLoginConfigError,
-    ChanganAutoLoginTestError,
-    changan_auto_login_config_status,
-    delete_changan_auto_login_config,
-    save_changan_auto_login_config,
-    test_changan_auto_login_config,
-)
+from darkweb_collector.ai_aggregation.router import router as ai_aggregation_router
+from darkweb_collector.db import database_health_payload
+from darkweb_collector.migration_api import router as migration_router
+from darkweb_collector.postgres_backend import close_postgres_pools
 from darkweb_collector.bot_assistant import (
     BotAssistantError,
     bot_config_status,
     build_markdown_payload,
     build_text_payload,
-    delete_bot_config,
     ensure_wecom_aibot_listener,
     load_bot_config,
     post_bot_payload,
     send_intelligence_digest,
     set_bot_config,
 )
-from darkweb_collector.dingtalk_bot import (
-    DingTalkBotError,
-    delete_dingtalk_config,
-    dingtalk_config_status,
-    load_dingtalk_config,
-    post_dingtalk_markdown,
-    set_dingtalk_config,
-)
+
+
+class AsciiSafeJSONResponse(JSONResponse):
+    """对所有非 ASCII 字符做 \\uXXXX 转义的 JSON 响应。
+
+    用于 AI 调用接口：避免某些客户端（PowerShell 5.x 的 Invoke-WebRequest、
+    部分浏览器直连、运行在 GBK 终端的 curl、某些 LLM 网关）忽略
+    `Content-Type: application/json; charset=utf-8`，按系统代码页（如中文 Windows
+    的 CP936/GBK）解码 UTF-8 字节导致中文乱码的问题。
+    body 全部为 ASCII 字符，任何代码页解码都不会乱；JSON 解析器会自动还原
+    \\uXXXX 转义为正常的 Unicode 字符串，对接收方完全透明。
+    """
+
+    media_type = "application/json; charset=utf-8"
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=True,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("ascii")
+
 from darkweb_collector.api_actions import (
     dispatch_run_all_enabled_sites_once,
     dispatch_run_code_monitoring_once,
-    dispatch_run_netdisk_monitoring_once,
     dispatch_run_ransomware_sync_once,
     dispatch_run_site,
     dispatch_run_vulnerability_sync_once,
+    dispatch_run_netdisk_monitoring_once,
     get_code_monitoring_continuous_status,
     get_continuous_dispatch_status,
     get_netdisk_monitoring_continuous_status,
-    probe_site_connectivity,
     get_ransomware_sync_status,
     get_vulnerability_sync_status,
     start_code_monitoring_dispatch,
-    start_netdisk_monitoring_dispatch,
     start_ransomware_sync_dispatch,
-    start_site_connectivity_monitor,
+    start_netdisk_monitoring_dispatch,
     start_continuous_dispatch,
     start_vulnerability_sync_dispatch,
     stop_code_monitoring_dispatch,
-    stop_netdisk_monitoring_dispatch,
     stop_ransomware_sync_dispatch,
+    stop_netdisk_monitoring_dispatch,
     stop_continuous_dispatch,
     stop_vulnerability_sync_dispatch,
     update_site_enabled,
@@ -91,47 +96,44 @@ from darkweb_collector.auth_accounts import (
     update_account_password,
     verify_password as verify_stored_password,
 )
-import darkweb_collector.api_data as api_data_module
 from darkweb_collector.document_exposure import (
     add_document_exposure_review,
     build_document_exposure_detail,
-    list_exposure_scan_runs_payload,
     build_document_exposure_summary,
+    delete_watchlist_payload,
     ensure_netdisk_source_health_defaults,
     list_document_exposures_payload,
-    list_document_exposures_page_payload,
+    list_exposure_scan_runs_payload,
     list_netdisk_source_health_payload,
     list_netdisk_source_states_payload,
     list_watchlists_payload,
     netdisk_source_policy,
     reset_netdisk_source_states_payload,
-    delete_watchlist_payload,
     save_watchlist_payload,
     scan_watchlist_once,
 )
 from darkweb_collector.code_monitoring import (
     add_code_monitoring_review,
+    build_agent_code_hit_detail,
     build_code_hit_detail,
     build_code_monitoring_summary,
     delete_code_watchlist_payload,
     list_code_hits_payload,
     list_code_scan_runs_payload,
     list_code_watchlists_payload,
-    search_code_hits_page,
     save_code_watchlist_payload,
     scan_code_watchlist_once,
-    warm_code_monitoring_cache,
 )
+from darkweb_collector.document_exposure_platforms import list_exposure_platforms
 from darkweb_collector.document_exposure_sessions import (
     auto_detect_platform_sessions,
     build_platform_session_payloads,
     launch_platform_login,
     remove_platform_session,
-    save_platform_session,
     visible_platform_login_available,
+    save_platform_session,
     verify_platform_session,
 )
-from darkweb_collector.document_exposure_platforms import list_exposure_platforms
 from darkweb_collector.github_app_auth import (
     GitHubAppConfigError,
     GitHubAppConnectionError,
@@ -140,6 +142,7 @@ from darkweb_collector.github_app_auth import (
     save_github_app_config,
 )
 from darkweb_collector.remote_browser_sessions import (
+    close_all_remote_browser_sessions,
     close_remote_browser_login,
     control_remote_browser,
     finish_remote_browser_login,
@@ -147,68 +150,24 @@ from darkweb_collector.remote_browser_sessions import (
     proxy_remote_browser_rfb,
     proxy_remote_browser_stream,
     start_remote_browser_login,
+    validate_remote_browser_ticket,
 )
-from darkweb_collector.config import get_site_config
+import darkweb_collector.api_data as api_data_module
 import darkweb_collector.monitoring_rules as monitoring_rules_module
 import darkweb_collector.normalized_intelligence as normalized_intelligence_module
-from darkweb_collector.normalization_runtime import (
-    start_normalization_worker,
-    stop_normalization_worker,
-)
-from darkweb_collector.db import (
-    get_db_connection,
-    list_monitoring_keyword_notifications,
-    reconcile_stale_crawl_jobs,
-)
 from darkweb_collector.ransomware_live import get_ransomware_live_config_status, set_ransomware_live_api_key
-from darkweb_collector.runtime import output_root, user_data_root
+from darkweb_collector.runtime import output_root, project_root
 from darkweb_collector.session_cookies import (
     clear_session_cookie,
     get_session_cookie_status,
     list_cookie_capable_sites,
     set_session_cookie,
 )
-from darkweb_collector.tor_bridge_control import (
-    get_tor_bridge_status,
-    save_tor_bridge_settings,
-    start_tor_bridge,
-    stop_tor_bridge,
-    write_torrc,
-)
-from darkweb_collector.version_check import build_version_status, current_version_payload
-from darkweb_collector.watchlist_notifications import (
-    delete_watchlist_dingtalk_config,
-    delete_watchlist_dingtalk_endpoint,
-    delete_watchlist_wechat_config,
-    ensure_watchlist_wecom_listeners,
-    get_watchlist_notification_profile,
-    save_watchlist_notification_profile,
-    send_watchlist_test,
-    set_watchlist_dingtalk_config,
-    set_watchlist_wechat_config,
-)
-from darkweb_collector.self_update import (
-    SelfUpdateError,
-    read_public_update_status,
-    start_self_update,
-)
-from darkweb_collector.migration_api import router as migration_router
+from darkweb_collector.version_check import build_version_status
 
 
-class ApiGZipMiddleware:
-    def __init__(self, app, minimum_size: int = 1024, compresslevel: int = 5) -> None:
-        self.app = app
-        self.gzip = GZipMiddleware(app, minimum_size=minimum_size, compresslevel=compresslevel)
-
-    async def __call__(self, scope, receive, send) -> None:
-        if scope.get("type") == "http" and str(scope.get("path") or "").startswith("/api/"):
-            await self.gzip(scope, receive, send)
-            return
-        await self.app(scope, receive, send)
-
-
-APP_VERSION = current_version_payload()["version"]
-app = FastAPI(title="Darkweb Collector API", version=APP_VERSION)
+app = FastAPI(title="Darkweb Collector API", version="1.0.0")
+app.include_router(ai_aggregation_router)
 app.include_router(migration_router)
 logger = logging.getLogger("darkweb_collector.api")
 _warmup_lock = Lock()
@@ -216,15 +175,25 @@ _warmup_started = False
 _auth_lock = Lock()
 _auth_sessions: dict[str, dict[str, object]] = {}
 _api_auto_reload_enabled = os.environ.get("DARKWEB_API_AUTO_RELOAD") == "1"
-collector_output_dir = output_root()
+collector_output_dir = output_root().resolve()
 collector_output_dir.mkdir(parents=True, exist_ok=True)
 
 AUTH_EXEMPT_PATHS = {
     "/api/auth/login",
+    "/api/ai/intelligence",
     "/api/health",
+    "/api/jobs/continuous-status",
+    "/api/jobs/run-all-continuous/start",
+    "/api/jobs/run-all-continuous/stop",
     "/api/system/version",
-    "/api/system/update/status",
 }
+AGENT_API_PREFIX = "/api/agent/"
+AGENT_API_KEY_ENV = "DARKWEB_AGENT_API_KEY"
+
+
+DEFAULT_AUTH_PASSWORD = "123456"
+
+
 def _auth_enabled() -> bool:
     return os.environ.get("DARKWEB_API_AUTH_DISABLED") != "1"
 
@@ -234,7 +203,15 @@ def _auth_username() -> str:
 
 
 def _default_auth_password_file() -> Path:
-    return user_data_root() / "auth-password.txt"
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "DarkWebThreatIntel" / "auth-password.txt"
+
+    user_profile = os.environ.get("USERPROFILE", "").strip()
+    if user_profile:
+        return Path(user_profile) / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
+
+    return Path.home() / "AppData" / "Local" / "DarkWebThreatIntel" / "auth-password.txt"
 
 
 def _auth_password_file_path() -> Path:
@@ -247,17 +224,11 @@ def _auth_password() -> str:
     if password:
         return password
 
-    password_path = _auth_password_file_path()
-    with _auth_lock:
-        try:
-            password = password_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            password = ""
-        if not password:
-            password = secrets.token_urlsafe(24)
-            _write_auth_password(password)
-            logger.warning("Generated initial admin password file: %s", password_path)
-    return password
+    try:
+        password = _auth_password_file_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        password = ""
+    return password or DEFAULT_AUTH_PASSWORD
 
 
 def _write_auth_password(password: str) -> None:
@@ -267,10 +238,6 @@ def _write_auth_password(password: str) -> None:
     password_path = _auth_password_file_path()
     password_path.parent.mkdir(parents=True, exist_ok=True)
     password_path.write_text(password, encoding="utf-8")
-    try:
-        os.chmod(password_path, 0o600)
-    except OSError:
-        pass
 
 
 def _auth_session_ttl_seconds() -> int:
@@ -311,6 +278,22 @@ def _extract_bearer_token(authorization: str) -> str:
     if scheme.lower() != "bearer":
         return ""
     return token.strip()
+
+
+def _extract_agent_api_key(request: Request) -> str:
+    return request.headers.get("x-api-key", "").strip() or _extract_bearer_token(
+        request.headers.get("authorization", "")
+    )
+
+
+def _agent_api_auth_error(request: Request) -> JSONResponse | None:
+    expected_key = os.environ.get(AGENT_API_KEY_ENV, "").strip()
+    if not expected_key:
+        return JSONResponse(status_code=503, content={"detail": f"{AGENT_API_KEY_ENV} is not configured"})
+    provided_key = _extract_agent_api_key(request)
+    if not provided_key or not secrets.compare_digest(provided_key, expected_key):
+        return JSONResponse(status_code=401, content={"detail": "invalid agent API key"})
+    return None
 
 
 def _create_auth_session(username: str) -> tuple[str, float]:
@@ -366,6 +349,15 @@ def _require_admin(request: Request) -> dict[str, object]:
     return user
 
 
+def _require_module(request: Request, module_key: str) -> dict[str, object]:
+    user = getattr(request.state, "current_user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="未登录或登录已过期")
+    if user.get("role") == "admin" or module_key in (user.get("modules") or []):
+        return user
+    raise HTTPException(status_code=403, detail="当前账号没有该模块的访问权限")
+
+
 def _requires_auth(request: Request) -> bool:
     path = request.url.path
     if not _auth_enabled() or request.method == "OPTIONS":
@@ -373,6 +365,7 @@ def _requires_auth(request: Request) -> bool:
     if not path.startswith("/api/") or path in AUTH_EXEMPT_PATHS:
         return False
     return True
+
 
 
 def _reload_api_modules():
@@ -390,7 +383,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(ApiGZipMiddleware, minimum_size=1024, compresslevel=5)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 app.mount(
     "/collector-output",
@@ -399,16 +392,13 @@ app.mount(
 )
 
 
-def _is_private_collector_output_path(path: str) -> bool:
-    normalized = "/" + str(path or "").strip().lstrip("/")
-    private_prefix = "/collector-output/platform_sessions"
-    return normalized == private_prefix or normalized.startswith(f"{private_prefix}/")
-
-
 @app.middleware("http")
 async def require_api_auth(request: Request, call_next):
-    if _is_private_collector_output_path(request.url.path):
-        return JSONResponse(status_code=404, content={"detail": "not found"})
+    if request.url.path.startswith(AGENT_API_PREFIX):
+        auth_error = _agent_api_auth_error(request)
+        if auth_error is not None:
+            return auth_error
+        return await call_next(request)
     if not _requires_auth(request):
         return await call_next(request)
     token = _extract_bearer_token(request.headers.get("authorization", ""))
@@ -432,41 +422,17 @@ def _run_payload_warmup() -> None:
 @app.on_event("startup")
 def warm_payloads_on_startup() -> None:
     try:
-        with get_db_connection() as connection:
-            reconciled_jobs = reconcile_stale_crawl_jobs(connection)
-            connection.commit()
-        if reconciled_jobs:
-            logger.warning("reconciled %s stale crawl jobs during API startup", reconciled_jobs)
-    except Exception:
-        logger.exception("failed to reconcile stale crawl jobs during API startup")
-    try:
         ensure_wecom_aibot_listener()
     except Exception:
         logger.exception("failed to start WeCom AI Bot listener")
     try:
-        ensure_watchlist_wecom_listeners()
-    except Exception:
-        logger.exception("failed to start watchlist WeCom AI Bot listeners")
-    try:
         ensure_netdisk_source_health_defaults()
     except Exception:
         logger.exception("failed to initialize netdisk source health records")
-    try:
-        start_site_connectivity_monitor()
-    except Exception:
-        logger.exception("failed to start daily site connectivity monitor")
-    try:
-        start_normalization_worker()
-    except Exception:
-        logger.exception("failed to start normalized intelligence background refresh")
     global _warmup_started
     if os.environ.get("DARKWEB_SKIP_API_WARMUP") == "1":
         logger.info("skipping API warmup because DARKWEB_SKIP_API_WARMUP=1")
         return
-    try:
-        warm_code_monitoring_cache()
-    except Exception:
-        logger.exception("code monitoring cache warmup failed")
     with _warmup_lock:
         if _warmup_started:
             return
@@ -475,31 +441,74 @@ def warm_payloads_on_startup() -> None:
 
 
 @app.on_event("shutdown")
-def stop_background_workers() -> None:
-    stop_normalization_worker()
+def close_runtime_resources_on_shutdown() -> None:
+    try:
+        close_all_remote_browser_sessions()
+    finally:
+        close_postgres_pools()
+
+
+def _database_health_response(payload: dict[str, Any]) -> dict[str, Any]:
+    backend = str(payload.get("backend") or "")
+    schema = str(payload.get("schema") or "")
+    versions = [str(value) for value in (payload.get("schemaVersions") or [])]
+    schema_version = versions[-1] if versions else ""
+    healthy = payload.get("status") == "ok"
+    database_name = str(payload.get("database") or "")
+    if backend == "sqlite" and database_name:
+        database_name = Path(database_name).name
+    database = {
+        **payload,
+        "database": database_name,
+        "database_name": database_name,
+        "engine": backend,
+        "database_engine": backend,
+        "schema": schema,
+        "database_schema": schema,
+        "schema_version": schema_version,
+        "healthy": healthy,
+        "database_ready": healthy,
+    }
+    return {
+        "status": "ok" if healthy else "error",
+        "engine": backend,
+        "database_engine": backend,
+        "schema": schema,
+        "database_schema": schema,
+        "schema_version": schema_version,
+        "healthy": healthy,
+        "database_ready": healthy,
+        "database": database,
+    }
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "version": APP_VERSION}
+def health() -> dict[str, Any]:
+    try:
+        response = _database_health_response(database_health_payload())
+    except Exception as exc:
+        logger.exception("database health check failed")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "数据库健康检查执行失败",
+                "error_type": type(exc).__name__,
+            },
+        ) from exc
+    if response["status"] != "ok":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "数据库结构或迁移版本未就绪",
+                "database": response["database"],
+            },
+        )
+    return response
 
 
 @app.get("/api/system/version")
-def system_version() -> dict:
-    return build_version_status()
-
-
-@app.get("/api/system/update/status")
-def system_update_status() -> dict:
-    return read_public_update_status()
-
-
-@app.post("/api/system/update", status_code=202)
-def system_update() -> dict:
-    try:
-        return start_self_update()
-    except SelfUpdateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+def system_version(force: bool = False) -> dict:
+    return build_version_status(force=force)
 
 
 class AuthLoginRequest(BaseModel):
@@ -530,6 +539,30 @@ class AuthAccountProfileUpdateRequest(BaseModel):
     username: str = ""
     display_name: str = ""
     new_password: str = ""
+
+
+class BotSendRequest(BaseModel):
+    type: str = "digest"
+    content: str = ""
+    provider: str | None = None
+    bot_id: str | None = None
+    chat_id: str | None = None
+    websocket_url: str | None = None
+    webhook_url: str | None = None
+    webhook_key: str | None = None
+    secret: str | None = None
+    dry_run: bool = False
+    limit: int = 5
+
+
+class BotConfigRequest(BaseModel):
+    provider: str = "wechat_work_aibot"
+    bot_id: str = ""
+    chat_id: str = ""
+    websocket_url: str = ""
+    webhook_url: str = ""
+    webhook_key: str = ""
+    secret: str = ""
 
 
 @app.post("/api/auth/login")
@@ -706,23 +739,216 @@ def auth_account_delete(username: str, request: Request) -> dict[str, bool]:
     _revoke_user_sessions(username)
     return {"ok": True}
 
+
 @app.get("/api/intelligence")
 def intelligence() -> dict:
     return _reload_api_modules().build_intelligence_payload()
 
 
-@app.get("/api/intelligence/{page}")
-def intelligence_page(page: str, limit: int | None = None, days: int = 7) -> dict:
-    if page == "dashboard":
-        if days not in {1, 7, 30}:
-            raise HTTPException(status_code=422, detail="days 必须是 1、7 或 30")
-        return _reload_api_modules().build_dashboard_payload(days=days)
-    if limit is not None and not 1 <= limit <= 2000:
-        raise HTTPException(status_code=422, detail="limit 必须在 1 到 2000 之间")
-    try:
-        return _reload_api_modules().build_intelligence_page_payload(page, limit=limit)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+def _conditional_aggregate_response(request: Request, payload: dict[str, Any]) -> Response:
+    identity = f"{payload.get('snapshotRevision', '')}:{request.url.query}"
+    etag = f'"{sha1(identity.encode("utf-8")).hexdigest()}"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Vary": "Authorization, Accept-Encoding",
+    }
+    if request.headers.get("if-none-match", "").strip() == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(content=payload, headers=headers)
+
+
+@app.get("/api/dashboard/overview")
+def dashboard_overview(
+    request: Request,
+    days: int = 7,
+    event_type: str = "all",
+    severity: str = "",
+    keyword: str = "",
+) -> Response:
+    payload = _reload_api_modules().build_dashboard_overview(
+        days=days,
+        event_type=event_type,
+        severity=severity,
+        keyword=keyword,
+    )
+    return _conditional_aggregate_response(request, payload)
+
+
+@app.get("/api/threat-situation")
+def threat_situation(request: Request, days: int = 30) -> Response:
+    _require_module(request, "threat_situation")
+    payload = _reload_api_modules().build_threat_situation(days=days)
+    return _conditional_aggregate_response(request, payload)
+
+
+@app.get("/api/intelligence/search")
+def intelligence_search(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    types: str | None = None,
+    keyword: str | None = None,
+    days: int | None = None,
+    severity: str | None = None,
+    industry: str | None = None,
+    region: str | None = None,
+    country: str | None = None,
+    attacker: str | None = None,
+    min_risk_score: int | None = None,
+    sort: str | None = None,
+) -> dict[str, Any]:
+    _require_module(request, "intelligence_search")
+    return _reload_api_modules().build_intelligence_search_page(
+        page=page,
+        page_size=page_size,
+        types=types,
+        keyword=keyword,
+        days=days,
+        severity=severity,
+        industry=industry,
+        region=region,
+        country=country,
+        attacker=attacker,
+        min_risk_score=min_risk_score,
+        sort=sort,
+    )
+
+
+@app.get("/api/intelligence/ransomware")
+def intelligence_ransomware(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    keyword: str | None = None,
+    stage: str | None = None,
+    industry: str | None = None,
+    days: int | None = None,
+    severity: str | None = None,
+    sort: str | None = None,
+) -> dict[str, Any]:
+    _require_module(request, "ransomware")
+    return _reload_api_modules().build_ransomware_page(
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        stage=stage,
+        industry=industry,
+        days=days,
+        severity=severity,
+        sort=sort,
+    )
+
+
+@app.get("/api/intelligence/data-leak")
+def intelligence_data_leak(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    keyword: str = "",
+    category: str = "",
+    days: int | None = None,
+    attacker: str | None = None,
+    industry: str | None = None,
+    severity: str | None = None,
+    source: str | None = None,
+    sort: str | None = None,
+) -> dict[str, Any]:
+    _require_module(request, "data_leak")
+    return _reload_api_modules().build_data_leak_page(
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        category=category,
+        days=days,
+        attacker=attacker,
+        industry=industry,
+        severity=severity,
+        source=source,
+        sort=sort,
+    )
+
+
+@app.get("/api/intelligence/export")
+def intelligence_export(
+    request: Request,
+    dataset: str = "search",
+    types: str | None = None,
+    keyword: str | None = None,
+    days: int | None = None,
+    severity: str | None = None,
+    industry: str | None = None,
+    region: str | None = None,
+    country: str | None = None,
+    attacker: str | None = None,
+    category: str | None = None,
+    stage: str | None = None,
+    source: str | None = None,
+    min_risk_score: int | None = None,
+    sort: str | None = None,
+) -> StreamingResponse:
+    normalized_dataset = dataset.replace("-", "_").strip().lower()
+    module_key = {
+        "search": "intelligence_search",
+        "ransomware": "ransomware",
+        "data_leak": "data_leak",
+    }.get(normalized_dataset)
+    if module_key is None:
+        raise HTTPException(status_code=400, detail="unsupported export dataset")
+    _require_module(request, module_key)
+    parameters = {
+        "keyword": keyword,
+        "days": days,
+        "severity": severity,
+        "industry": industry,
+        "sort": sort,
+    }
+    if normalized_dataset == "search":
+        parameters.update(
+            {
+                "types": types,
+                "region": region,
+                "country": country,
+                "attacker": attacker,
+                "min_risk_score": min_risk_score,
+            }
+        )
+    elif normalized_dataset == "ransomware":
+        parameters["stage"] = stage
+    elif normalized_dataset == "data_leak":
+        parameters.update({"category": category, "attacker": attacker, "source": source})
+    return StreamingResponse(
+        _reload_api_modules().iter_intelligence_csv(normalized_dataset, parameters),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{normalized_dataset}.csv"'},
+    )
+
+
+@app.get("/api/data-leaks")
+def data_leaks(
+    page: int = 1,
+    page_size: int = 10,
+    keyword: str = "",
+    category: str = "",
+    days: int | None = None,
+    attacker: str | None = None,
+    industry: str | None = None,
+    severity: str | None = None,
+    source: str | None = None,
+    sort: str | None = None,
+) -> dict:
+    return _reload_api_modules().build_data_leak_page(
+        page=page,
+        page_size=page_size,
+        keyword=keyword,
+        category=category,
+        days=days,
+        attacker=attacker,
+        industry=industry,
+        severity=severity,
+        source=source,
+        sort=sort,
+    )
 
 
 @app.get("/api/jobs")
@@ -730,31 +956,9 @@ def jobs() -> dict:
     return _reload_api_modules().build_jobs_payload()
 
 
-@app.get("/api/events/search")
-def event_search(
-    page: int = 1,
-    page_size: int = 20,
-    q: str = "",
-    event_type: str = "all",
-    sort: str = "latest",
-) -> dict:
-    if page < 1:
-        raise HTTPException(status_code=422, detail="page 必须大于等于 1")
-    if not 1 <= page_size <= 100:
-        raise HTTPException(status_code=422, detail="page_size 必须在 1 到 100 之间")
-    if len(q) > 200:
-        raise HTTPException(status_code=422, detail="检索关键词不能超过 200 个字符")
-    if event_type not in {"all", "ransomware", "data-leak", "vulnerability"}:
-        raise HTTPException(status_code=422, detail="不支持的事件类型")
-    if sort not in {"latest", "oldest", "severity"}:
-        raise HTTPException(status_code=422, detail="不支持的排序方式")
-    return _reload_api_modules().build_event_search_payload(
-        page=page,
-        page_size=page_size,
-        query=q.strip(),
-        event_type=event_type,
-        sort=sort,
-    )
+@app.get("/api/events")
+def events() -> list[dict]:
+    return _reload_api_modules().build_event_records()
 
 
 @app.get("/api/events/{event_id}")
@@ -771,12 +975,65 @@ def vulnerabilities(
     is_exploited: bool | None = None,
     days: int | None = None,
     limit: int | None = None,
-) -> list[dict]:
+    keyword: str | None = None,
+    industry: str | None = None,
+    vendor: str | None = None,
+    product: str | None = None,
+    sort: str | None = None,
+    page: int | None = None,
+    page_size: int | None = None,
+) -> list[dict] | dict[str, Any]:
+    if page is not None or page_size is not None or keyword is not None:
+        return _reload_api_modules().build_vulnerability_page(
+            severity=severity,
+            is_exploited=is_exploited,
+            days=days,
+            keyword=keyword,
+            industry=industry,
+            vendor=vendor,
+            product=product,
+            sort=sort,
+            page=page or 1,
+            page_size=page_size or 20,
+        )
+
     return _reload_api_modules().build_vulnerability_records(
         severity=severity,
         is_exploited=is_exploited,
         days=days,
         limit=limit,
+    )
+
+
+@app.get("/api/vulnerabilities/export")
+def vulnerability_export(
+    request: Request,
+    severity: str | None = None,
+    is_exploited: bool | None = None,
+    days: int | None = None,
+    keyword: str | None = None,
+    industry: str | None = None,
+    vendor: str | None = None,
+    product: str | None = None,
+    sort: str | None = None,
+) -> StreamingResponse:
+    _require_module(request, "vulnerability_alerts")
+    return StreamingResponse(
+        _reload_api_modules().iter_intelligence_csv(
+            "vulnerability",
+            {
+                "severity": severity,
+                "is_exploited": is_exploited,
+                "days": days,
+                "keyword": keyword,
+                "industry": industry,
+                "vendor": vendor,
+                "product": product,
+                "sort": sort,
+            },
+        ),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="vulnerabilities.csv"'},
     )
 
 
@@ -786,6 +1043,52 @@ def vulnerability_detail(event_id: str) -> dict:
     if payload is None:
         raise HTTPException(status_code=404, detail="vulnerability event not found")
     return payload
+
+
+@app.get("/api/ai/intelligence")
+def ai_intelligence(
+    request: Request,
+    event_type: str | None = None,
+    days: int | None = None,
+    industry: str | None = None,
+    region: str | None = None,
+    country: str | None = None,
+    severity: str | None = None,
+    attacker: str | None = None,
+    keyword: str | None = None,
+    min_risk_score: int | None = None,
+    limit: int | None = None,
+) -> JSONResponse:
+    """供 AI 调用的统一情报接口：返回与前端同源的、已分类筛选好的事件 + 聚合统计。
+
+    参数（全部可选，未提供则不参与筛选）：
+    - event_type: data_leak / ransomware / vulnerability / all（也支持逗号分隔多选）
+    - days: 仅返回最近 N 天的事件
+    - industry / region / country: 行业、宏观区域、国家（中英文均可，做包含匹配）
+    - severity: low / medium / high / critical
+    - attacker: 攻击组织/泄露源名称（包含匹配）
+    - keyword: 在标题、受害者、摘要、CVE 等字段上做包含匹配
+    - min_risk_score: 风险分阈值（0-100）
+    - limit: 返回事件上限，默认 100，最大 500
+
+    响应显式声明 charset=utf-8，避免 PowerShell / .NET 客户端用本地代码页解码导致中文乱码。
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host != "127.0.0.1":
+        raise HTTPException(status_code=403, detail="仅允许 127.0.0.1 本地访问")
+    payload = _reload_api_modules().build_ai_intelligence_payload(
+        event_type=event_type,
+        days=days,
+        industry=industry,
+        region=region,
+        country=country,
+        severity=severity,
+        attacker=attacker,
+        keyword=keyword,
+        min_risk_score=min_risk_score,
+        limit=limit,
+    )
+    return AsciiSafeJSONResponse(content=payload)
 
 
 class RunSiteRequest(BaseModel):
@@ -824,66 +1127,7 @@ class RansomwareConfigRequest(BaseModel):
 
 
 class SessionCookieRequest(BaseModel):
-    cookie: str = Field(min_length=1, max_length=16384)
-
-
-class TorBridgeConfigRequest(BaseModel):
-    enabled: bool = False
-    bridge_mode: str = "snowflake"
-    tor_executable: str = ""
-    transport_executable: str = ""
-    socks_host: str = "127.0.0.1"
-    socks_port: int = Field(9050, ge=1, le=65535)
-    bridge_lines: list[str] = []
-    extra_torrc_lines: list[str] = []
-    data_directory: str = ""
-
-
-class MonitoringKeywordRow(BaseModel):
-    keyword: str
-    category: str
-    weight: int
-    enabled: bool = True
-    match_mode: str = "contains"
-
-
-class MonitoringKeywordsRequest(BaseModel):
-    keywords: list[MonitoringKeywordRow]
-
-
-class BotSendRequest(BaseModel):
-    type: str = "digest"
-    content: str = ""
-    provider: str | None = None
-    bot_id: str | None = None
-    chat_id: str | None = None
-    websocket_url: str | None = None
-    webhook_url: str | None = None
-    webhook_key: str | None = None
-    secret: str | None = None
-    dry_run: bool = False
-    limit: int = 5
-
-
-class BotConfigRequest(BaseModel):
-    provider: str = "wechat_work_aibot"
-    bot_id: str = ""
-    chat_id: str = ""
-    websocket_url: str = ""
-    webhook_url: str = ""
-    webhook_key: str = ""
-    secret: str = ""
-
-
-class DingTalkConfigRequest(BaseModel):
-    webhook_url: str
-    secret: str = ""
-
-
-class DingTalkSendRequest(BaseModel):
-    content: str
-    title: str = "暗网威胁情报通知"
-    dry_run: bool = False
+    cookie: str
 
 
 class ExposureWatchTermRequest(BaseModel):
@@ -903,25 +1147,11 @@ class ExposureWatchlistRequest(BaseModel):
     file_types: list[str] = []
     page_limit: int = 4
     detail_fetch: bool = True
-    source_policies: dict[str, dict[str, object]] = Field(default_factory=dict)
     terms: list[ExposureWatchTermRequest] = []
 
 
 class PlatformSessionSaveRequest(BaseModel):
     account_label: str = ""
-
-
-class ChanganAutoLoginConfigRequest(BaseModel):
-    enabled: bool = True
-    changan_username: str = Field(default="", max_length=256)
-    changan_password: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=512)
-
-
-class ChaojiyingConfigRequest(BaseModel):
-    user: str = Field(default="", max_length=128)
-    password: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=256)
-    pass2: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=64)
-    soft_id: str = Field(default="", max_length=64)
 
 
 class RemoteBrowserActionRequest(BaseModel):
@@ -1000,28 +1230,6 @@ class CodeWatchlistRequest(BaseModel):
     enterprise_profile: CodeEnterpriseProfileRequest = Field(default_factory=CodeEnterpriseProfileRequest)
 
 
-class WatchlistNotificationProfileRequest(BaseModel):
-    keywords: list[MonitoringKeywordRow] = Field(default_factory=list)
-    wechat_enabled: bool = False
-    dingtalk_enabled: bool = False
-
-
-class WatchlistWeChatConfigRequest(BaseModel):
-    bot_id: str
-    secret: SecretStr
-    websocket_url: str = ""
-
-
-class WatchlistDingTalkConfigRequest(BaseModel):
-    name: str = ""
-    webhook_url: SecretStr
-    secret: SecretStr = Field(default_factory=lambda: SecretStr(""))
-
-
-class WatchlistNotificationTestRequest(BaseModel):
-    content: str = ""
-
-
 class CodeScanRequest(BaseModel):
     platforms: list[str] = []
     file_extensions: list[str] = []
@@ -1046,10 +1254,23 @@ class CodeMonitoringContinuousStopRequest(BaseModel):
     watchlist_id: int = Field(..., gt=0)
 
 
+
 class GitHubAppConfigRequest(BaseModel):
     app_id: int = Field(..., gt=0)
     installation_id: int = Field(..., gt=0)
     private_key: SecretStr = Field(default_factory=lambda: SecretStr(""), max_length=65536)
+
+
+class MonitoringKeywordRow(BaseModel):
+    keyword: str
+    category: str
+    weight: int
+    enabled: bool = True
+    match_mode: str = "contains"
+
+
+class MonitoringKeywordsRequest(BaseModel):
+    keywords: list[MonitoringKeywordRow]
 
 
 @app.post("/api/jobs/run-site")
@@ -1138,49 +1359,19 @@ def ransomware_config_save(payload: RansomwareConfigRequest) -> dict:
     return set_ransomware_live_api_key(payload.api_key)
 
 
-@app.get("/api/tor-bridge/status")
-def tor_bridge_status() -> dict:
-    return get_tor_bridge_status()
-
-
-@app.post("/api/tor-bridge/config")
-def tor_bridge_config_save(payload: TorBridgeConfigRequest) -> dict:
-    try:
-        status = save_tor_bridge_settings(payload.model_dump())
-        write_torrc()
-        return status
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/tor-bridge/start")
-def tor_bridge_start() -> dict:
-    try:
-        return start_tor_bridge()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/tor-bridge/stop")
-def tor_bridge_stop() -> dict:
-    return stop_tor_bridge()
-
-
 @app.post("/api/sites/{site_name}/enabled")
 def set_site_enabled(site_name: str, payload: SetSiteEnabledRequest) -> dict:
     return update_site_enabled(site_name=site_name, enabled=payload.enabled)
 
 
-@app.post("/api/sites/{site_name}/probe")
-def probe_site(site_name: str) -> dict:
-    try:
-        return probe_site_connectivity(site_name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
 @app.get("/api/sites/cookies")
 def list_site_cookies() -> dict:
+    """Return cookie status for every site that requires a session cookie.
+
+    Frontend uses this to render a per-site cookie panel without hardcoding
+    which sites need a cookie — drop a `session_cookie_*` block into
+    sites.yaml and the dashboard picks the site up automatically.
+    """
     return {"sites": list_cookie_capable_sites()}
 
 
@@ -1189,7 +1380,7 @@ def get_site_cookie(site_name: str) -> dict:
     try:
         return get_session_cookie_status(site_name)
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post("/api/sites/{site_name}/cookie")
@@ -1197,9 +1388,9 @@ def save_site_cookie(site_name: str, payload: SessionCookieRequest) -> dict:
     try:
         return set_session_cookie(site_name=site_name, cookie_value=payload.cookie)
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.delete("/api/sites/{site_name}/cookie")
@@ -1207,13 +1398,13 @@ def delete_site_cookie(site_name: str) -> dict:
     try:
         return clear_session_cookie(site_name)
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.get("/api/monitoring/keywords")
 def monitoring_keywords() -> list[dict]:
     _reload_api_modules()
-    return monitoring_rules_module.get_monitoring_keywords()
+    return monitoring_rules_module.get_monitoring_keywords(persist_defaults=False)
 
 
 @app.post("/api/monitoring/keywords")
@@ -1225,94 +1416,12 @@ def update_monitoring_keywords(payload: MonitoringKeywordsRequest) -> list[dict]
 @app.get("/api/analysis/monitoring-status")
 def monitoring_status() -> dict:
     _reload_api_modules()
-    return monitoring_rules_module.build_monitoring_status()
-
-
-@app.get("/api/monitoring/keyword-notifications")
-def monitoring_keyword_notifications() -> list[dict]:
-    with get_db_connection() as connection:
-        return list_monitoring_keyword_notifications(connection)
-
-
-@app.get("/api/bot/status")
-def bot_status() -> dict:
-    return bot_config_status()
-
-
-@app.get("/api/dingtalk/status")
-def dingtalk_status() -> dict:
-    try:
-        return dingtalk_config_status()
-    except DingTalkBotError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return monitoring_rules_module.build_monitoring_status(persist_default_keywords=False)
 
 
 @app.get("/api/platform-sessions")
 def platform_sessions(module: str | None = None) -> list[dict]:
     return build_platform_session_payloads(module=module, manageable_only=True)
-
-
-@app.get("/api/platform-sessions/changan/auto-login")
-def get_changan_auto_login_config() -> dict:
-    return changan_auto_login_config_status()
-
-
-@app.get("/api/captcha-providers/chaojiying")
-def get_chaojiying_config() -> dict:
-    return chaojiying_config_status()
-
-
-@app.put("/api/captcha-providers/chaojiying")
-def configure_chaojiying(payload: ChaojiyingConfigRequest) -> dict:
-    try:
-        return save_chaojiying_config(
-            user=payload.user,
-            password=payload.password.get_secret_value(),
-            pass2=payload.pass2.get_secret_value(),
-            soft_id=payload.soft_id,
-        )
-    except ChaojiyingConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/captcha-providers/chaojiying")
-def remove_chaojiying_config() -> dict:
-    try:
-        return delete_chaojiying_config()
-    except ChaojiyingConfigError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.put("/api/platform-sessions/changan/auto-login")
-def configure_changan_auto_login(payload: ChanganAutoLoginConfigRequest) -> dict:
-    try:
-        return save_changan_auto_login_config(
-            enabled=payload.enabled,
-            changan_username=payload.changan_username,
-            changan_password=payload.changan_password.get_secret_value(),
-        )
-    except ChanganAutoLoginConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/platform-sessions/changan/auto-login/test")
-def test_changan_auto_login() -> dict:
-    try:
-        return test_changan_auto_login_config(get_site_config("changan"))
-    except ChanganAutoLoginConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ChanganAutoLoginTestError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.delete("/api/platform-sessions/changan/auto-login")
-def remove_changan_auto_login_config() -> dict:
-    try:
-        return delete_changan_auto_login_config()
-    except ChanganAutoLoginConfigError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/exposure-platforms")
@@ -1350,7 +1459,8 @@ def platform_session_launch(platform: str) -> dict:
 
 
 @app.post("/api/platform-sessions/{platform}/remote-login/start")
-def platform_session_remote_login_start(platform: str) -> dict:
+def platform_session_remote_login_start(platform: str, request: Request) -> dict:
+    _require_module(request, "file_monitoring")
     try:
         return start_remote_browser_login(platform)
     except ValueError as exc:
@@ -1360,7 +1470,8 @@ def platform_session_remote_login_start(platform: str) -> dict:
 
 
 @app.get("/api/platform-sessions/remote-login/{session_id}")
-def platform_session_remote_login_state(session_id: str) -> dict:
+def platform_session_remote_login_state(session_id: str, request: Request) -> dict:
+    _require_module(request, "file_monitoring")
     try:
         return get_remote_browser_state(session_id)
     except ValueError as exc:
@@ -1369,16 +1480,29 @@ def platform_session_remote_login_state(session_id: str) -> dict:
 
 @app.websocket("/api/platform-sessions/remote-login/{session_id}/rfb")
 async def platform_session_remote_login_rfb(websocket: WebSocket, session_id: str) -> None:
+    ticket = str(websocket.query_params.get("ticket") or "")
+    if not validate_remote_browser_ticket(session_id, ticket):
+        await websocket.close(code=1008)
+        return
     await proxy_remote_browser_rfb(session_id, websocket)
 
 
 @app.websocket("/api/platform-sessions/remote-login/{session_id}/stream")
 async def platform_session_remote_login_stream(websocket: WebSocket, session_id: str) -> None:
+    ticket = str(websocket.query_params.get("ticket") or "")
+    if not validate_remote_browser_ticket(session_id, ticket):
+        await websocket.close(code=1008)
+        return
     await proxy_remote_browser_stream(session_id, websocket)
 
 
 @app.post("/api/platform-sessions/remote-login/{session_id}/control")
-def platform_session_remote_login_control(session_id: str, payload: RemoteBrowserActionRequest) -> dict:
+def platform_session_remote_login_control(
+    session_id: str,
+    payload: RemoteBrowserActionRequest,
+    request: Request,
+) -> dict:
+    _require_module(request, "file_monitoring")
     try:
         return control_remote_browser(
             session_id,
@@ -1402,7 +1526,12 @@ def platform_session_remote_login_control(session_id: str, payload: RemoteBrowse
 
 
 @app.post("/api/platform-sessions/remote-login/{session_id}/finish")
-def platform_session_remote_login_finish(session_id: str, payload: PlatformSessionSaveRequest) -> dict:
+def platform_session_remote_login_finish(
+    session_id: str,
+    payload: PlatformSessionSaveRequest,
+    request: Request,
+) -> dict:
+    _require_module(request, "file_monitoring")
     try:
         return finish_remote_browser_login(session_id, account_label=payload.account_label)
     except ValueError as exc:
@@ -1410,7 +1539,8 @@ def platform_session_remote_login_finish(session_id: str, payload: PlatformSessi
 
 
 @app.delete("/api/platform-sessions/remote-login/{session_id}")
-def platform_session_remote_login_close(session_id: str) -> dict:
+def platform_session_remote_login_close(session_id: str, request: Request) -> dict:
+    _require_module(request, "file_monitoring")
     try:
         return close_remote_browser_login(session_id)
     except ValueError as exc:
@@ -1452,7 +1582,8 @@ def save_exposure_watchlist(payload: ExposureWatchlistRequest) -> dict:
 
 
 @app.delete("/api/exposure-watchlists/{watchlist_id}")
-def delete_exposure_watchlist_route(watchlist_id: int) -> dict:
+def delete_exposure_watchlist_route(watchlist_id: int, request: Request) -> dict:
+    _require_module(request, "file_monitoring")
     try:
         return delete_watchlist_payload(watchlist_id)
     except ValueError as exc:
@@ -1460,11 +1591,10 @@ def delete_exposure_watchlist_route(watchlist_id: int) -> dict:
 
 
 @app.post("/api/platform-sessions/{platform}/adaptive-login/start")
-def platform_session_adaptive_login_start(platform: str) -> dict:
+def platform_session_adaptive_login_start(platform: str, request: Request) -> dict:
+    _require_module(request, "file_monitoring")
     fallback_reason = "interactive desktop browser is unavailable"
-    if chaojiying_configured():
-        fallback_reason = "Chaojiying captcha recognition is configured"
-    elif visible_platform_login_available():
+    if visible_platform_login_available():
         try:
             return launch_platform_login(platform)
         except Exception as exc:
@@ -1524,33 +1654,6 @@ def document_exposures(
 @app.get("/api/document-exposures/summary")
 def document_exposure_summary(source_family: str | None = None) -> dict:
     return build_document_exposure_summary(source_family=source_family)
-
-
-@app.get("/api/document-exposures/page")
-def document_exposures_page(
-    watchlist_id: int | None = None,
-    review_status: str | None = None,
-    platform: str | None = None,
-    access_state: str | None = None,
-    source_family: str | None = None,
-    severity: str | None = None,
-    recent_hours: int | None = None,
-    query: str | None = None,
-    offset: int = 0,
-    limit: int = 20,
-) -> dict:
-    return list_document_exposures_page_payload(
-        watchlist_id=watchlist_id,
-        review_status=review_status,
-        platform=platform,
-        access_state=access_state,
-        source_family=source_family,
-        severity=severity,
-        recent_hours=recent_hours,
-        query=query,
-        offset=offset,
-        limit=limit,
-    )
 
 
 @app.get("/api/document-exposures/netdisk/source-states")
@@ -1618,18 +1721,85 @@ def document_exposure_review(hit_id: int, payload: DocumentExposureReviewRequest
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/api/bot/status")
+def bot_status(request: Request) -> dict:
+    _require_module(request, "file_monitoring")
+    return bot_config_status()
+
+
+@app.post("/api/bot/config")
+def save_bot_config(payload: BotConfigRequest, request: Request) -> dict:
+    _require_admin(request)
+    try:
+        status = set_bot_config(
+            provider=payload.provider,
+            bot_id=payload.bot_id,
+            chat_id=payload.chat_id,
+            websocket_url=payload.websocket_url,
+            webhook_url=payload.webhook_url,
+            webhook_key=payload.webhook_key,
+            secret=payload.secret,
+        )
+    except BotAssistantError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        from darkweb_collector.monitoring_notifications import notify_current_keyword_matches
+
+        config = load_bot_config()
+        if config.chat_ids or payload.provider != "wechat_work_aibot":
+            status["keyword_notification_scan"] = notify_current_keyword_matches(config=config)
+    except Exception:
+        logger.exception("failed to scan monitoring keyword notifications after bot config update")
+    return status
+
+
+@app.post("/api/bot/send")
+def send_bot(payload: BotSendRequest, request: Request) -> dict:
+    _require_admin(request)
+    config = load_bot_config(
+        provider=payload.provider,
+        bot_id=payload.bot_id,
+        chat_id=payload.chat_id,
+        websocket_url=payload.websocket_url,
+        webhook_url=payload.webhook_url,
+        webhook_key=payload.webhook_key,
+        secret=payload.secret,
+        dry_run=payload.dry_run,
+    )
+    try:
+        if payload.type == "digest":
+            intelligence_payload = _reload_api_modules().build_intelligence_payload()
+            return send_intelligence_digest(intelligence_payload, config=config, limit=payload.limit)
+        if payload.type == "text":
+            if not payload.content:
+                raise HTTPException(status_code=400, detail="content is required for text messages")
+            return post_bot_payload(build_text_payload(payload.content), config)
+        if payload.type == "markdown":
+            if not payload.content:
+                raise HTTPException(status_code=400, detail="content is required for markdown messages")
+            return post_bot_payload(build_markdown_payload(payload.content), config)
+    except BotAssistantError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    raise HTTPException(status_code=400, detail="type must be one of: digest, text, markdown")
+
+
 @app.get("/api/code-monitoring/summary")
 def code_monitoring_summary() -> dict:
     return build_code_monitoring_summary()
 
 
 @app.get("/api/code-monitoring/github-app")
-def get_code_monitoring_github_app() -> dict:
+def get_code_monitoring_github_app(request: Request) -> dict:
+    _require_module(request, "file_monitoring")
     return github_app_config_status()
 
 
 @app.put("/api/code-monitoring/github-app")
-def configure_code_monitoring_github_app(payload: GitHubAppConfigRequest) -> dict:
+def configure_code_monitoring_github_app(
+    payload: GitHubAppConfigRequest,
+    request: Request,
+) -> dict:
+    _require_admin(request)
     try:
         return save_github_app_config(
             app_id=payload.app_id,
@@ -1643,7 +1813,8 @@ def configure_code_monitoring_github_app(payload: GitHubAppConfigRequest) -> dic
 
 
 @app.delete("/api/code-monitoring/github-app")
-def remove_code_monitoring_github_app() -> dict:
+def remove_code_monitoring_github_app(request: Request) -> dict:
+    _require_admin(request)
     try:
         return delete_github_app_config()
     except GitHubAppConfigError as exc:
@@ -1666,112 +1837,6 @@ def delete_code_monitoring_watchlist(watchlist_id: int) -> dict:
         return delete_code_watchlist_payload(watchlist_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/code-monitoring/watchlists/{watchlist_id}/notifications")
-def code_monitoring_watchlist_notifications(watchlist_id: int) -> dict:
-    try:
-        return get_watchlist_notification_profile(watchlist_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.put("/api/code-monitoring/watchlists/{watchlist_id}/notifications")
-def update_code_monitoring_watchlist_notifications(
-    watchlist_id: int,
-    payload: WatchlistNotificationProfileRequest,
-) -> dict:
-    try:
-        return save_watchlist_notification_profile(
-            watchlist_id,
-            keywords=[item.model_dump() for item in payload.keywords],
-            wechat_enabled=payload.wechat_enabled,
-            dingtalk_enabled=payload.dingtalk_enabled,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.put("/api/code-monitoring/watchlists/{watchlist_id}/notifications/wechat")
-def update_code_monitoring_watchlist_wechat(
-    watchlist_id: int,
-    payload: WatchlistWeChatConfigRequest,
-) -> dict:
-    try:
-        return set_watchlist_wechat_config(
-            watchlist_id,
-            bot_id=payload.bot_id,
-            secret=payload.secret.get_secret_value(),
-            websocket_url=payload.websocket_url,
-        )
-    except (ValueError, BotAssistantError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/code-monitoring/watchlists/{watchlist_id}/notifications/wechat")
-def remove_code_monitoring_watchlist_wechat(watchlist_id: int) -> dict:
-    try:
-        return delete_watchlist_wechat_config(watchlist_id)
-    except (ValueError, BotAssistantError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.put("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk")
-def update_code_monitoring_watchlist_dingtalk(
-    watchlist_id: int,
-    payload: WatchlistDingTalkConfigRequest,
-) -> dict:
-    try:
-        return set_watchlist_dingtalk_config(
-            watchlist_id,
-            name=payload.name,
-            webhook_url=payload.webhook_url.get_secret_value(),
-            secret=payload.secret.get_secret_value(),
-        )
-    except (ValueError, DingTalkBotError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk")
-def remove_code_monitoring_watchlist_dingtalk(watchlist_id: int) -> dict:
-    try:
-        return delete_watchlist_dingtalk_config(watchlist_id)
-    except (ValueError, DingTalkBotError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.delete("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk/{endpoint_id}")
-def remove_code_monitoring_watchlist_dingtalk_endpoint(watchlist_id: int, endpoint_id: str) -> dict:
-    try:
-        return delete_watchlist_dingtalk_endpoint(watchlist_id, endpoint_id)
-    except (ValueError, DingTalkBotError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/code-monitoring/watchlists/{watchlist_id}/notifications/{channel}/test")
-def test_code_monitoring_watchlist_notification(
-    watchlist_id: int,
-    channel: str,
-    payload: WatchlistNotificationTestRequest,
-) -> dict:
-    content = payload.content.strip() or f"### 玄鉴威胁情报平台\n> 监测对象 {watchlist_id} 通知测试"
-    try:
-        return send_watchlist_test(watchlist_id, channel, content)
-    except (ValueError, BotAssistantError, DingTalkBotError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@app.post("/api/code-monitoring/watchlists/{watchlist_id}/notifications/dingtalk/{endpoint_id}/test")
-def test_code_monitoring_watchlist_dingtalk_endpoint(
-    watchlist_id: int,
-    endpoint_id: str,
-    payload: WatchlistNotificationTestRequest,
-) -> dict:
-    content = payload.content.strip() or f"### 玄鉴威胁情报平台\n> 监测对象 {watchlist_id} 钉钉通知测试"
-    try:
-        return send_watchlist_test(watchlist_id, "dingtalk", content, endpoint_id=endpoint_id)
-    except (ValueError, DingTalkBotError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/code-monitoring/watchlists/{watchlist_id}/scan")
@@ -1843,41 +1908,44 @@ def code_monitoring_hits(
     )
 
 
-@app.get("/api/code-monitoring/hits/page")
-def code_monitoring_hits_page(
-    query: str = "",
-    watchlist_id: int | None = None,
-    platform: str = "",
-    severity: str = "",
-    result_layer: str = "",
-    bucket: str = "all",
-    seen_after: str = "",
-    seen_before: str = "",
-    recent_hours: int | None = None,
-    offset: int = 0,
-    limit: int = 50,
-) -> dict:
-    try:
-        return search_code_hits_page(
-            query=query,
-            watchlist_id=watchlist_id,
-            platform=platform,
-            severity=severity,
-            result_layer=result_layer,
-            bucket=bucket,
-            seen_after=seen_after,
-            seen_before=seen_before,
-            recent_hours=recent_hours,
-            offset=offset,
-            limit=limit,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @app.get("/api/code-monitoring/hits/{hit_id}")
 def code_monitoring_hit_detail(hit_id: int) -> dict:
     payload = build_code_hit_detail(hit_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="code monitoring hit not found")
+    return payload
+
+
+@app.get("/api/agent/code-leaks")
+def agent_code_leaks(
+    watchlist_id: int | None = None,
+    review_status: str | None = None,
+    platform: str | None = None,
+    sensitive_type: str | None = None,
+    include_suppressed: bool = True,
+    limit: int = 50,
+) -> dict:
+    effective_limit = max(1, min(int(limit), 200))
+    hits = list_code_hits_payload(
+        watchlist_id=watchlist_id,
+        review_status=review_status,
+        platform=platform,
+        sensitive_type=sensitive_type,
+        include_suppressed=include_suppressed,
+        limit=effective_limit,
+    )
+    hits = hits[:effective_limit]
+    items = []
+    for hit in hits:
+        detail = build_agent_code_hit_detail(int(hit["id"]))
+        if detail is not None:
+            items.append(detail)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/agent/code-leaks/{hit_id}")
+def agent_code_leak_detail(hit_id: int) -> dict:
+    payload = build_agent_code_hit_detail(hit_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="code monitoring hit not found")
     return payload
@@ -1896,83 +1964,22 @@ def code_monitoring_review(hit_id: int, payload: CodeMonitoringReviewRequest) ->
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/bot/config")
-def save_bot_config(payload: BotConfigRequest) -> dict:
-    try:
-        status = set_bot_config(
-            provider=payload.provider,
-            bot_id=payload.bot_id,
-            chat_id=payload.chat_id,
-            websocket_url=payload.websocket_url,
-            webhook_url=payload.webhook_url,
-            webhook_key=payload.webhook_key,
-            secret=payload.secret,
-        )
-    except BotAssistantError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return status
 
 
-@app.delete("/api/bot/config")
-def remove_bot_config() -> dict:
-    try:
-        return delete_bot_config()
-    except BotAssistantError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+class TranslateTitlesRequest(BaseModel):
+    titles: list[str]
 
 
-@app.post("/api/bot/send")
-def send_bot(payload: BotSendRequest) -> dict:
-    config = load_bot_config(
-        provider=payload.provider,
-        bot_id=payload.bot_id,
-        chat_id=payload.chat_id,
-        websocket_url=payload.websocket_url,
-        webhook_url=payload.webhook_url,
-        webhook_key=payload.webhook_key,
-        secret=payload.secret,
-        dry_run=payload.dry_run,
-    )
-    try:
-        if payload.type == "digest":
-            intelligence_payload = _reload_api_modules().build_intelligence_payload()
-            return send_intelligence_digest(intelligence_payload, config=config, limit=payload.limit)
-        if payload.type == "text":
-            if not payload.content:
-                raise HTTPException(status_code=400, detail="content is required for text messages")
-            return post_bot_payload(build_text_payload(payload.content), config)
-        if payload.type == "markdown":
-            if not payload.content:
-                raise HTTPException(status_code=400, detail="content is required for markdown messages")
-            return post_bot_payload(build_markdown_payload(payload.content), config)
-    except BotAssistantError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    raise HTTPException(status_code=400, detail="type must be one of: digest, text, markdown")
+@app.post("/api/translate/titles")
+def translate_titles(payload: TranslateTitlesRequest) -> dict:
+    """独立的标题翻译API，异步翻译标题列表，不阻塞主数据加载。"""
+    from darkweb_collector.detail_i18n import translate_event_title_live
 
-
-@app.post("/api/dingtalk/config")
-def save_dingtalk_config(payload: DingTalkConfigRequest) -> dict:
-    try:
-        status = set_dingtalk_config(webhook_url=payload.webhook_url, secret=payload.secret)
-    except DingTalkBotError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return status
-
-
-@app.delete("/api/dingtalk/config")
-def remove_dingtalk_config() -> dict:
-    try:
-        return delete_dingtalk_config()
-    except DingTalkBotError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/dingtalk/send")
-def send_dingtalk(payload: DingTalkSendRequest) -> dict:
-    if not payload.content.strip():
-        raise HTTPException(status_code=400, detail="content is required")
-    try:
-        config = load_dingtalk_config(dry_run=payload.dry_run)
-        return post_dingtalk_markdown(payload.content, config=config, title=payload.title)
-    except DingTalkBotError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    results: dict[str, str] = {}
+    for title in payload.titles[:50]:  # 限制每次最多翻译50个
+        try:
+            translated = translate_event_title_live(title, fallback=title)
+            results[title] = translated
+        except Exception:
+            results[title] = title
+    return {"translations": results}

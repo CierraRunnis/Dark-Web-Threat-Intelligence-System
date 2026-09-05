@@ -6,15 +6,7 @@ import subprocess
 import sys
 import time
 
-from darkweb_collector.bot_assistant import (
-    build_markdown_payload,
-    build_text_payload,
-    load_bot_config,
-    post_bot_payload,
-    send_intelligence_digest,
-)
 from darkweb_collector.config import get_site_config, load_site_configs
-from darkweb_collector.api_data import build_intelligence_payload
 from darkweb_collector.orchestrator import enqueue_due_sites, run_site_once, show_runs
 from darkweb_collector.public_vulnerabilities import sync_public_vulnerability_feed
 from darkweb_collector.queueing import build_worker_command, queue_for_seed
@@ -49,17 +41,12 @@ def build_parser() -> ArgumentParser:
     sync_ransomware_parser = subparsers.add_parser("sync-ransomware-live")
     sync_ransomware_parser.add_argument("--limit", type=int, default=0)
 
-    bot_parser = subparsers.add_parser("send-bot-message")
-    bot_parser.add_argument("--type", choices=["digest", "text", "markdown"], default="digest")
-    bot_parser.add_argument("--content", default="")
-    bot_parser.add_argument("--provider", default=None)
-    bot_parser.add_argument("--bot-id", default=None)
-    bot_parser.add_argument("--chat-id", default=None)
-    bot_parser.add_argument("--websocket-url", default=None)
-    bot_parser.add_argument("--webhook-url", default=None)
-    bot_parser.add_argument("--secret", default=None)
-    bot_parser.add_argument("--limit", type=int, default=5)
-    bot_parser.add_argument("--dry-run", action="store_true")
+    normalizer_parser = subparsers.add_parser("normalizer")
+    normalizer_parser.add_argument("--once", action="store_true")
+    normalizer_parser.add_argument("--force", action="store_true")
+    normalizer_parser.add_argument("--poll-seconds", type=int, default=5)
+    normalizer_parser.add_argument("--debounce-seconds", type=int, default=60)
+    normalizer_parser.add_argument("--max-delay-seconds", type=int, default=300)
 
     return parser
 
@@ -74,8 +61,6 @@ def _run_list_sites() -> int:
                 "profile": config.profile,
                 "seed_fetch_mode": config.seed_fetch_mode,
                 "detail_fetch_mode": config.detail_fetch_mode,
-                "browser_queue": config.browser_queue,
-                "max_concurrent_details": config.max_concurrent_details,
                 "seed_urls": list(config.seed_urls),
             }
         )
@@ -110,28 +95,22 @@ def _run_site_continuous(site_name: str, interval_seconds: int | None) -> int:
 
 def _enqueue_due() -> int:
     try:
-        from darkweb_collector.tasks import crawl_seed, enqueue_ransomware_live_sync
+        from darkweb_collector.tasks import crawl_seed
     except ImportError as exc:
         raise RuntimeError("Celery is required to enqueue queued crawl jobs") from exc
 
     def seed_dispatcher(config) -> str | None:
-        queue_name = queue_for_seed(config)
+        queue_name = queue_for_seed(config.seed_fetch_mode)
         async_result = crawl_seed.apply_async(
             kwargs={"site_name": config.site_name, "force": False},
             queue=queue_name,
         )
         return str(async_result.id)
 
-    dispatched = enqueue_due_sites(seed_dispatcher=seed_dispatcher, state_store=get_state_store(prefer_redis=True))
-    ransomware_job_id = enqueue_ransomware_live_sync()
-    if ransomware_job_id:
-        dispatched.append(
-            {
-                "site_name": "ransomware_live",
-                "job_id": ransomware_job_id,
-                "queue_name": "seed_http",
-            }
-        )
+    dispatched = enqueue_due_sites(
+        seed_dispatcher=seed_dispatcher,
+        state_store=get_state_store(prefer_redis=True),
+    )
     print(json.dumps(dispatched, ensure_ascii=False, indent=2))
     return 0
 
@@ -148,50 +127,42 @@ def _show_runs(limit: int) -> int:
 
 
 def _sync_public_vulns(sample_file: str | None, limit: int) -> int:
-    print(
-        json.dumps(
-            sync_public_vulnerability_feed(
-                sample_file=sample_file,
-                limit=limit,
-                refresh_normalized=False,
-            ),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    print(json.dumps(sync_public_vulnerability_feed(sample_file=sample_file, limit=limit), ensure_ascii=False, indent=2))
     return 0
 
 
 def _sync_ransomware_live(limit: int) -> int:
-    print(
-        json.dumps(
-            sync_ransomware_live_victims(limit=limit, refresh_normalized=False),
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    print(json.dumps(sync_ransomware_live_victims(limit=limit), ensure_ascii=False, indent=2))
     return 0
 
 
-def _send_bot_message(args) -> int:
-    config = load_bot_config(
-        provider=args.provider,
-        bot_id=args.bot_id,
-        chat_id=args.chat_id,
-        websocket_url=args.websocket_url,
-        webhook_url=args.webhook_url,
-        secret=args.secret,
-        dry_run=args.dry_run or None,
+def _run_normalizer(
+    *,
+    once: bool,
+    force: bool,
+    poll_seconds: int,
+    debounce_seconds: int,
+    max_delay_seconds: int,
+) -> int:
+    from darkweb_collector.normalizer_service import (
+        refresh_pending_normalization,
+        run_normalizer_service,
     )
-    if args.type == "digest":
-        payload = build_intelligence_payload()
-        result = send_intelligence_digest(payload, config=config, limit=args.limit)
-    else:
-        if not args.content:
-            raise ValueError("--content is required for text or markdown messages")
-        message_payload = build_text_payload(args.content) if args.type == "text" else build_markdown_payload(args.content)
-        result = post_bot_payload(message_payload, config)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    if once:
+        result = refresh_pending_normalization(
+            force=force,
+            debounce_seconds=debounce_seconds,
+            max_delay_seconds=max_delay_seconds,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    run_normalizer_service(
+        poll_seconds=poll_seconds,
+        debounce_seconds=debounce_seconds,
+        max_delay_seconds=max_delay_seconds,
+        force=force,
+    )
     return 0
 
 
@@ -219,8 +190,14 @@ def main(argv: list[str] | None = None) -> int:
         return _sync_public_vulns(args.sample_file, args.limit)
     if args.command == "sync-ransomware-live":
         return _sync_ransomware_live(args.limit)
-    if args.command == "send-bot-message":
-        return _send_bot_message(args)
+    if args.command == "normalizer":
+        return _run_normalizer(
+            once=args.once,
+            force=args.force,
+            poll_seconds=args.poll_seconds,
+            debounce_seconds=args.debounce_seconds,
+            max_delay_seconds=args.max_delay_seconds,
+        )
     parser.error(f"unsupported command: {args.command}")
     return 2
 

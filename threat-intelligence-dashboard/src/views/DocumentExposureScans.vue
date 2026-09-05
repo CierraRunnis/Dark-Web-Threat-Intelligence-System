@@ -60,6 +60,7 @@
               <span>来源家族</span>
               <el-select v-model="scanForm.sourceFamilies" multiple collapse-tags placeholder="选择来源家族">
                 <el-option label="网盘聚合" value="netdisk_aggregator" />
+                <el-option label="搜索引擎" value="search_engine" />
                 <el-option label="文档平台" value="document_library" />
               </el-select>
             </div>
@@ -101,8 +102,8 @@
         </div>
         <div class="ti-card-body">
           <div class="ti-table-shell">
-            <el-table :data="scanRuns" table-layout="fixed" style="width: 100%">
-              <el-table-column type="expand" :width="scanExpandColumnWidth">
+            <el-table :data="scanRuns" table-layout="auto" style="width: 100%">
+              <el-table-column type="expand" width="44">
                 <template #default="{ row }">
                   <div class="source-stats-detail">
                     <div v-if="!sourceStatsRows(row).length" class="source-stats-empty">暂无来源统计</div>
@@ -124,26 +125,26 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column prop="finishedAt" label="完成时间" :width="scanFinishedColumnWidth">
+              <el-table-column prop="finishedAt" label="完成时间" min-width="180">
                 <template #default="{ row }">
                   {{ formatDateTime(row.finishedAt) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showScanWatchlistColumn" prop="watchlistName" label="监测对象" :width="scanWatchlistColumnWidth" show-overflow-tooltip />
-              <el-table-column v-if="showScanSourceFamiliesColumn" label="来源家族" :min-width="scanSourceFamiliesMinWidth">
+              <el-table-column prop="watchlistName" label="监测对象" min-width="180" />
+              <el-table-column label="来源家族" min-width="220">
                 <template #default="{ row }">
                   {{ formatSourceFamilies(row.sourceFamilies) }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showScanCandidateColumn" prop="candidateCount" label="候选数" :width="scanMetricColumnWidth" />
-              <el-table-column prop="hitCount" label="命中数" :width="scanMetricColumnWidth" />
-              <el-table-column v-if="showScanErrorColumn" prop="errorCount" label="错误数" :width="scanMetricColumnWidth" />
-              <el-table-column v-if="showScanSourceStatsColumn" label="源统计" :min-width="scanSourceStatsMinWidth">
+              <el-table-column prop="candidateCount" label="候选数" width="100" />
+              <el-table-column prop="hitCount" label="命中数" width="100" />
+              <el-table-column prop="errorCount" label="错误数" width="100" />
+              <el-table-column label="源统计" min-width="190">
                 <template #default="{ row }">
                   {{ formatSourceStatsSummary(row) }}
                 </template>
               </el-table-column>
-              <el-table-column prop="status" label="状态" :width="scanStatusColumnWidth">
+              <el-table-column prop="status" label="状态" width="120">
                 <template #default="{ row }">
                   {{ statusLabelMap[row.status] || row.status || 'unknown' }}
                 </template>
@@ -169,7 +170,6 @@ const scanLoading = ref(false)
 const continuousLoading = ref(false)
 const watchlists = ref([])
 const scanRuns = ref([])
-const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const lastRunMessage = ref('')
 const lastRunErrors = ref([])
 const continuousIntervalHours = ref(1)
@@ -200,21 +200,9 @@ const statusLabelMap = {
 
 const sourceFamilyLabelMap = {
   netdisk_aggregator: '网盘聚合',
+  search_engine: '搜索引擎',
   document_library: '文档平台',
 }
-
-const showScanWatchlistColumn = computed(() => viewportWidth.value >= 1180)
-const showScanSourceFamiliesColumn = computed(() => viewportWidth.value >= 1500)
-const showScanCandidateColumn = computed(() => viewportWidth.value >= 1280)
-const showScanErrorColumn = computed(() => viewportWidth.value >= 1180)
-const showScanSourceStatsColumn = computed(() => viewportWidth.value >= 1680)
-const scanExpandColumnWidth = computed(() => 42)
-const scanFinishedColumnWidth = computed(() => viewportWidth.value < 1180 ? 128 : viewportWidth.value < 1500 ? 142 : 160)
-const scanWatchlistColumnWidth = computed(() => viewportWidth.value < 1500 ? 136 : 150)
-const scanSourceFamiliesMinWidth = computed(() => 190)
-const scanMetricColumnWidth = computed(() => viewportWidth.value < 1500 ? 84 : 90)
-const scanSourceStatsMinWidth = computed(() => 170)
-const scanStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 88 : 94)
 
 const scanForm = reactive({
   watchlistId: null,
@@ -279,9 +267,7 @@ function defaultPageLimit(sourceFamilies) {
 function applyWatchlist(payload) {
   if (!payload) return
   scanForm.watchlistId = payload.id
-  scanForm.sourceFamilies = Array.isArray(payload.source_families)
-    ? payload.source_families.filter((item) => item === 'netdisk_aggregator' || item === 'document_library')
-    : []
+  scanForm.sourceFamilies = Array.isArray(payload.source_families) ? [...payload.source_families] : []
   scanForm.fileTypes = Array.isArray(payload.file_types) ? [...payload.file_types] : []
   scanForm.pageLimit = Number(payload.page_limit || defaultPageLimit(scanForm.sourceFamilies))
   scanForm.detailFetch = isNetdiskOnly(scanForm.sourceFamilies) ? false : Boolean(payload.detail_fetch ?? true)
@@ -421,13 +407,7 @@ watch(
   }
 )
 
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth
-}
-
 onMounted(async () => {
-  updateViewportWidth()
-  window.addEventListener('resize', updateViewportWidth)
   await loadWatchlists()
   await loadScans()
   await loadContinuousStatus()
@@ -438,7 +418,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', updateViewportWidth)
   if (continuousTimer) {
     window.clearInterval(continuousTimer)
     continuousTimer = null

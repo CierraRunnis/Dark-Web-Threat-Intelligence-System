@@ -8,9 +8,6 @@ html,
 body,
 #app {
   min-height: 100%;
-  width: 100%;
-  max-width: 100%;
-  overflow-x: hidden;
 }
 
 html {
@@ -101,7 +98,6 @@ select {
 }
 
 .ti-card {
-  min-width: 0;
   background: var(--ti-surface-default);
   border-radius: var(--ti-radius-lg);
   border: 1px solid var(--ti-border-default);
@@ -120,11 +116,9 @@ select {
 }
 
 .ti-card-header {
-  min-width: 0;
   padding: 18px 22px;
   border-bottom: 1px solid var(--ti-border-soft);
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
@@ -148,14 +142,12 @@ select {
 }
 
 .ti-card-body {
-  min-width: 0;
   padding: 20px 22px 22px;
 }
 
 .ti-page {
   display: flex;
   flex-direction: column;
-  min-width: 0;
   gap: 26px;
 }
 
@@ -165,7 +157,6 @@ select {
 }
 
 .ti-panel {
-  min-width: 0;
   padding: 22px;
   border: 1px solid var(--ti-border-default);
   border-radius: var(--ti-radius-lg);
@@ -208,16 +199,7 @@ select {
 }
 
 .ti-table-shell {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
   overflow-x: auto;
-}
-
-.table-footer,
-.el-pagination {
-  max-width: 100%;
-  min-width: 0;
 }
 
 .ti-card-list {
@@ -297,30 +279,8 @@ select {
   line-height: 1.6;
 }
 
-.table-actions,
-.row-actions,
-.review-actions,
-.netdisk-row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.table-actions .el-button,
-.row-actions .el-button,
-.review-actions .el-button,
-.netdisk-row-actions .el-button {
-  flex: 0 0 auto;
-  margin-left: 0 !important;
-  white-space: nowrap;
-}
-
 .el-pagination {
   gap: 6px;
-  flex-wrap: wrap;
-  justify-content: flex-start;
 }
 
 .el-radio-button__inner {
@@ -388,10 +348,6 @@ select {
 }
 
 @media (max-width: 767px) {
-  .el-pagination {
-    width: 100%;
-  }
-
   .ti-card {
     border-radius: 18px;
   }

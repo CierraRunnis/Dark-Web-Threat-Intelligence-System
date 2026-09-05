@@ -11,11 +11,6 @@ from darkweb_collector.utils import dump_json, dump_text, safe_stem
 from urllib.parse import urlparse
 
 
-def _detail_artifacts_exist(output_dir, artifact_stem: str) -> bool:
-    details_dir = output_dir / "details"
-    return all((details_dir / f"{artifact_stem}.{suffix}").exists() for suffix in ("html", "json", "png"))
-
-
 class ChaosAdapter(SiteAdapter):
     site_name = "chaos"
 
@@ -51,9 +46,6 @@ class ChaosAdapter(SiteAdapter):
         tasks: list[DetailTask] = []
         with get_db_connection() as connection:
             for victim in seed_result.payload["victims"]:
-                artifact_stem = safe_stem(
-                    f"{victim['content_hash'][:10]}_{victim.get('domain') or victim['name']}"
-                )
                 snapshot = get_victim_snapshot(
                     connection,
                     site_name=victim["site_name"],
@@ -62,12 +54,7 @@ class ChaosAdapter(SiteAdapter):
                     domain=victim.get("domain"),
                     status=victim["status"],
                 )
-                if (
-                    snapshot
-                    and snapshot["content_hash"] == victim["content_hash"]
-                    and snapshot["last_detail_fetch_status"] == "ok"
-                    and _detail_artifacts_exist(config.output_dir, artifact_stem)
-                ):
+                if snapshot and snapshot["content_hash"] == victim["content_hash"] and snapshot["last_detail_fetch_status"] == "ok":
                     continue
                 tasks.append(
                     DetailTask(
@@ -78,7 +65,9 @@ class ChaosAdapter(SiteAdapter):
                             "name": victim["name"],
                             "domain": victim.get("domain"),
                             "status": victim["status"],
-                            "artifact_stem": artifact_stem,
+                            "artifact_stem": safe_stem(
+                                f"{victim['content_hash'][:10]}_{victim.get('domain') or victim['name']}"
+                            ),
                         },
                     )
                 )

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -17,12 +16,6 @@ from darkweb_collector.sites.darkforums import (
 
 
 CRACKED_BASE_URL = "https://cracked.st"
-
-
-def _safe_print(value: object) -> None:
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    text = str(value).encode(encoding, errors="replace").decode(encoding, errors="replace")
-    print(text)
 
 FORUM_SECTIONS = {
     "other_leaks": (
@@ -256,7 +249,7 @@ def normalize_cracked_timestamp(value: str | None, *, collected_at_utc: str | No
 
 def parse_cracked_list(url: str, html: str, max_topics: int = 5) -> dict:
     start_time = time.time()
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] parsing list: {url}")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] parsing list: {url}")
 
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
     title = _clean_html_text(title_match.group(1)) if title_match else ""
@@ -266,7 +259,7 @@ def parse_cracked_list(url: str, html: str, max_topics: int = 5) -> dict:
     seen_tids: set[str] = set()
 
     matches = list(TOPIC_RE.finditer(html))
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] found {len(matches)} topic matches")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] found {len(matches)} topic matches")
 
     for match in matches:
         tid, href, raw_title = match.groups()
@@ -293,14 +286,14 @@ def parse_cracked_list(url: str, html: str, max_topics: int = 5) -> dict:
             "potential_victim": _extract_victim_from_title(clean_title),
         }
         topics.append(topic)
-        _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] topic {len(topics)}: {clean_title[:70]}")
+        print(f"[{time.strftime('%H:%M:%S')}] [cracked] topic {len(topics)}: {clean_title[:70]}")
 
         if len(topics) >= max_topics:
-            _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] reached cap of {max_topics} topics")
+            print(f"[{time.strftime('%H:%M:%S')}] [cracked] reached cap of {max_topics} topics")
             break
 
     elapsed = time.time() - start_time
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] list parse done in {elapsed:.2f}s, {len(topics)} topics")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] list parse done in {elapsed:.2f}s, {len(topics)} topics")
 
     return {
         "site_name": "cracked",
@@ -315,7 +308,7 @@ def parse_cracked_list(url: str, html: str, max_topics: int = 5) -> dict:
 
 def parse_cracked_detail(url: str, html: str) -> dict:
     start_time = time.time()
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] parsing detail: {url}")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] parsing detail: {url}")
 
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
     title = _clean_html_text(title_match.group(1)) if title_match else ""
@@ -326,13 +319,13 @@ def parse_cracked_detail(url: str, html: str) -> dict:
 
     content_match = POST_BODY_RE.search(post_block)
     content = _clean_html_text(content_match.group(1)) if content_match else ""
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] content length: {len(content)} chars")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] content length: {len(content)} chars")
 
     author = _extract_author(post_block, html)
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] author: {author}")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] author: {author}")
 
     timestamp = _extract_timestamp_text(post_block, html)
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] timestamp: {timestamp}")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] timestamp: {timestamp}")
 
     victims = extract_victims_from_content(content, title)
     attackers = extract_attackers_from_content(content)
@@ -353,7 +346,7 @@ def parse_cracked_detail(url: str, html: str) -> dict:
     attachments = [urljoin(url, match) for match in attachment_matches]
 
     elapsed = time.time() - start_time
-    _safe_print(f"[{time.strftime('%H:%M:%S')}] [cracked] detail parse done in {elapsed:.2f}s")
+    print(f"[{time.strftime('%H:%M:%S')}] [cracked] detail parse done in {elapsed:.2f}s")
 
     collected_at_utc = datetime.now(timezone.utc).isoformat()
     return {

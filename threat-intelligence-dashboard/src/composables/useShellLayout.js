@@ -4,7 +4,8 @@ const shellLayoutKey = Symbol('shell-layout')
 
 export function provideShellLayout() {
   const state = reactive({
-    sidebarCollapsed: false
+    sidebarCollapsed: typeof window !== 'undefined'
+      && window.matchMedia('(min-width: 901px)').matches
   })
 
   const shell = {

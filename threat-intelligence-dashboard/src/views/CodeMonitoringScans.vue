@@ -12,7 +12,7 @@
               <el-option label="每 4 小时" :value="4" />
               <el-option label="每 8 小时" :value="8" />
             </el-select>
-            <el-button type="success" :loading="continuousLoading" :disabled="continuousStartDisabled" @click="startContinuousScan">开始长期扫描</el-button>
+            <el-button type="success" :loading="continuousLoading" :disabled="continuousStartDisabled" @click="startContinuousScan">{{ continuousStartButtonText }}</el-button>
             <el-button type="danger" plain :loading="continuousLoading" :disabled="continuousStopDisabled" @click="stopContinuousScan">停止长期扫描</el-button>
           </div>
         </div>
@@ -20,7 +20,7 @@
           <div class="status-grid status-grid--compact">
             <div class="metric-card">
               <span>长期任务</span>
-              <strong>{{ continuousStatus.enabled ? '运行中' : '未启动' }}</strong>
+              <strong>{{ continuousStatusText }}</strong>
             </div>
             <div class="metric-card">
               <span>运行任务数</span>
@@ -66,7 +66,7 @@
             <p class="panel-note">代码监测长期后台扫描按监测对象独立运行，当前页面仅展示所选监测对象的长期任务状态，并沿用该对象的 GitHub / GitLab / Gitee 平台配置、详情抓取和不受限的搜索/结果预算。</p>
             <p v-if="(continuousStatus.active_watchlist_count || 0) > 1" class="panel-note">当前共有 {{ continuousStatus.active_watchlist_count }} 个监测对象在执行长期扫描。</p>
             <p v-if="lastRunMessage" class="panel-note">{{ lastRunMessage }}</p>
-            <p v-if="continuousStatus.last_error" class="panel-note panel-note--danger">后台扫描错误：{{ continuousStatus.last_error }}</p>
+            <p v-if="continuousErrorText" class="panel-note panel-note--danger">{{ continuousErrorText }}</p>
             <p v-if="lastRunErrors.length" class="panel-note panel-note--danger">
               最近扫描错误：{{ lastRunErrors.slice(0, 3).join('；') }}
             </p>
@@ -83,24 +83,24 @@
         </div>
         <div class="ti-card-body">
           <div class="ti-table-shell">
-            <el-table :data="scanRuns" table-layout="fixed" style="width: 100%">
-              <el-table-column prop="finishedAt" label="完成时间" :width="scanFinishedColumnWidth">
+            <el-table :data="scanRuns" table-layout="auto">
+              <el-table-column prop="finishedAt" label="完成时间" min-width="180">
                 <template #default="{ row }">
                   {{ formatDateTime(row.finishedAt) || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showScanWatchlistColumn" prop="watchlistName" label="监测对象" :width="scanWatchlistColumnWidth" show-overflow-tooltip />
-              <el-table-column v-if="showScanPlatformsColumn" label="扫描平台" :min-width="scanPlatformsMinWidth">
+              <el-table-column prop="watchlistName" label="监测对象" min-width="180" />
+              <el-table-column label="扫描平台" min-width="220">
                 <template #default="{ row }">
                   {{ Array.isArray(row.platforms) ? row.platforms.join(' / ') : '-' }}
                 </template>
               </el-table-column>
-              <el-table-column v-if="showScanCandidateColumn" prop="candidateCount" label="候选数" :width="scanMetricColumnWidth" />
-              <el-table-column prop="hitCount" label="命中数" :width="scanMetricColumnWidth" />
-              <el-table-column v-if="showScanSensitiveColumn" prop="sensitiveHitCount" label="敏感命中" :width="scanSensitiveColumnWidth" />
-              <el-table-column v-if="showScanSensitiveColumn" prop="clueHitCount" label="线索命中" :width="scanSensitiveColumnWidth" />
-              <el-table-column v-if="showScanErrorColumn" prop="errorCount" label="错误数" :width="scanMetricColumnWidth" />
-              <el-table-column prop="status" label="状态" :width="scanStatusColumnWidth" />
+              <el-table-column prop="candidateCount" label="候选数" width="100" />
+              <el-table-column prop="hitCount" label="命中数" width="100" />
+              <el-table-column prop="sensitiveHitCount" label="敏感命中" width="110" />
+              <el-table-column prop="clueHitCount" label="线索命中" width="110" />
+              <el-table-column prop="errorCount" label="错误数" width="100" />
+              <el-table-column prop="status" label="状态" width="120" />
             </el-table>
           </div>
         </div>
@@ -123,7 +123,6 @@ const scanLoading = ref(false)
 const continuousLoading = ref(false)
 const watchlists = ref([])
 const scanRuns = ref([])
-const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 const lastRunMessage = ref('')
 const lastRunErrors = ref([])
 const continuousIntervalHours = ref(1)
@@ -168,6 +167,35 @@ const scanForm = reactive({
   enabledRuleKeys: ['api_key', 'token', 'ak_sk', 'db_url', 'jwt_secret', 'redis_url', 'private_key', 'internal_url', 'password'],
 })
 
+const continuousHasError = computed(() => {
+  return Boolean(continuousStatus.value.enabled && !continuousStatus.value.running && continuousStatus.value.last_error)
+})
+
+const continuousIsRetrying = computed(() => {
+  const errorText = String(continuousStatus.value.last_error || '').toLowerCase()
+  return Boolean(continuousHasError.value && errorText.includes('database is locked'))
+})
+
+const continuousStatusText = computed(() => {
+  if (!continuousStatus.value.enabled) return '未启动'
+  if (continuousStatus.value.running) return '运行中'
+  if (continuousIsRetrying.value) return '等待重试'
+  if (continuousHasError.value) return '异常'
+  return '已启动'
+})
+
+const continuousStartButtonText = computed(() => {
+  if (continuousIsRetrying.value) return '等待重试'
+  if (continuousHasError.value) return '后台异常'
+  return '开始长期扫描'
+})
+
+const continuousErrorText = computed(() => {
+  const errorText = String(continuousStatus.value.last_error || '')
+  if (!errorText) return ''
+  return continuousIsRetrying.value ? `后台扫描错误：${errorText}（正在自动重试）` : `后台扫描错误：${errorText}`
+})
+
 const continuousStartDisabled = computed(() => {
   const selectedId = Number(scanForm.watchlistId || 0)
   if (!selectedId) return true
@@ -175,17 +203,6 @@ const continuousStartDisabled = computed(() => {
 })
 
 const continuousStopDisabled = computed(() => !continuousStatus.value.enabled)
-const showScanWatchlistColumn = computed(() => viewportWidth.value >= 1180)
-const showScanPlatformsColumn = computed(() => viewportWidth.value >= 1500)
-const showScanCandidateColumn = computed(() => viewportWidth.value >= 1280)
-const showScanSensitiveColumn = computed(() => viewportWidth.value >= 1680)
-const showScanErrorColumn = computed(() => viewportWidth.value >= 1180)
-const scanFinishedColumnWidth = computed(() => viewportWidth.value < 1180 ? 128 : viewportWidth.value < 1500 ? 142 : 160)
-const scanWatchlistColumnWidth = computed(() => viewportWidth.value < 1500 ? 136 : 150)
-const scanPlatformsMinWidth = computed(() => 190)
-const scanMetricColumnWidth = computed(() => viewportWidth.value < 1500 ? 84 : 90)
-const scanSensitiveColumnWidth = computed(() => 96)
-const scanStatusColumnWidth = computed(() => viewportWidth.value < 1500 ? 88 : 94)
 
 function formatDateTime(value) {
   return formatShanghaiDateTime(value)
@@ -280,6 +297,13 @@ async function startContinuousScan() {
       watchlist_id: scanForm.watchlistId,
     })
     continuousStatus.value = payload
+    lastRunMessage.value = payload.message || '已开启代码监测长期扫描'
+    await loadContinuousStatus()
+    await loadScans()
+    window.setTimeout(() => {
+      void loadContinuousStatus()
+      void loadScans()
+    }, 2000)
     ElMessage.success(payload.message || '已开启代码监测长期扫描')
   } catch (error) {
     ElMessage.error(error.message || '开启代码监测长期扫描失败')
@@ -318,13 +342,7 @@ watch(
   },
 )
 
-function updateViewportWidth() {
-  viewportWidth.value = window.innerWidth
-}
-
 onMounted(async () => {
-  updateViewportWidth()
-  window.addEventListener('resize', updateViewportWidth)
   await loadWatchlists()
   await loadScans()
   await loadContinuousStatus()
@@ -335,7 +353,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', updateViewportWidth)
   if (continuousTimer) {
     window.clearInterval(continuousTimer)
     continuousTimer = null

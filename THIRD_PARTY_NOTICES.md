@@ -1,5 +1,7 @@
 # Third-Party Notices
 
+This file retains the upstream repository's attribution notices. The Windows launcher described below is not included in this source snapshot.
+
 ## Microsoft Garnet
 
 The Windows launcher downloads Microsoft Garnet from the official

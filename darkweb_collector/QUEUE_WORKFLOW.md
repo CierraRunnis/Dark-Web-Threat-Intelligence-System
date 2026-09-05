@@ -39,8 +39,7 @@ Start workers:
 ```bash
 python scripts/crawl.py worker --queue seed_http
 python scripts/crawl.py worker --queue detail_http
-python scripts/crawl.py worker --queue browser_public
-python scripts/crawl.py worker --queue browser_onion
+python scripts/crawl.py worker --queue browser_render
 ```
 
 Inspect recent run records:
@@ -53,8 +52,4 @@ python scripts/crawl.py show-runs --limit 20
 
 - Site definitions live in `sites.yaml`.
 - Results and run audit rows share the same SQLite database.
-- Public-web and Onion browser tasks are isolated in `browser_public` and
-  `browser_onion`. The legacy `browser_render` queue is consumed only for
-  upgrade compatibility.
-- Detail execution is capped per site by `max_concurrent_details` so a busy
-  source cannot occupy every worker.
+- Browser tasks are isolated in `browser_render` and capped with a single worker process.

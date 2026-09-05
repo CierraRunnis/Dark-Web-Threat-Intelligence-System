@@ -13,12 +13,12 @@ from pathlib import Path
 import re
 import sqlite3
 import ssl
-from threading import Lock, Thread
+from threading import Lock
 import time
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import parse_qsl, quote_plus, urlencode, urljoin, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urljoin, urlparse, urlunparse
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from darkweb_collector.db import (
     add_code_hit_review,
@@ -40,7 +40,7 @@ from darkweb_collector.db import (
     update_code_hit_last_snapshot,
     update_code_scan_run,
     upsert_code_search_state,
-    upsert_code_hit_with_state,
+    upsert_code_hit,
     upsert_code_watchlist,
 )
 from darkweb_collector.document_exposure_browser import fetch_page_artifacts_with_session
@@ -57,8 +57,6 @@ _CODE_SCAN_LOCK = Lock()
 _CODE_HITS_PAYLOAD_CACHE_LOCK = Lock()
 _CODE_HITS_PAYLOAD_CACHE_TTL_SECONDS = 3600.0
 _CODE_HITS_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, list[dict[str, Any]]]] = {}
-_CODE_HITS_WARMUP_LOCK = Lock()
-_CODE_HITS_WARMUP_RUNNING = False
 _SQLITE_LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0, 4.0)
 _GITHUB_API_REQUEST_LOCK = Lock()
 _GITHUB_API_STATE_LOCK = Lock()
@@ -137,7 +135,6 @@ REPO_FALLBACK_FILE_EXTENSIONS = [
 ]
 CODE_CLUE_RULE_KEY = "clue"
 CODE_CLUE_RULE_LABEL = "关键词线索"
-CODE_CLASSIFICATION_VERSION = 2
 CLUE_MARKERS: tuple[tuple[str, int], ...] = (
     ("password", 9),
     ("passwd", 9),
@@ -686,56 +683,6 @@ def _domain_pattern_from_root(domain: str) -> str:
     return f"*.{normalized}" if normalized else ""
 
 
-def _derived_search_terms_from_profile(profile: dict[str, Any] | None) -> list[dict[str, Any]]:
-    source = profile if isinstance(profile, dict) else {}
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    mappings = (
-        ("official_names", "company_name"),
-        ("brand_aliases", "company_name"),
-        ("english_aliases", "company_name"),
-        ("root_domains", "domain"),
-        ("internal_system_keywords", "custom"),
-    )
-    for field, term_type in mappings:
-        for value in _normalize_profile_list(source.get(field)):
-            term = _normalize_domain_value(value) if term_type == "domain" else _normalize_text(value)
-            key = term.casefold()
-            if not term or key in seen:
-                continue
-            seen.add(key)
-            rows.append(
-                {
-                    "term": term,
-                    "term_type": term_type,
-                    "weight": 10,
-                    "enabled": True,
-                    "source": "enterprise_profile",
-                }
-            )
-    return rows
-
-
-def _effective_code_watch_terms(
-    enterprise_profile: dict[str, Any] | None,
-    supplemental_terms: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    rows = [*_derived_search_terms_from_profile(enterprise_profile), *(supplemental_terms or [])]
-    deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in rows:
-        if not bool(row.get("enabled", True)):
-            continue
-        term = _normalize_text(row.get("term"))
-        term_type = _normalize_text(row.get("term_type")) or "custom"
-        key = term.casefold()
-        if not term or key in seen:
-            continue
-        seen.add(key)
-        deduped.append({**row, "term": term, "term_type": term_type})
-    return deduped
-
-
 def _metadata_enterprise_profile(metadata: dict[str, Any] | None, *, organization_name: str = "", terms: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     profile_payload = ((metadata or {}).get("enterprise_profile") or {}) if isinstance(metadata, dict) else {}
     profile_payload = profile_payload if isinstance(profile_payload, dict) else {}
@@ -819,10 +766,6 @@ def _watchlist_enterprise_profile(watchlist: dict[str, Any] | None, terms: list[
     )
 
 
-def _watchlist_stored_enterprise_profile(watchlist: dict[str, Any] | None) -> dict[str, Any]:
-    return _watchlist_enterprise_profile(watchlist, [])
-
-
 def _is_legacy_code_placeholder(payload: dict[str, Any] | None) -> bool:
     item = payload or {}
     return (
@@ -873,7 +816,7 @@ def _payload_enterprise_profile(payload: dict[str, Any] | None) -> dict[str, Any
     return _metadata_enterprise_profile(
         {"enterprise_profile": profile_payload},
         organization_name=str((payload or {}).get("organization_name") or ""),
-        terms=[],
+        terms=list((payload or {}).get("terms") or []),
     )
 
 
@@ -895,27 +838,18 @@ def _public_code_watchlist_payload(
         "name": public_name,
         "organization_name": public_organization,
     }
-    enterprise_profile = _watchlist_stored_enterprise_profile(profile_source)
-    derived_terms = _derived_search_terms_from_profile(enterprise_profile)
-    derived_keys = {_normalize_text(row.get("term")).casefold() for row in derived_terms}
-    supplemental_terms = [
-        row
-        for row in public_terms
-        if _normalize_text(row.get("term")).casefold() not in derived_keys
-    ]
     return {
         **public_row,
         "name": public_name,
         "organization_name": public_organization,
-        "terms": supplemental_terms,
-        "derived_terms": derived_terms,
+        "terms": public_terms,
         "platforms": _normalize_string_list(metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS),
         "file_extensions": _normalize_code_file_extensions(metadata.get("file_extensions")),
         "search_page_limit": _normalize_search_page_limit(metadata.get("search_page_limit")),
         "max_results_per_term": _normalize_result_budget(metadata.get("max_results_per_term")),
         "detail_fetch": bool(metadata.get("detail_fetch", True)),
         "enabled_rule_keys": _normalize_string_list(metadata.get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
-        "enterprise_profile": enterprise_profile,
+        "enterprise_profile": _watchlist_enterprise_profile(profile_source, public_terms),
     }
 
 
@@ -1595,6 +1529,16 @@ def _has_search_challenge_text(text: str, current_url: str = "") -> bool:
     return any(marker.lower() in lowered for marker in SEARCH_CHALLENGE_MARKERS)
 
 
+def _open_http_response(request: Request, timeout: int):
+    proxy_host = os.environ.get("PROXY_HOST")
+    proxy_port = os.environ.get("PROXY_PORT")
+    if proxy_host and proxy_port:
+        proxy_url = f"http://{proxy_host}:{proxy_port}"
+        opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        return opener.open(request, timeout=timeout)  # noqa: S310
+    return urlopen(request, timeout=timeout)  # noqa: S310
+
+
 def _read_http_text(
     url: str,
     *,
@@ -1608,7 +1552,7 @@ def _read_http_text(
     for attempt in range(attempts):
         request = Request(url, headers=headers)
         try:
-            with urlopen(request, timeout=timeout) as response:  # noqa: S310
+            with _open_http_response(request, timeout) as response:
                 text = response.read().decode("utf-8", errors="replace")
                 current_url = ""
                 try:
@@ -1700,6 +1644,302 @@ def _is_gitlab_repository_url(repository_url: Any) -> bool:
     if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "gitlab.com":
         return False
     return len([part for part in parsed.path.strip("/").split("/") if part]) >= 2
+
+
+def _quote_path_segments(value: str) -> str:
+    return "/".join(quote(part, safe="") for part in str(value or "").split("/"))
+
+
+def _first_platform_timestamp(*values: Any) -> str:
+    for value in values:
+        normalized = _normalize_platform_timestamp(value)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _normalize_platform_timestamp(value: Any) -> str:
+    text = _normalize_text(value).strip("'\"")
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M %z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=SHANGHAI_TZ)
+        return parsed.isoformat()
+    iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(iso_text)
+    except ValueError:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=SHANGHAI_TZ)
+    return parsed.isoformat()
+
+
+def _github_api_headers() -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/vnd.github+json",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _gitlab_api_headers(storage_state_path: str | None = None) -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+    }
+    token = os.environ.get("GITLAB_TOKEN") or os.environ.get("GITLAB_PRIVATE_TOKEN")
+    if token:
+        headers["PRIVATE-TOKEN"] = token
+    cookie_header = _cookie_header_from_storage_state(storage_state_path, "gitlab.com")
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return headers
+
+
+def _gitee_access_token() -> str:
+    return _normalize_text(os.environ.get("GITEE_ACCESS_TOKEN") or os.environ.get("GITEE_TOKEN"))
+
+
+def _with_gitee_access_token(url: str) -> str:
+    token = _gitee_access_token()
+    if not token:
+        return url
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.setdefault("access_token", token)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _gitee_api_headers(storage_state_path: str | None = None) -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://gitee.com/",
+    }
+    cookie_header = _cookie_header_from_storage_state(storage_state_path, "gitee.com")
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return headers
+
+
+def _gitee_repo_parts_from_url(repository_url: Any) -> tuple[str, str]:
+    parsed = urlparse(str(repository_url or "").strip())
+    if parsed.netloc.lower() not in {"gitee.com", "www.gitee.com"}:
+        return "", ""
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 2:
+        return "", ""
+    return parts[0], parts[1]
+
+
+def _commit_time_payload(*, committed_at: str = "", updated_at: str = "", uploaded_at: str = "", commit_sha: str = "", source: str = "") -> dict[str, Any]:
+    committed_at = _normalize_platform_timestamp(committed_at)
+    updated_at = _normalize_platform_timestamp(updated_at) or committed_at
+    uploaded_at = _normalize_platform_timestamp(uploaded_at)
+    payload: dict[str, Any] = {}
+    if updated_at:
+        payload["fileUpdatedAt"] = updated_at
+    if committed_at:
+        payload["fileCommittedAt"] = committed_at
+    if uploaded_at:
+        payload["fileUploadedAt"] = uploaded_at
+    if commit_sha:
+        payload["fileCommitSha"] = str(commit_sha)
+    if source and payload:
+        payload["fileTimeSource"] = source
+    return payload
+
+
+def _github_file_commit_metadata(owner: str, repo: str, branch: str, file_path: str) -> dict[str, Any]:
+    if not owner or not repo or not branch or not file_path:
+        return {}
+    url = (
+        f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits"
+        f"?path={quote_plus(file_path)}&sha={quote_plus(branch)}&per_page=1"
+    )
+    payload = _http_get_json(url, headers=_github_api_headers(), timeout=45, retries=1)
+    row = payload[0] if isinstance(payload, list) and payload else {}
+    commit = row.get("commit") if isinstance(row, dict) else {}
+    commit = commit if isinstance(commit, dict) else {}
+    committed_at = _first_platform_timestamp(
+        ((commit.get("committer") or {}) if isinstance(commit.get("committer"), dict) else {}).get("date"),
+        ((commit.get("author") or {}) if isinstance(commit.get("author"), dict) else {}).get("date"),
+    )
+    return _commit_time_payload(
+        committed_at=committed_at,
+        updated_at=committed_at,
+        commit_sha=str(row.get("sha") or "") if isinstance(row, dict) else "",
+        source="github_commits_api",
+    )
+
+
+def _gitlab_file_commit_metadata(repository_url: str, branch: str, file_path: str, storage_state_path: str | None = None) -> dict[str, Any]:
+    parsed = urlparse(str(repository_url or "").strip())
+    repo_path = parsed.path.strip("/")
+    if parsed.netloc.lower() != "gitlab.com" or not repo_path or not branch or not file_path:
+        return {}
+    url = (
+        f"https://gitlab.com/api/v4/projects/{quote_plus(repo_path)}/repository/commits"
+        f"?path={quote_plus(file_path)}&ref_name={quote_plus(branch)}&per_page=1"
+    )
+    payload = _http_get_json(url, headers=_gitlab_api_headers(storage_state_path), timeout=45, platform_key="gitlab", retries=1)
+    row = payload[0] if isinstance(payload, list) and payload else {}
+    committed_at = _first_platform_timestamp(
+        row.get("committed_date") if isinstance(row, dict) else "",
+        row.get("created_at") if isinstance(row, dict) else "",
+    )
+    return _commit_time_payload(
+        committed_at=committed_at,
+        updated_at=committed_at,
+        commit_sha=str(row.get("id") or "") if isinstance(row, dict) else "",
+        source="gitlab_commits_api",
+    )
+
+
+_GITEE_HTML_TIME_PATTERNS = (
+    r'datetime=["\']([^"\']+)["\']',
+    r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[+\-]\d{4})',
+    r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})',
+    r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
+)
+
+
+def _extract_gitee_html_time(html: str) -> str:
+    for pattern in _GITEE_HTML_TIME_PATTERNS:
+        for match in re.findall(pattern, str(html or ""), flags=re.IGNORECASE):
+            value = match if isinstance(match, str) else match[0]
+            normalized = _normalize_platform_timestamp(value)
+            if normalized:
+                return normalized
+    return ""
+
+
+def _gitee_file_commit_metadata(candidate: dict[str, Any], storage_state_path: str | None = None) -> dict[str, Any]:
+    repo_url = _normalize_text(candidate.get("repositoryUrl") or candidate.get("fileUrl"))
+    owner, repo = _gitee_repo_parts_from_url(repo_url)
+    branch = _normalize_text(candidate.get("branch"))
+    file_path = _normalize_text(candidate.get("filePath"))
+    if not owner or not repo or not branch or not file_path:
+        return {}
+    if _gitee_access_token():
+        commits_url = _with_gitee_access_token(
+            f"https://gitee.com/api/v5/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits"
+            f"?sha={quote_plus(branch)}&path={quote_plus(file_path)}&page=1&per_page=1"
+        )
+        try:
+            payload = _http_get_json(commits_url, headers=_gitee_api_headers(storage_state_path), timeout=45, platform_key="gitee", retries=1)
+            row = payload[0] if isinstance(payload, list) and payload else {}
+            commit = row.get("commit") if isinstance(row, dict) else {}
+            commit = commit if isinstance(commit, dict) else {}
+            committed_at = _first_platform_timestamp(
+                ((commit.get("committer") or {}) if isinstance(commit.get("committer"), dict) else {}).get("date"),
+                ((commit.get("author") or {}) if isinstance(commit.get("author"), dict) else {}).get("date"),
+                row.get("created_at") if isinstance(row, dict) else "",
+            )
+            metadata = _commit_time_payload(
+                committed_at=committed_at,
+                updated_at=committed_at,
+                commit_sha=str(row.get("sha") or "") if isinstance(row, dict) else "",
+                source="gitee_commits_api",
+            )
+            if metadata:
+                return metadata
+        except Exception:
+            pass
+    commits_path = _quote_path_segments(file_path)
+    commits_url = f"https://gitee.com/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{quote(branch, safe='')}/{commits_path}"
+    headers = _search_request_headers("gitee", storage_state_path)
+    headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    try:
+        html, _ = _read_http_text(commits_url, headers=headers, timeout=45, platform_key="gitee", retries=1)
+    except Exception:
+        return {}
+    committed_at = _extract_gitee_html_time(html)
+    return _commit_time_payload(
+        committed_at=committed_at,
+        updated_at=committed_at,
+        source="gitee_commits_html",
+    )
+
+
+def _candidate_file_time_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    candidate = raw_payload.get("candidate") if isinstance(raw_payload, dict) else {}
+    candidate = candidate if isinstance(candidate, dict) else {}
+    updated_at = _normalize_platform_timestamp(candidate.get("fileUpdatedAt") or raw_payload.get("fileUpdatedAt"))
+    committed_at = _normalize_platform_timestamp(candidate.get("fileCommittedAt") or raw_payload.get("fileCommittedAt"))
+    uploaded_at = _normalize_platform_timestamp(candidate.get("fileUploadedAt") or raw_payload.get("fileUploadedAt"))
+    return {
+        "fileUpdatedAt": updated_at or committed_at or uploaded_at,
+        "fileCommittedAt": committed_at,
+        "fileUploadedAt": uploaded_at,
+        "fileCommitSha": _normalize_text(candidate.get("fileCommitSha") or raw_payload.get("fileCommitSha")),
+        "fileTimeSource": _normalize_text(candidate.get("fileTimeSource") or raw_payload.get("fileTimeSource")),
+    }
+
+
+def _candidate_metadata_cache_key(platform_key: str, candidate: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            platform_key,
+            _normalize_text(candidate.get("repositoryUrl")),
+            _normalize_text(candidate.get("repositoryOwner")),
+            _normalize_text(candidate.get("repositoryName")),
+            _normalize_text(candidate.get("branch")),
+            _normalize_text(candidate.get("filePath")),
+            _normalize_text(candidate.get("fileUrl")),
+        ]
+    )
+
+
+def _candidate_with_file_metadata(
+    platform_key: str,
+    candidate: dict[str, Any],
+    storage_state_path: str | None,
+    cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(candidate, dict):
+        return candidate
+    if _candidate_file_time_payload({"candidate": candidate}).get("fileUpdatedAt"):
+        return candidate
+    file_path = _normalize_text(candidate.get("filePath"))
+    if not file_path:
+        return candidate
+    cache_key = _candidate_metadata_cache_key(platform_key, candidate)
+    if cache_key not in cache:
+        metadata: dict[str, Any] = {}
+        try:
+            if platform_key == "github":
+                metadata = _github_file_commit_metadata(
+                    _normalize_text(candidate.get("repositoryOwner")),
+                    _normalize_text(candidate.get("repositoryName")),
+                    _normalize_text(candidate.get("branch")),
+                    file_path,
+                )
+            elif platform_key == "gitlab":
+                metadata = _gitlab_file_commit_metadata(
+                    _normalize_text(candidate.get("repositoryUrl")),
+                    _normalize_text(candidate.get("branch")),
+                    file_path,
+                    storage_state_path,
+                )
+            elif platform_key == "gitee":
+                metadata = _gitee_file_commit_metadata(candidate, storage_state_path)
+        except Exception:
+            metadata = {}
+        cache[cache_key] = metadata
+    metadata = cache.get(cache_key) or {}
+    return {**candidate, **metadata} if metadata else candidate
+
 
 
 def _gitlab_project_blob_search(repository_url: str, term: str, storage_state_path: str | None) -> list[dict[str, Any]]:
@@ -1955,13 +2195,7 @@ def _github_repo_fallback_code_search(
             code_text = _github_blob_content(owner, repo_name, branch, file_path)
             if not code_text:
                 continue
-            classification = _classify_code_hit(
-                term,
-                file_path,
-                code_text,
-                enabled_rule_keys,
-                context_metadata={"repositoryOwner": owner, "repositoryName": repo_name, "repositoryUrl": repo_url},
-            )
+            classification = _classify_code_hit(term, file_path, code_text, enabled_rule_keys)
             if not classification:
                 continue
             candidate = {
@@ -2034,7 +2268,10 @@ def _collect_gitee_repo_search_window(
             title = _normalize_text((fields.get("title") or [""])[0])
             path_name = _normalize_text((fields.get("path") or [""])[0])
             owner_path = _normalize_text((fields.get("owner.path.keyword") or [""])[0])
-            if not repo_url or not owner_path or not path_name or repo_url in seen:
+            repo_owner, repo_name = _gitee_repo_parts_from_url(repo_url)
+            repo_owner = repo_owner or owner_path
+            repo_name = repo_name or path_name
+            if not repo_url or not repo_owner or not repo_name or repo_url in seen:
                 continue
             seen.add(repo_url)
             results.append(
@@ -2042,9 +2279,9 @@ def _collect_gitee_repo_search_window(
                     "platform": "gitee",
                     "platformLabel": "Gitee",
                     "fileUrl": repo_url,
-                    "title": title or path_name,
-                    "repositoryOwner": owner_path,
-                    "repositoryName": path_name,
+                    "title": title or repo_name,
+                    "repositoryOwner": repo_owner,
+                    "repositoryName": repo_name,
                     "repositoryUrl": repo_url,
                     "branch": "",
                     "filePath": "",
@@ -2131,13 +2368,7 @@ def _gitee_repo_candidates_to_code_results(
                 code_text = ""
             if not code_text:
                 continue
-            classification = _classify_code_hit(
-                term,
-                file_path,
-                code_text,
-                enabled_rule_keys,
-                context_metadata={"repositoryOwner": owner, "repositoryName": repo, "repositoryUrl": repo_url},
-            )
+            classification = _classify_code_hit(term, file_path, code_text, enabled_rule_keys)
             if not classification:
                 continue
             seen.add(dedupe_key)
@@ -2845,13 +3076,9 @@ def _is_demo_or_mock_context(file_path: str, code_text: str) -> bool:
     markers = (
         "seed",
         "demo",
-        "mock",
         "sample",
         "example",
         "faker",
-        "fixture",
-        "finetune/data",
-        "training/data",
         "password123",
         "hashedpassword",
         "create users",
@@ -2968,9 +3195,7 @@ def _is_local_db_connection(findings: list[dict[str, Any]]) -> bool:
 
 def _is_public_market_context(file_path: str, code_text: str) -> bool:
     lowered = "\n".join([str(file_path or ""), str(code_text or "")[:12000]]).lower()
-    chinese_markers = (
-        "行情", "证券", "研报", "年报", "年度报告", "收盘价", "净利润", "主力资金", "股票", "a股", "新能源", "市值",
-    )
+    chinese_markers = ("行情", "证券", "研报", "收盘价", "净利润", "主力资金", "股票", "a股", "新能源", "市值")
     english_markers = (
         r"\bticker\b",
         r"\bsymbol\b",
@@ -2984,16 +3209,12 @@ def _is_public_market_context(file_path: str, code_text: str) -> bool:
         r"\bkline\b",
         r"\bnews\b",
         r"\bfinance\b",
-        r"\bashare\b",
-        r"\ba-share monitor\b",
-        r"\bannual report\b",
-        r"\binvestor relations\b",
         r"\btushare\b",
         r"\bpro_api\b",
     )
     signal_count = sum(1 for marker in chinese_markers if marker in lowered)
     signal_count += sum(1 for marker in english_markers if re.search(marker, lowered))
-    ticker_code_match = re.search(r"\b300750\b|\b\d{6}\.(?:sz|ss|hk)\b", lowered)
+    ticker_code_match = re.search(r"\b\d{6}\.(?:sz|ss|hk)\b", lowered)
     return bool(ticker_code_match) or signal_count >= 2
 
 
@@ -3108,34 +3329,15 @@ def _is_reference_catalog_context(file_path: str, code_text: str) -> bool:
         return True
     if structured_suffix and structured_entry_lines >= 4 and ("banks" in lowered_path or "bank" in lowered_path or "locations" in lowered_path):
         return True
-    public_corpus_markers = (
-        "public/data/",
-        "benchmark/data/",
-        "dataset/",
-        "datasets/",
-        "pdf_docs/",
-        "basic_info.txt",
-        "careers-audit",
-        "career-data",
-        "salary-data",
-        "annual-report",
-        "annual_report",
-        "年度报告",
-        "年报",
-    )
-    if any(marker in lowered_path or marker in lowered for marker in public_corpus_markers):
-        return True
-    if lowered_path.startswith("reports/") and lowered_path.endswith((".json", ".yml", ".yaml", ".txt")):
-        return True
-    if lowered_path.endswith(("evidence.json", "evidence.yml", "evidence.yaml")):
-        return True
     return False
 
 
 def _detect_system_access_signals(code_text: str, enterprise_match: dict[str, Any]) -> list[str]:
-    del enterprise_match
     lowered = str(code_text or "").lower()
     rows: list[str] = []
+    for keyword in enterprise_match.get("system_keywords") or []:
+        if keyword not in rows:
+            rows.append(keyword)
     access_markers = {
         "zapi.login": "login-call",
         "login(": "login-call",
@@ -3329,42 +3531,6 @@ def _suppression_reason_payload(
     return reasons
 
 
-def _classification_context(
-    file_path: str,
-    code_text: str,
-    context_metadata: dict[str, Any] | None,
-) -> tuple[str, str]:
-    metadata = context_metadata or {}
-    repository_owner = _normalize_text(metadata.get("repositoryOwner") or metadata.get("repository_owner"))
-    repository_name = _normalize_text(metadata.get("repositoryName") or metadata.get("repository_name"))
-    repository_url = _normalize_text(metadata.get("repositoryUrl") or metadata.get("repository_url"))
-    context_path = "/".join(part for part in (repository_owner, repository_name, str(file_path or "")) if part)
-    context_text = "\n".join(part for part in (repository_url, str(code_text or "")) if part)
-    return context_path, context_text
-
-
-def _has_primary_sensitive_evidence(
-    findings: list[dict[str, Any]],
-    *,
-    strong_enterprise: bool,
-    system_access_detected: bool,
-    blocked_public_context: bool,
-) -> bool:
-    if blocked_public_context:
-        return False
-    finding_keys = {str(item.get("ruleKey") or "") for item in findings}
-    if "private_key" in finding_keys:
-        return True
-    literal_keys = {
-        str(item.get("ruleKey") or "")
-        for item in findings
-        if _looks_literal_secret(str(item.get("value") or ""))
-    }
-    if literal_keys & {"api_key", "token", "ak_sk", "db_url", "jwt_secret", "redis_url", "password"}:
-        return True
-    return bool(strong_enterprise and system_access_detected and finding_keys & {"internal_url"})
-
-
 def _classify_code_hit(
     term: str,
     file_path: str,
@@ -3372,27 +3538,26 @@ def _classify_code_hit(
     enabled_rule_keys: list[str],
     term_type: str = "",
     enterprise_match: dict[str, Any] | None = None,
-    context_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     enterprise_payload = enterprise_match if enterprise_match is not None else {"valid": True, "level": "none", "anchors": [], "system_keywords": []}
     if not bool(enterprise_payload.get("valid", True)):
         return None
     findings = _collect_findings(code_text, enabled_rule_keys)
-    context_path, full_context_text = _classification_context(file_path, code_text, context_metadata)
-    risk_context_text = _extract_snippet(code_text, findings) if findings else full_context_text
+    risk_context_text = _extract_snippet(code_text, findings) if findings else str(code_text or "")
+    full_context_text = str(code_text or "")
     credential_literal_detected = any(_looks_literal_secret(str(item.get("value") or "")) for item in findings)
     system_access_signals = _detect_system_access_signals(risk_context_text, enterprise_payload)
     system_access_detected = bool(system_access_signals)
     anchor_types = {item.get("type") for item in enterprise_payload.get("anchors") or []}
     strong_enterprise = bool(anchor_types & {"official_name", "root_domain", "email_domain", "subdomain"})
     hard_compromise_context = bool(anchor_types & {"root_domain", "email_domain", "subdomain"}) and credential_literal_detected and system_access_detected
-    demo_or_mock = _is_demo_or_mock_context(context_path, full_context_text)
-    public_market = _is_public_market_context(context_path, full_context_text)
-    contact_directory = _is_contact_directory_context(context_path, full_context_text)
-    domain_inventory = _is_domain_inventory_context(context_path, full_context_text)
-    reference_catalog = _is_reference_catalog_context(context_path, full_context_text)
-    auth_flow = _is_auth_flow_context(context_path, full_context_text)
-    documentation = _is_documentation_context(context_path, full_context_text)
+    demo_or_mock = _is_demo_or_mock_context(file_path, full_context_text)
+    public_market = _is_public_market_context(file_path, full_context_text)
+    contact_directory = _is_contact_directory_context(file_path, full_context_text)
+    domain_inventory = _is_domain_inventory_context(file_path, full_context_text)
+    reference_catalog = _is_reference_catalog_context(file_path, full_context_text)
+    auth_flow = _is_auth_flow_context(file_path, full_context_text)
+    documentation = _is_documentation_context(file_path, full_context_text)
     hashed_secret = _is_hashed_secret_context(full_context_text)
     local_default = _is_local_default_config_context(full_context_text, findings)
     public_api_example = _is_public_api_example_context(full_context_text)
@@ -3468,32 +3633,7 @@ def _classify_code_hit(
             risk_score = min(risk_score, 22)
         risk_score = min(risk_score, 100)
         severity = _severity_from_score(risk_score)
-        blocked_public_context = bool(
-            demo_or_mock
-            or public_market
-            or contact_directory
-            or domain_inventory
-            or reference_catalog
-            or documentation
-            or hashed_secret
-            or local_default
-            or public_api_example
-            or log_or_comment
-        )
-        primary_sensitive = _has_primary_sensitive_evidence(
-            findings,
-            strong_enterprise=strong_enterprise,
-            system_access_detected=system_access_detected,
-            blocked_public_context=blocked_public_context,
-        )
-        suppressed = not primary_sensitive
-        if suppressed and not suppression_reasons:
-            suppression_reasons.append("未达到真实敏感证据门槛")
-        if suppressed:
-            risk_score = min(risk_score, 24)
-            severity = _severity_from_score(risk_score)
         return {
-            "classification_version": CODE_CLASSIFICATION_VERSION,
             "result_layer": "sensitive",
             "sensitive_type": findings[0]["ruleKey"],
             "matched_rule": findings[0]["label"],
@@ -3541,16 +3681,34 @@ def _classify_code_hit(
     if log_or_comment:
         clue_score = min(clue_score, 20)
     clue_severity = _severity_from_score(clue_score)
-    if enterprise_match is None or not enterprise_payload.get("valid") or not (enterprise_payload.get("anchors") or []):
+    if clue_score < 28:
+        if enterprise_match is not None and enterprise_payload.get("valid") and (enterprise_payload.get("anchors") or []):
+            suppressed_score = max(12, min(clue_score or 18, 24))
+            return {
+                "result_layer": "clue",
+                "sensitive_type": CODE_CLUE_RULE_KEY,
+                "matched_rule": CODE_CLUE_RULE_LABEL,
+                "risk_score": suppressed_score,
+                "severity": _severity_from_score(suppressed_score),
+                "findings": [],
+                "clue_markers": clue_markers,
+                "enterprise_match_level": str(enterprise_payload.get("level") or "none"),
+                "enterprise_anchors": list(enterprise_payload.get("anchors") or []),
+                "risk_promotion_reasons": promotion_reasons,
+                "credential_literal_detected": False,
+                "system_access_detected": system_access_detected,
+                "system_access_signals": system_access_signals,
+                "suppressed": True,
+                "suppression_reasons": list(suppression_reasons) + ["企业相关但未达到泄露证据阈值"],
+                "display_bucket": "suppressed",
+            }
         return None
-    suppressed_score = max(12, min(clue_score or 18, 24))
     return {
-        "classification_version": CODE_CLASSIFICATION_VERSION,
         "result_layer": "clue",
         "sensitive_type": CODE_CLUE_RULE_KEY,
         "matched_rule": CODE_CLUE_RULE_LABEL,
-        "risk_score": suppressed_score,
-        "severity": _severity_from_score(suppressed_score),
+        "risk_score": clue_score,
+        "severity": clue_severity,
         "findings": [],
         "clue_markers": clue_markers,
         "enterprise_match_level": str(enterprise_payload.get("level") or "none"),
@@ -3559,9 +3717,9 @@ def _classify_code_hit(
         "credential_literal_detected": False,
         "system_access_detected": system_access_detected,
         "system_access_signals": system_access_signals,
-        "suppressed": True,
-        "suppression_reasons": list(suppression_reasons) + ["企业关键词线索，未发现真实敏感证据"],
-        "display_bucket": "suppressed",
+        "suppressed": False,
+        "suppression_reasons": [],
+        "display_bucket": "primary",
     }
 
 
@@ -4183,12 +4341,6 @@ def delete_code_watchlist_payload(watchlist_id: int) -> dict[str, Any]:
             output_dir.rmdir()
         except Exception:
             pass
-    try:
-        from darkweb_collector.watchlist_notifications import delete_watchlist_notification_files
-
-        delete_watchlist_notification_files(watchlist_id)
-    except Exception:
-        logger.exception("failed to remove watchlist notification files for %s", watchlist_id)
     return {
         "removed": True,
         "watchlistId": int(watchlist_id),
@@ -4239,11 +4391,9 @@ def _scan_code_watchlist_once_unlocked(
             raise ValueError(f"watchlist not found: {watchlist_id}")
         if not bool(watchlist.get("enabled")):
             return {"watchlist_id": watchlist_id, "scanned_terms": 0, "candidates": 0, "hits": 0, "message": "watchlist disabled"}
-        supplemental_terms = [item for item in list_code_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
+        terms = [item for item in list_code_watch_terms(connection, watchlist_id) if bool(item.get("enabled"))]
     metadata = _watchlist_metadata(watchlist)
-    stored_enterprise_profile = _watchlist_stored_enterprise_profile(watchlist)
-    terms = _effective_code_watch_terms(stored_enterprise_profile, supplemental_terms)
-    enterprise_profile = _watchlist_enterprise_profile(watchlist, supplemental_terms)
+    enterprise_profile = _watchlist_enterprise_profile(watchlist, terms)
     selected_platforms = _normalize_string_list(platforms or metadata.get("platforms"), fallback=DEFAULT_CODE_PLATFORMS)
     selected_extensions = _normalize_code_file_extensions(file_extensions or metadata.get("file_extensions"))
     selected_search_page_limit = _normalize_search_page_limit(
@@ -4257,13 +4407,9 @@ def _scan_code_watchlist_once_unlocked(
     total_hits = 0
     clue_hits = 0
     sensitive_hits = 0
-    new_primary_hit_count = 0
-    new_suppressed_hit_count = 0
-    updated_hit_count = 0
-    new_sensitive_hit_count = 0
-    new_clue_hit_count = 0
     errors: list[str] = []
     seen_urls: set[str] = set()
+    file_metadata_cache: dict[str, dict[str, Any]] = {}
     now = _now_utc_iso()
     scan_run_id = _persist_code_scan_run(
         None,
@@ -4340,6 +4486,7 @@ def _scan_code_watchlist_once_unlocked(
                     if not file_url or file_url in seen_urls:
                         continue
                     seen_urls.add(file_url)
+                    candidate = _candidate_with_file_metadata(platform.key, candidate, storage_state, file_metadata_cache)
                     detail = {
                         "page_url": file_url,
                         "search_url": f"{GITEE_WIDGET_API_BASE}/search/widget/{GITEE_REPO_SEARCH_WIDGET}",
@@ -4360,7 +4507,6 @@ def _scan_code_watchlist_once_unlocked(
                         selected_rule_keys,
                         term_type=term_type,
                         enterprise_match=enterprise_match,
-                        context_metadata=candidate,
                     )
                     if not classification:
                         continue
@@ -4381,7 +4527,6 @@ def _scan_code_watchlist_once_unlocked(
                         selected_rule_keys,
                         term_type=term_type,
                         enterprise_match=enterprise_match,
-                        context_metadata=candidate,
                     )
                     if not classification:
                         continue
@@ -4402,7 +4547,6 @@ def _scan_code_watchlist_once_unlocked(
                     severity = str(classification["severity"])
                     language = _language_from_path(str(candidate.get("filePath") or ""))
                     raw_payload = {
-                        "classification_version": CODE_CLASSIFICATION_VERSION,
                         "candidate": candidate,
                         "search_url": detail["search_url"],
                         "page_url": detail["page_url"],
@@ -4424,7 +4568,7 @@ def _scan_code_watchlist_once_unlocked(
                         "display_bucket": classification.get("display_bucket") or ("suppressed" if classification.get("suppressed") else "primary"),
                     }
                     def write_preview_hit(connection):
-                        hit_id, created = upsert_code_hit_with_state(
+                        hit_id = upsert_code_hit(
                             connection,
                             {
                                 "watchlist_id": int(watchlist["id"]),
@@ -4468,21 +4612,9 @@ def _scan_code_watchlist_once_unlocked(
                             },
                         )
                         update_code_hit_last_snapshot(connection, hit_id, snapshot_id)
-                        return created
 
-                    created = bool(_commit_db_write(write_preview_hit))
+                    _commit_db_write(write_preview_hit)
                     total_hits += 1
-                    if created:
-                        if classification.get("suppressed"):
-                            new_suppressed_hit_count += 1
-                        else:
-                            new_primary_hit_count += 1
-                        if classification["result_layer"] == "clue":
-                            new_clue_hit_count += 1
-                        else:
-                            new_sensitive_hit_count += 1
-                    else:
-                        updated_hit_count += 1
                     if classification["result_layer"] == "clue":
                         clue_hits += 1
                     else:
@@ -4617,6 +4749,7 @@ def _scan_code_watchlist_once_unlocked(
                 if not file_url or file_url in seen_urls:
                     continue
                 seen_urls.add(file_url)
+                candidate = _candidate_with_file_metadata(platform.key, candidate, storage_state, file_metadata_cache)
                 try:
                     if platform.key == "gitlab" and candidate.get("snippetText"):
                         detail = {
@@ -4672,7 +4805,6 @@ def _scan_code_watchlist_once_unlocked(
                     selected_rule_keys,
                     term_type=term_type,
                     enterprise_match=enterprise_match,
-                    context_metadata=candidate,
                 )
                 if not classification:
                     continue
@@ -4693,7 +4825,6 @@ def _scan_code_watchlist_once_unlocked(
                         selected_rule_keys,
                         term_type=term_type,
                         enterprise_match=enterprise_match,
-                        context_metadata=candidate,
                     )
                     if not classification:
                         continue
@@ -4711,7 +4842,6 @@ def _scan_code_watchlist_once_unlocked(
                 severity = str(classification["severity"])
                 language = _language_from_path(str(candidate.get("filePath") or location.get("file_path") or ""))
                 raw_payload = {
-                    "classification_version": CODE_CLASSIFICATION_VERSION,
                     "candidate": candidate,
                     "search_url": search_url,
                     "page_url": detail["page_url"],
@@ -4749,7 +4879,7 @@ def _scan_code_watchlist_once_unlocked(
                 )
 
                 def write_detail_hit(connection):
-                    hit_id, created = upsert_code_hit_with_state(
+                    hit_id = upsert_code_hit(
                         connection,
                         {
                             "watchlist_id": int(watchlist["id"]),
@@ -4793,21 +4923,9 @@ def _scan_code_watchlist_once_unlocked(
                         },
                     )
                     update_code_hit_last_snapshot(connection, hit_id, snapshot_id)
-                    return created
 
-                created = bool(_commit_db_write(write_detail_hit))
+                _commit_db_write(write_detail_hit)
                 total_hits += 1
-                if created:
-                    if classification.get("suppressed"):
-                        new_suppressed_hit_count += 1
-                    else:
-                        new_primary_hit_count += 1
-                    if classification["result_layer"] == "clue":
-                        new_clue_hit_count += 1
-                    else:
-                        new_sensitive_hit_count += 1
-                else:
-                    updated_hit_count += 1
                 if classification["result_layer"] == "clue":
                     clue_hits += 1
                 else:
@@ -4830,31 +4948,6 @@ def _scan_code_watchlist_once_unlocked(
         started_at=started_at,
         finished_at=finished_at,
     )
-    push_notifications: dict[str, Any]
-    try:
-        new_primary_hits = [
-            item
-            for item in list_code_hits_payload(
-                watchlist_id=int(watchlist["id"]),
-                limit=None,
-                include_suppressed=False,
-            )
-            if _normalize_text(item.get("firstSeenAt")) == now
-        ]
-        from darkweb_collector.code_monitoring_notifications import notify_code_monitoring_hits
-
-        push_notifications = notify_code_monitoring_hits(new_primary_hits)
-    except Exception as exc:
-        logger.exception("failed to send code monitoring notifications")
-        push_notifications = {
-            "eligible": 0,
-            "sent": 0,
-            "failed": 1,
-            "skipped": 0,
-            "channels": {},
-            "errors": [{"error": str(exc)}],
-        }
-    schedule_code_monitoring_cache_warmup()
     return {
         "watchlist_id": watchlist_id,
         "watchlist_name": watchlist["name"],
@@ -4863,11 +4956,6 @@ def _scan_code_watchlist_once_unlocked(
         "hits": total_hits,
         "clue_hits": clue_hits,
         "sensitive_hits": sensitive_hits,
-        "new_primary_hit_count": new_primary_hit_count,
-        "new_suppressed_hit_count": new_suppressed_hit_count,
-        "updated_hit_count": updated_hit_count,
-        "new_sensitive_hit_count": new_sensitive_hit_count,
-        "new_clue_hit_count": new_clue_hit_count,
         "errors": errors,
         "platforms": selected_platforms,
         "file_extensions": selected_extensions,
@@ -4876,7 +4964,6 @@ def _scan_code_watchlist_once_unlocked(
         "detail_fetch": selected_detail_fetch,
         "enabled_rule_keys": selected_rule_keys,
         "github_search": github_code_search_status_payload(),
-        "push_notifications": push_notifications,
         "started_at": started_at,
         "finished_at": finished_at,
     }
@@ -4959,7 +5046,6 @@ def _build_code_hits_payload(
                 watchlist_rule_cache.get(watchlist_key) or list(DEFAULT_RULE_KEYS),
                 term_type=term_type,
                 enterprise_match=enterprise_match,
-                context_metadata=candidate,
             )
             if classification is None:
                 continue
@@ -4989,6 +5075,7 @@ def _build_code_hits_payload(
             computed_score = int(classification.get("risk_score") or row.get("risk_score") or 0)
             computed_severity = str(classification.get("severity") or row.get("severity") or "low")
             sensitive_label = CODE_CLUE_RULE_LABEL if result_layer == "clue" else SENSITIVE_RULE_MAP.get(computed_sensitive_type, SensitiveRule("", "", re.compile(""), 0)).label or computed_sensitive_type
+            file_time_payload = _candidate_file_time_payload(raw_payload if isinstance(raw_payload, dict) else {})
             payloads.append(
                 {
                     "id": int(row["id"]),
@@ -5028,6 +5115,7 @@ def _build_code_hits_payload(
                     "evidenceCount": int(row.get("evidence_count") or 0),
                     "firstSeenAt": row.get("first_seen_at") or "",
                     "lastSeenAt": row.get("last_seen_at") or "",
+                    **file_time_payload,
                     "lastSnapshotId": row.get("last_snapshot_id"),
                     "summary": _normalize_text(clue_text)[:220],
                     "secretLike": any(bool(item.get("secretLike")) for item in findings),
@@ -5069,20 +5157,7 @@ def _code_hits_payload_cache_revision() -> tuple[Any, ...]:
                 (SELECT COALESCE(MAX(updated_at), '') FROM code_watch_terms) AS term_updated_at
             """
         ).fetchone()
-    if row is None:
-        return (CODE_CLASSIFICATION_VERSION,)
-    fields = (
-        "hit_count",
-        "max_hit_id",
-        "max_hit_seen_at",
-        "max_snapshot_id",
-        "review_count",
-        "max_review_id",
-        "watchlist_updated_at",
-        "term_count",
-        "term_updated_at",
-    )
-    return (CODE_CLASSIFICATION_VERSION, *(row[field] for field in fields))
+    return tuple(row) if row is not None else ()
 
 
 def _slice_code_hits_payloads(payloads: list[dict[str, Any]], limit: int | None) -> list[dict[str, Any]]:
@@ -5154,8 +5229,6 @@ def _build_stored_code_hit_payload(row: dict[str, Any], raw_payload: Any) -> dic
         return None
     if _coerce_payload_bool(raw_payload.get("list_excluded")):
         return {"__skip": True}
-    if _coerce_payload_int(raw_payload.get("classification_version")) != CODE_CLASSIFICATION_VERSION:
-        return None
     if "display_bucket" not in raw_payload:
         return None
     result_layer = _normalize_text(raw_payload.get("result_layer") or row.get("result_layer") or "")
@@ -5176,6 +5249,7 @@ def _build_stored_code_hit_payload(row: dict[str, Any], raw_payload: Any) -> dic
         or computed_sensitive_type
     )
     secret_like_rule = SENSITIVE_RULE_MAP.get(computed_sensitive_type)
+    file_time_payload = _candidate_file_time_payload(raw_payload)
     return {
         "id": int(row["id"]),
         "watchlistId": int(row["watchlist_id"]),
@@ -5214,6 +5288,7 @@ def _build_stored_code_hit_payload(row: dict[str, Any], raw_payload: Any) -> dic
         "evidenceCount": int(row.get("evidence_count") or 0),
         "firstSeenAt": row.get("first_seen_at") or "",
         "lastSeenAt": row.get("last_seen_at") or "",
+        **file_time_payload,
         "lastSnapshotId": row.get("last_snapshot_id"),
         "summary": _stored_code_hit_summary(raw_payload),
         "secretLike": bool((secret_like_rule and secret_like_rule.secret_like) or _coerce_payload_bool(raw_payload.get("credential_literal_detected"))),
@@ -5264,121 +5339,6 @@ def list_code_hits_payload(
         _CODE_HITS_PAYLOAD_CACHE[cache_key] = (time.monotonic(), payloads)
         _prune_code_hits_payload_cache(cache_key)
         return _slice_code_hits_payloads(payloads, limit)
-
-
-def _parse_code_hit_filter_datetime(value: str) -> datetime | None:
-    text = _normalize_text(value)
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"invalid code hit timestamp: {text}") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def paginate_code_hits_payloads(
-    items: list[dict[str, Any]],
-    *,
-    query: str = "",
-    severity: str = "",
-    result_layer: str = "",
-    bucket: str = "all",
-    seen_after: str = "",
-    seen_before: str = "",
-    offset: int = 0,
-    limit: int = 50,
-) -> dict[str, Any]:
-    normalized_query = _normalize_text(query).casefold()
-    normalized_severity = _normalize_text(severity).lower()
-    normalized_layer = _normalize_text(result_layer).lower()
-    normalized_bucket = _normalize_text(bucket).lower() or "all"
-    if normalized_bucket not in {"all", "primary", "suppressed"}:
-        raise ValueError("bucket must be one of: all, primary, suppressed")
-    after = _parse_code_hit_filter_datetime(seen_after)
-    before = _parse_code_hit_filter_datetime(seen_before)
-    filtered: list[dict[str, Any]] = []
-    for item in items:
-        item_bucket = "suppressed" if bool(item.get("suppressed")) or item.get("displayBucket") == "suppressed" else "primary"
-        if normalized_bucket != "all" and item_bucket != normalized_bucket:
-            continue
-        if normalized_severity and _normalize_text(item.get("severity")).lower() != normalized_severity:
-            continue
-        if normalized_layer and _normalize_text(item.get("resultLayer")).lower() != normalized_layer:
-            continue
-        seen_at = _parse_code_hit_filter_datetime(str(item.get("firstSeenAt") or ""))
-        if after is not None and (seen_at is None or seen_at < after):
-            continue
-        if before is not None and (seen_at is None or seen_at > before):
-            continue
-        if normalized_query:
-            haystack = "\n".join(
-                str(value or "")
-                for value in (
-                    item.get("repositoryFullName"),
-                    item.get("repositoryName"),
-                    item.get("repositoryUrl"),
-                    item.get("filePath"),
-                    item.get("matchedTerm"),
-                    item.get("sensitiveLabel"),
-                    item.get("matchedRule"),
-                    item.get("watchlistName"),
-                    item.get("organizationName"),
-                    " ".join(item.get("suppressionReasons") or []),
-                )
-            ).casefold()
-            if normalized_query not in haystack:
-                continue
-        filtered.append(item)
-    safe_offset = max(0, int(offset or 0))
-    safe_limit = min(200, max(1, int(limit or 50)))
-    return {
-        "items": [dict(item) for item in filtered[safe_offset : safe_offset + safe_limit]],
-        "total": len(filtered),
-        "offset": safe_offset,
-        "limit": safe_limit,
-    }
-
-
-def search_code_hits_page(
-    *,
-    watchlist_id: int | None = None,
-    platform: str = "",
-    query: str = "",
-    severity: str = "",
-    result_layer: str = "",
-    bucket: str = "all",
-    seen_after: str = "",
-    seen_before: str = "",
-    recent_hours: int | None = None,
-    offset: int = 0,
-    limit: int = 50,
-) -> dict[str, Any]:
-    if recent_hours is not None:
-        if recent_hours <= 0 or recent_hours > 24 * 365:
-            raise ValueError("recent_hours must be between 1 and 8760")
-        if _normalize_text(seen_after):
-            raise ValueError("recent_hours and seen_after cannot be used together")
-        seen_after = (datetime.now(timezone.utc) - timedelta(hours=recent_hours)).isoformat()
-    items = list_code_hits_payload(
-        watchlist_id=watchlist_id,
-        platform=platform or None,
-        limit=None,
-        include_suppressed=True,
-    )
-    return paginate_code_hits_payloads(
-        items,
-        query=query,
-        severity=severity,
-        result_layer=result_layer,
-        bucket=bucket,
-        seen_after=seen_after,
-        seen_before=seen_before,
-        offset=offset,
-        limit=limit,
-    )
 
 
 def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
@@ -5441,7 +5401,6 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
         _normalize_string_list(_watchlist_metadata(watchlist or {}).get("enabled_rule_keys"), fallback=DEFAULT_RULE_KEYS),
         term_type=term_type,
         enterprise_match=enterprise_match,
-        context_metadata=candidate,
     )
     if classification is not None:
         findings = classification.get("findings") or findings
@@ -5470,6 +5429,7 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
     risk_reasons.extend([item for item in (classification or {}).get("risk_promotion_reasons") or [] if item not in risk_reasons])
     risk_reasons.extend([item for item in (classification or {}).get("suppression_reasons") or [] if item not in risk_reasons])
     sensitive_label = CODE_CLUE_RULE_LABEL if result_layer == "clue" else SENSITIVE_RULE_MAP.get(computed_sensitive_type, SensitiveRule("", "", re.compile(""), 0)).label or computed_sensitive_type
+    file_time_payload = _candidate_file_time_payload(raw_payload if isinstance(raw_payload, dict) else {})
     return {
         "id": int(row["id"]),
         "watchlistId": int(row["watchlist_id"]),
@@ -5509,6 +5469,7 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
         "evidenceCount": int(row.get("evidence_count") or 0),
         "firstSeenAt": row.get("first_seen_at") or "",
         "lastSeenAt": row.get("last_seen_at") or "",
+        **file_time_payload,
         "rawPayload": raw_payload,
         "latestSnapshot": latest_snapshot,
         "previewAssets": preview_assets,
@@ -5527,6 +5488,29 @@ def build_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
             "reasons": risk_reasons,
         },
     }
+
+
+def build_agent_code_hit_detail(hit_id: int) -> dict[str, Any] | None:
+    """Return the regular detail payload with raw snapshot artifacts embedded."""
+    detail = build_code_hit_detail(hit_id)
+    if detail is None:
+        return None
+
+    enriched_snapshots: list[dict[str, Any]] = []
+    for snapshot in detail.get("snapshots") or []:
+        enriched = dict(snapshot)
+        artifact_text = _read_text_file(enriched.get("rawArtifactPath"))
+        enriched["rawArtifactContent"] = _parse_json(artifact_text, artifact_text) if artifact_text else None
+        enriched_snapshots.append(enriched)
+
+    detail["snapshots"] = enriched_snapshots
+    latest_snapshot = detail.get("latestSnapshot") or {}
+    latest_snapshot_id = latest_snapshot.get("id")
+    detail["latestSnapshot"] = next(
+        (item for item in enriched_snapshots if item.get("id") == latest_snapshot_id),
+        enriched_snapshots[0] if enriched_snapshots else {**latest_snapshot, "rawArtifactContent": None},
+    )
+    return detail
 
 
 def add_code_monitoring_review(hit_id: int, *, status: str, reviewer: str = "", note: str = "") -> dict[str, Any]:
@@ -5595,14 +5579,14 @@ def _format_day_bucket(value: str) -> str:
 
 
 def build_code_monitoring_summary() -> dict[str, Any]:
-    rows = list_code_hits_payload(limit=None, include_suppressed=True)
+    rows = list_code_hits_payload(limit=500, include_suppressed=True)
     now = datetime.now(SHANGHAI_TZ).date()
     trend_counter: dict[str, int] = {}
     for offset in range(6, -1, -1):
         day = (now - timedelta(days=offset)).isoformat()
         trend_counter[day] = 0
     for row in rows:
-        bucket = _format_day_bucket(row.get("firstSeenAt"))
+        bucket = _format_day_bucket(row.get("lastSeenAt") or row.get("firstSeenAt"))
         if bucket in trend_counter:
             trend_counter[bucket] += 1
 
@@ -5617,8 +5601,6 @@ def build_code_monitoring_summary() -> dict[str, Any]:
     sensitive_hit_count = 0
     suppressed_hit_count = 0
     primary_hit_count = 0
-    repositories: dict[str, str] = {}
-    severity_rank = {"low": 1, "medium": 2, "high": 3}
     for row in rows:
         platform_counts[row["platformLabel"]] = platform_counts.get(row["platformLabel"], 0) + 1
         sensitive_label = _normalize_text(row.get("sensitiveLabel")) or (
@@ -5641,11 +5623,7 @@ def build_code_monitoring_summary() -> dict[str, Any]:
             clue_hit_count += 1
         else:
             sensitive_hit_count += 1
-        repository_key = _normalize_text(row.get("repositoryFullName") or row.get("repositoryUrl") or row.get("repositoryName"))
-        repository_severity = str(row.get("severity") or "low")
-        if repository_key and severity_rank.get(repository_severity, 0) > severity_rank.get(repositories.get(repository_key, ""), 0):
-            repositories[repository_key] = repository_severity
-        if _format_day_bucket(row.get("firstSeenAt")) == now.isoformat():
+        if _format_day_bucket(row.get("lastSeenAt") or row.get("firstSeenAt")) == now.isoformat():
             recent_count += 1
 
     watchlists = list_code_watchlists_payload()
@@ -5666,14 +5644,6 @@ def build_code_monitoring_summary() -> dict[str, Any]:
         "clueHitCount": clue_hit_count,
         "primaryHitCount": primary_hit_count,
         "suppressedHitCount": suppressed_hit_count,
-        "repositoryCount": len(repositories),
-        "publicRepositoryCount": len(repositories),
-        "highRiskRepositoryCount": sum(1 for value in repositories.values() if value == "high"),
-        "repositoryRiskDistribution": [
-            {"name": "高危", "value": sum(1 for value in repositories.values() if value == "high")},
-            {"name": "中危", "value": sum(1 for value in repositories.values() if value == "medium")},
-            {"name": "低危", "value": sum(1 for value in repositories.values() if value == "low")},
-        ],
         "secretLikeCount": secret_like_count,
         "highRiskRepoCount": len([item for item in high_risk_repos if item]),
         "platformCount": len(platform_counts),
@@ -5697,35 +5667,3 @@ def build_code_monitoring_summary() -> dict[str, Any]:
         ],
         "reviewDistribution": [{"key": key, "value": value} for key, value in sorted(review_counts.items(), key=lambda item: item[1], reverse=True)],
     }
-
-
-def warm_code_monitoring_cache() -> dict[str, Any]:
-    started_at = time.perf_counter()
-    payload = build_code_monitoring_summary()
-    logger.info(
-        "code monitoring cache warmup completed in %.2fs for %s hits",
-        time.perf_counter() - started_at,
-        int(payload.get("totalHits") or 0),
-    )
-    return payload
-
-
-def schedule_code_monitoring_cache_warmup() -> bool:
-    global _CODE_HITS_WARMUP_RUNNING
-    with _CODE_HITS_WARMUP_LOCK:
-        if _CODE_HITS_WARMUP_RUNNING:
-            return False
-        _CODE_HITS_WARMUP_RUNNING = True
-
-    def run() -> None:
-        global _CODE_HITS_WARMUP_RUNNING
-        try:
-            warm_code_monitoring_cache()
-        except Exception:
-            logger.exception("code monitoring cache warmup failed")
-        finally:
-            with _CODE_HITS_WARMUP_LOCK:
-                _CODE_HITS_WARMUP_RUNNING = False
-
-    Thread(target=run, name="code-monitoring-cache-warmup", daemon=True).start()
-    return True

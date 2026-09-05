@@ -91,11 +91,18 @@ def _extract_publication_block(block_html: str, base_url: str) -> dict | None:
         if timer_text:
             status = "going"
 
-    # Keep the victim's public website separate from the leak-site detail URL.
-    website_url = ""
+    # Extract external website URL (detail_url in the expected format)
+    detail_url = ""
+    # Look for external link in the block
     link_match = re.search(r'href="(https?://[^"\s>]+)"', block_html, re.IGNORECASE)
     if link_match:
-        website_url = link_match.group(1)
+        detail_url = link_match.group(1)
+    else:
+        # Fallback: construct from domain
+        if domain.startswith("www."):
+            detail_url = f"https://{domain}/"
+        else:
+            detail_url = f"https://{domain}/"
 
     # Extract file preview thumbnails (data:image URLs)
     thumbnails = []
@@ -116,17 +123,16 @@ def _extract_publication_block(block_html: str, base_url: str) -> dict | None:
         "name": name,
         "display_label": display_label,
         "domain": domain.replace("www.", ""),
-        "relative_path": "",
-        "detail_url": "",
+        "relative_path": detail_url,
+        "detail_url": detail_url,
         "status": status,
         "timer_class": "list-publication__timer-publication",
         "timer_status": status,
         "published_at_utc": published_at,
         "claimed_size": claimed_size,
         "claimed_size_gb": None,
-        "location": location,
+        "location": location or detail_url,
         "website": domain,
-        "website_url": website_url,
         "description": description,
         "publication_timer": None,
         "publicated_files": None,

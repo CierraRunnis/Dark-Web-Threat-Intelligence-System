@@ -1,3 +1,4 @@
+@scope (.prototype-screen) {
 .library-data-table {
   width: 100%;
   min-width: 1240px;
@@ -133,10 +134,10 @@
 
 .runtime-mirror-image {
   display: block;
-  width: auto;
-  height: auto;
+  width: 100%;
+  height: 100%;
   max-width: 100%;
-  max-height: min(82vh, 900px);
+  max-height: 100%;
   object-fit: contain;
 }
 
@@ -144,29 +145,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  height: auto;
-  min-height: 0;
+  height: clamp(220px, 55vh, 620px);
+  min-height: 220px;
   aspect-ratio: auto;
-  padding: clamp(8px, 1vw, 16px);
-  overflow: auto;
+  padding: 12px;
+  overflow: hidden;
 }
 
 .mirror-image-slot > .runtime-mirror-image {
-  width: auto;
-  height: auto;
+  width: 100%;
+  height: 100%;
   max-width: 100%;
-  max-height: min(82vh, 900px);
-}
-
-@media (max-width: 720px) {
-  .mirror-image-slot:has(> .runtime-mirror-image) {
-    padding: 8px;
-  }
-
-  .mirror-image-slot > .runtime-mirror-image {
-    width: 100%;
-    max-height: none;
-  }
+  max-height: 100%;
 }
 
 .detail-hero > div:first-child {
@@ -200,4 +190,6 @@
 .page-monitoring .monitor-trend-chart,
 .page-monitoring .code-trend-chart {
   max-width: 100%;
+}
+
 }

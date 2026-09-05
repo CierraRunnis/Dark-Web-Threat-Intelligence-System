@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -11,9 +10,9 @@ from darkweb_collector.normalize import content_hash
 
 
 FORUM_SECTIONS = {
-    "databases": "https://darkforums.as/Forum-Databases",
-    "other_leaks": "https://darkforums.as/Forum-Other-Leaks",
-    "sellers_place": "https://darkforums.as/Forum-Sellers-Place"
+    "databases": "https://darkforums.as/Forum-Databases?sortby=started&order=desc&datecut=9999&prefix=0",
+    "other_leaks": "https://darkforums.as/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
+    "sellers_place": "https://darkforums.as/Forum-Sellers-Place?sortby=started&order=desc&datecut=9999&prefix=0"
 }
 
 # HTML cleaning
@@ -34,63 +33,6 @@ RELATIVE_TIMESTAMP_RE = re.compile(
     r'(?P<value>\d+)\s+(?P<unit>minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s+ago',
     re.IGNORECASE,
 )
-ATTACKER_VALUE_RE = re.compile(r"[A-Za-z0-9$][A-Za-z0-9$ ._&+\-/]{1,48}")
-ATTACKER_SHORT_CODE_RE = re.compile(r"[A-Za-z]?\d{1,3}$")
-ATTACKER_BLOCKED_PHRASES = (
-    "item owner",
-    "visibility group",
-    "rejected by",
-    "subcontractor",
-    "internal documents",
-    "engineering documents",
-    "howitzers",
-    "ammunition",
-    "format: csv",
-    "all rows",
-    "open deals",
-    "email messages",
-    "monthly comp",
-    "position title",
-    "recruiting source",
-    "activities to do",
-)
-ATTACKER_GENERIC_VALUES = {
-    "actor",
-    "actors",
-    "attacker",
-    "attackers",
-    "group",
-    "groups",
-    "hacker",
-    "hackers",
-    "team",
-    "gang",
-    "unknown",
-    "none",
-    "n/a",
-    "null",
-}
-ATTACKER_PATTERNS = (
-    r'\b[Aa]ttacker[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
-    r'\b[Hh]acker[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
-    r'\b[Gg]roup(?:\s+name)?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
-    r'\b[Tt]hreat [Aa]ctor[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
-    r'\b[Aa]ctor[s]?\s*[:=-]\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
-    r'\b[Cc]redit[s]?\s+(?:to|goes to)\s*[:=-]?\s*([^\n\r.;,]{2,48})(?=[\n\r]|[.;,]|$)',
-    r'(?:^|[\s(\[])[Bb]y\s+([A-Za-z0-9$][A-Za-z0-9$._&+\-/]{1,30}(?:\s+[A-Za-z0-9$][A-Za-z0-9$._&+\-/]{1,30}){0,2})\s+(?:group|team|gang)\b',
-)
-
-
-def _safe_console_text(value: str) -> str:
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    try:
-        return str(value).encode(encoding, errors="replace").decode(encoding, errors="replace")
-    except LookupError:
-        return str(value).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-
-
-def _debug_log(message: str) -> None:
-    print(_safe_console_text(message))
 
 
 def _extract_timestamp_text(post_block: str, html: str) -> str:
@@ -159,22 +101,35 @@ def normalize_darkforums_timestamp(value: str | None, *, collected_at_utc: str |
         year = int(match.group("year"))
         if year < 100:
             year += 2000
+        month_val = int(match.group("month"))
+        day_val = int(match.group("day"))
+        # Defensive swap: this regex labels the first field "day" (DD-MM-YY,
+        # the darkforums convention) but other MyBB forks like pwnfrm emit
+        # MM-DD-YYYY. When data from one ends up parsed by the other (it
+        # shares this code path through normalized_intelligence), the regex
+        # still matches but the named groups are reversed — auto-correct
+        # when it's unambiguous.
+        if month_val > 12 and day_val <= 12:
+            month_val, day_val = day_val, month_val
         hour = int(match.group("hour")) % 12
         if match.group("ampm").upper() == "PM":
             hour += 12
         try:
             dt = datetime(
                 year,
-                int(match.group("month")),
-                int(match.group("day")),
+                month_val,
+                day_val,
                 hour,
                 int(match.group("minute")),
                 tzinfo=timezone.utc,
             )
-        except ValueError:
-            pass
-        else:
             return dt.date().isoformat()
+        except ValueError:
+            # Genuinely malformed values (e.g. month=24, day=24) — give up
+            # gracefully instead of crashing the whole normalized-intelligence
+            # refresh, which would surface as the unrelated
+            # "month must be in 1..12" error inside the ransomware/forum sync.
+            pass
 
     match = TEXTUAL_TIMESTAMP_RE.search(raw)
     if match:
@@ -235,7 +190,7 @@ def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
         max_topics: Maximum number of topics to extract (default: 5 for pilot testing)
     """
     start_time = time.time()
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Starting to parse list page: {url}")
+    print(f"[{time.strftime('%H:%M:%S')}] Starting to parse list page: {url}")
     
     # Extract page title
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
@@ -258,7 +213,7 @@ def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
     )
     
     matches = topic_pattern.findall(html)
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Found {len(matches)} topic matches")
+    print(f"[{time.strftime('%H:%M:%S')}] Found {len(matches)} topic matches")
     
     for tid, href, topic_title in matches:
         # Skip if already have this topic
@@ -288,15 +243,15 @@ def parse_darkforums_list(url: str, html: str, max_topics: int = 5) -> dict:
         }
         
         topics.append(topic_data)
-        _debug_log(f"[{time.strftime('%H:%M:%S')}] Found topic {len(topics)}: {clean_title[:60]}...")
+        print(f"[{time.strftime('%H:%M:%S')}] Found topic {len(topics)}: {clean_title[:60]}...")
         
         # Limit to max_topics for pilot testing
         if len(topics) >= max_topics:
-            _debug_log(f"[{time.strftime('%H:%M:%S')}] Reached limit of {max_topics} topics, stopping")
+            print(f"[{time.strftime('%H:%M:%S')}] Reached limit of {max_topics} topics, stopping")
             break
-
+    
     end_time = time.time()
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] List parsing completed in {end_time - start_time:.2f}s, found {len(topics)} topics")
+    print(f"[{time.strftime('%H:%M:%S')}] List parsing completed in {end_time - start_time:.2f}s, found {len(topics)} topics")
     
     return {
         "site_name": "darkforums",
@@ -336,7 +291,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     Parse DarkForums detail page to extract post content and metadata
     """
     start_time = time.time()
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Parsing detail page: {url}")
+    print(f"[{time.strftime('%H:%M:%S')}] Parsing detail page: {url}")
     
     # Extract page title
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
@@ -370,7 +325,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
                 break
     content = _clean_html_text(content_match.group(1)) if content_match else ""
 
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Extracted content length: {len(content)} chars")
+    print(f"[{time.strftime('%H:%M:%S')}] Extracted content length: {len(content)} chars")
     
     # Extract author information
     author_match = re.search(
@@ -384,20 +339,20 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
         )
     author = _clean_html_text(author_match.group(1)) if author_match else "Unknown"
     
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Author: {author}")
+    print(f"[{time.strftime('%H:%M:%S')}] Author: {author}")
     
     # Extract post date/timestamp
     timestamp = _extract_timestamp_text(post_block, html)
     
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Timestamp: {timestamp}")
+    print(f"[{time.strftime('%H:%M:%S')}] Timestamp: {timestamp}")
     
     # Extract victims from content and title
     victims = extract_victims_from_content(content, title)
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Found {len(victims)} victims")
+    print(f"[{time.strftime('%H:%M:%S')}] Found {len(victims)} victims")
     
     # Extract attackers
     attackers = extract_attackers_from_content(content)
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Found {len(attackers)} attackers")
+    print(f"[{time.strftime('%H:%M:%S')}] Found {len(attackers)} attackers")
     
     # Build victim information with industry and region
     victim_info = []
@@ -409,7 +364,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
             'industry': industry,
             'region': region
         })
-        _debug_log(f"[{time.strftime('%H:%M:%S')}] Victim: {victim} | Industry: {industry} | Region: {region}")
+        print(f"[{time.strftime('%H:%M:%S')}] Victim: {victim} | Industry: {industry} | Region: {region}")
     
     # Extract attachments/links
     attachment_matches = re.findall(
@@ -419,7 +374,7 @@ def parse_darkforums_detail(url: str, html: str) -> dict:
     attachments = [urljoin(url, match) for match in attachment_matches]
     
     end_time = time.time()
-    _debug_log(f"[{time.strftime('%H:%M:%S')}] Detail parsing completed in {end_time - start_time:.2f}s")
+    print(f"[{time.strftime('%H:%M:%S')}] Detail parsing completed in {end_time - start_time:.2f}s")
     
     collected_at_utc = datetime.now(timezone.utc).isoformat()
 
@@ -504,41 +459,34 @@ def extract_attackers_from_content(content: str) -> list:
     Extract attacker/threat actor information from content
     """
     attackers = []
-
-    for pattern in ATTACKER_PATTERNS:
+    
+    patterns = [
+        r'[Aa]ttacker[s]?[:\s]+(.+?)(?=[.,]|$)',
+        r'[Hh]acker[s]?[:\s]+(.+?)(?=[.,]|$)',
+        r'[Gg]roup[:\s]+(.+?)(?=\s+[Tt]his\s+[Pp]ost|[.,]|$)',
+        r'[Tt]hreat [Aa]ctor[s]?[:\s]+(.+?)(?=[.,]|$)',
+        r'[Aa]ctor[s]?[:\s]+(.+?)(?=[.,]|$)',
+        r'[Cc]redit[s]?\s+(?:to|goes to)[:\s]+(.+?)(?=[.,]|$)',
+        r'[Bb]y[:\s]+(.+?)(?:\s+(?:group|team|gang))',
+    ]
+    
+    for pattern in patterns:
         matches = re.findall(pattern, content, re.IGNORECASE)
         for match in matches:
-            attacker = _clean_html_text(match).strip(" -:;,.")
-            if attacker:
+            attacker = _clean_html_text(match)
+            if attacker and len(attacker) > 2 and len(attacker) < 50:
                 attackers.append(attacker)
-
-    return clean_extracted_attackers(attackers)[:5]  # Limit to top 5 attackers
-
-
-def clean_extracted_attackers(values: list[str]) -> list[str]:
-    """Normalize attacker candidates and drop obvious false positives."""
+    
+    # Remove duplicates
     seen = set()
     unique_attackers = []
-    for value in values:
-        attacker = _clean_html_text(value).strip(" -:;,.")
-        lowered = attacker.lower()
-        if not attacker or lowered in seen:
-            continue
-        if lowered in ATTACKER_GENERIC_VALUES:
-            continue
-        if len(attacker) < 3 or len(attacker) > 40:
-            continue
-        if len(attacker.split()) > 4:
-            continue
-        if ATTACKER_SHORT_CODE_RE.fullmatch(attacker):
-            continue
-        if not ATTACKER_VALUE_RE.fullmatch(attacker):
-            continue
-        if any(phrase in lowered for phrase in ATTACKER_BLOCKED_PHRASES):
-            continue
-        seen.add(lowered)
-        unique_attackers.append(attacker)
-    return unique_attackers
+    for a in attackers:
+        a_lower = a.lower()
+        if a_lower not in seen:
+            seen.add(a_lower)
+            unique_attackers.append(a)
+    
+    return unique_attackers[:5]  # Limit to top 5 attackers
 
 
 def determine_industry(victim: str, context: str = "") -> str:

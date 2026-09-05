@@ -19,7 +19,7 @@ from typing import Any
 
 from darkweb_collector.config import get_site_config, load_site_configs
 from darkweb_collector.models import SiteConfig
-from darkweb_collector.runtime import user_data_root
+from darkweb_collector.runtime import project_root
 
 
 COOKIE_SOURCE_ENV = "env"
@@ -43,7 +43,7 @@ def _resolve_cookie_file_path(config: SiteConfig) -> Path | None:
         return None
     path = Path(str(raw)).expanduser()
     if not path.is_absolute():
-        path = (user_data_root() / path).resolve()
+        path = (project_root() / path).resolve()
     return path
 
 
@@ -144,7 +144,6 @@ def get_session_cookie_status(site_name: str) -> dict[str, Any]:
 
     return {
         "site_name": config.site_name,
-        "display_name": str(extras.get("display_name") or config.site_name),
         "configured": bool(cookie),
         "source": source,
         "masked_preview": _mask_cookie(cookie or ""),
@@ -175,7 +174,6 @@ def list_cookie_capable_sites() -> list[dict[str, Any]]:
         except Exception as exc:  # pragma: no cover - defensive: one bad site shouldn't hide others
             statuses.append({
                 "site_name": cfg.site_name,
-                "display_name": str((cfg.extras or {}).get("display_name") or cfg.site_name),
                 "configured": False,
                 "source": COOKIE_SOURCE_NONE,
                 "masked_preview": "",

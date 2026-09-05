@@ -3,17 +3,18 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
-from darkweb_collector.db import get_db_connection, replace_vulnerability_records
+from darkweb_collector.db import get_db_connection, upsert_vulnerability_records
 from darkweb_collector.runtime import project_root
 from darkweb_collector.vulnerability_i18n import humanize_product_token
-from darkweb_collector.vulnerability_i18n import translate_vulnerability_summary_live
-from darkweb_collector.vulnerability_i18n import translate_vulnerability_title_live
+from darkweb_collector.vulnerability_i18n import translate_vulnerability_summary
+from darkweb_collector.vulnerability_i18n import translate_vulnerability_title
 
 
 DEFAULT_SAMPLE_FEED = project_root() / "samples" / "public_vulnerability_feed.json"
@@ -91,9 +92,20 @@ def _get_cached_nvd_enrichment(cve_id: str, cache: dict[str, Any]) -> dict[str, 
     return data
 
 
+def _open_request(request: Request, *, timeout: int):
+    proxy_host = str(os.environ.get("PROXY_HOST") or "").strip()
+    proxy_port = str(os.environ.get("PROXY_PORT") or "").strip()
+    if not proxy_host or not proxy_port:
+        return urlopen(request, timeout=timeout)
+
+    proxy_url = f"http://{proxy_host}:{proxy_port}"
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    return opener.open(request, timeout=timeout)
+
+
 def _fetch_json(url: str, *, timeout: int = 20) -> dict[str, Any]:
     request = Request(url, headers=HTTP_HEADERS)
-    with urlopen(request, timeout=timeout) as response:
+    with _open_request(request, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -104,7 +116,7 @@ def _fetch_json_with_headers(
     headers: dict[str, str] | None = None,
 ) -> tuple[Any, Any]:
     request = Request(url, headers={**HTTP_HEADERS, **(headers or {})})
-    with urlopen(request, timeout=timeout) as response:
+    with _open_request(request, timeout=timeout) as response:
         return json.load(response), response.headers
 
 
@@ -463,7 +475,7 @@ def _build_record_from_kev(item: dict[str, Any], *, nvd_enrichment: dict[str, An
             "source_name": "cisa_kev",
             "source_type": "official",
             "cve_id": cve_id,
-            "title": translate_vulnerability_title_live(
+            "title": translate_vulnerability_title(
                 title,
                 vendor=str(item.get("vendorProject") or "").strip(),
                 product=str(item.get("product") or "").strip(),
@@ -482,7 +494,7 @@ def _build_record_from_kev(item: dict[str, Any], *, nvd_enrichment: dict[str, An
             "wide_impact": len(affected_versions) >= 3 or "multiple" in summary.lower() or "multiple" in notes.lower(),
             "disclosure_time": str(item.get("dateAdded") or _now_utc_iso()).strip(),
             "affected_versions": affected_versions,
-            "summary": translate_vulnerability_summary_live(summary),
+            "summary": translate_vulnerability_summary(summary),
             "advisory_url": next((url for url in reference_urls if "nvd.nist.gov" not in url), "") or (reference_urls[0] if reference_urls else ""),
             "reference_urls": reference_urls,
             "last_seen_at": _now_utc_iso(),
@@ -512,7 +524,7 @@ def _build_record_from_nvd_item(item: dict[str, Any], *, source_name: str = NVD_
             "source_name": source_name,
             "source_type": "public",
             "cve_id": cve_id,
-            "title": translate_vulnerability_title_live(title, vendor=vendor, product=product),
+            "title": translate_vulnerability_title(title, vendor=vendor, product=product),
             "vendor": vendor,
             "product": product,
             "vulnerability_type": _derive_vulnerability_type(description, cwes),
@@ -524,7 +536,7 @@ def _build_record_from_nvd_item(item: dict[str, Any], *, source_name: str = NVD_
             "wide_impact": len(affected_versions) >= 3,
             "disclosure_time": str(cve.get("published") or _now_utc_iso()).strip(),
             "affected_versions": affected_versions,
-            "summary": translate_vulnerability_summary_live(description),
+            "summary": translate_vulnerability_summary(description),
             "advisory_url": reference_urls[0] if reference_urls else f"https://nvd.nist.gov/vuln/detail/{cve_id}",
             "reference_urls": _unique_strings(reference_urls + ([f"https://nvd.nist.gov/vuln/detail/{cve_id}"] if cve_id else [])),
             "last_seen_at": str(cve.get("lastModified") or _now_utc_iso()).strip(),
@@ -571,7 +583,7 @@ def _build_record_from_github_advisory(
             "source_name": GITHUB_ADVISORIES_SOURCE_NAME,
             "source_type": "public",
             "cve_id": cve_id,
-            "title": translate_vulnerability_title_live(summary or cve_id, vendor=vendor, product=product),
+            "title": translate_vulnerability_title(summary or cve_id, vendor=vendor, product=product),
             "vendor": vendor,
             "product": product,
             "vulnerability_type": _derive_vulnerability_type(description, cwes),
@@ -583,7 +595,7 @@ def _build_record_from_github_advisory(
             "wide_impact": wide_impact,
             "disclosure_time": disclosure_time or _now_utc_iso(),
             "affected_versions": [],
-            "summary": translate_vulnerability_summary_live(description),
+            "summary": translate_vulnerability_summary(description),
             "advisory_url": references[0] if references else str(advisory.get("html_url") or "").strip(),
             "reference_urls": references,
             "last_seen_at": str(advisory.get("updated_at") or _now_utc_iso()).strip(),
@@ -795,7 +807,6 @@ def sync_public_vulnerability_feed(
     *,
     limit: int = DEFAULT_LIVE_LIMIT,
     prefer_live: bool = True,
-    refresh_normalized: bool = True,
 ) -> dict[str, Any]:
     records, source = load_public_vulnerability_feed(
         sample_file=sample_file,
@@ -803,11 +814,7 @@ def sync_public_vulnerability_feed(
         prefer_live=prefer_live,
     )
     with get_db_connection() as connection:
-        replace_vulnerability_records(connection, records)
-        if refresh_normalized:
-            from darkweb_collector.normalized_intelligence import ensure_normalized_intelligence
-
-            ensure_normalized_intelligence(connection, force=True)
+        upsert_vulnerability_records(connection, records)
         connection.commit()
     return {
         "ingested": len(records),

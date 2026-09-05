@@ -15,21 +15,6 @@ export function useCodeMonitoringApi() {
     loadSummary() {
       return requestJson('/api/code-monitoring/summary')
     },
-    loadGithubAppConfig() {
-      return requestJson('/api/code-monitoring/github-app')
-    },
-    saveGithubAppConfig(payload) {
-      return requestJson('/api/code-monitoring/github-app', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-    },
-    deleteGithubAppConfig() {
-      return requestJson('/api/code-monitoring/github-app', {
-        method: 'DELETE',
-      })
-    },
     loadSessions() {
       return requestJson('/api/platform-sessions?module=code_monitoring')
     },
@@ -38,31 +23,9 @@ export function useCodeMonitoringApi() {
         method: 'POST',
       })
     },
-    startRemoteLogin(platform) {
-      return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/remote-login/start`, {
+    launchLogin(platform) {
+      return requestJson(`/api/platform-sessions/${encodeURIComponent(platform)}/launch-login`, {
         method: 'POST',
-      })
-    },
-    loadRemoteLoginState(sessionId) {
-      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}`)
-    },
-    controlRemoteLogin(sessionId, payload) {
-      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}/control`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-    },
-    finishRemoteLogin(sessionId, accountLabel) {
-      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}/finish`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ account_label: accountLabel || '' }),
-      })
-    },
-    closeRemoteLogin(sessionId) {
-      return requestJson(`/api/platform-sessions/remote-login/${encodeURIComponent(sessionId)}`, {
-        method: 'DELETE',
       })
     },
     saveSession(platform, accountLabel) {

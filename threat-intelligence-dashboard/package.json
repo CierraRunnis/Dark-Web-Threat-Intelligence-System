@@ -1,6 +1,6 @@
 {
   "name": "threat-intelligence-dashboard",
-  "version": "20260905.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,11 +11,11 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
-    "@novnc/novnc": "^1.5.0",
     "dayjs": "^1.11.10",
     "docx": "^9.0.3",
     "echarts": "^5.5.0",
     "element-plus": "^2.6.3",
+    "markdown-it": "^14.3.1",
     "pinia": "^2.1.7",
     "vue": "^3.4.21",
     "vue-echarts": "^6.6.9",

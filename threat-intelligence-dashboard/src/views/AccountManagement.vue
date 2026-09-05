@@ -345,37 +345,6 @@ onMounted(loadAccounts)
 </script>
 
 <style scoped lang="scss">
-.account-management-page {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.account-management-page .ti-panel {
-  min-width: 0;
-  padding: 22px;
-  border: 1px solid var(--ti-border-default);
-  border-radius: var(--ti-radius-lg);
-  background: var(--ti-panel-emphasis);
-  box-shadow: var(--ti-shadow-panel);
-}
-
-.account-management-page .ti-kicker {
-  color: var(--ti-accent-strong);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.account-management-page .ti-table-shell {
-  overflow: hidden;
-  border: 1px solid var(--ti-border-soft);
-  border-radius: var(--ti-radius-md);
-  background: var(--ti-surface-default);
-}
-
 .account-management__header {
   display: flex;
   align-items: flex-start;
