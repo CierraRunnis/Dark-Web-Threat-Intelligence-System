@@ -54,6 +54,7 @@ function currentVersionLabel() {
 
 function renderVersionMenus() {
   const updating = versionIsUpdating()
+  const canUpdate = isCurrentUserAdmin()
   const updateAvailable = Boolean(versionRuntime.version?.update_available && !versionRuntime.versionError)
   const current = currentVersionLabel()
   const channel = versionRuntime.version?.channel || versionRuntime.version?.current?.channel || 'stable'
@@ -113,10 +114,10 @@ function renderVersionMenus() {
     if (titleNode) titleNode.textContent = title
     if (descriptionNode) descriptionNode.textContent = description
     if (action) {
-      action.textContent = buttonLabel
-      action.disabled = updating || versionRuntime.versionLoading
-      action.classList.toggle('btn-primary', updateAvailable && !updating)
-      action.classList.toggle('btn-secondary', !updateAvailable || updating)
+      action.textContent = canUpdate ? buttonLabel : '仅管理员可更新'
+      action.disabled = !canUpdate || updating || versionRuntime.versionLoading
+      action.classList.toggle('btn-primary', canUpdate && updateAvailable && !updating)
+      action.classList.toggle('btn-secondary', !canUpdate || !updateAvailable || updating)
     }
   })
 }
@@ -227,6 +228,10 @@ async function pollUpdateStatus() {
 }
 
 async function runSystemUpdate() {
+  if (!isCurrentUserAdmin()) {
+    showToast('仅管理员可以更新系统')
+    return
+  }
   if (versionIsUpdating() || versionRuntime.versionLoading) return
   try {
     const response = await fetch('/api/system/update', { method: 'POST' })
@@ -2449,7 +2454,34 @@ export function initializePrototype() {
         addressValue.textContent = sourceUrl || '未配置'
         addressValue.title = sourceUrls.join('\n') || '未配置'
         address.append(addressLabel, addressValue)
-        detailPanel.append(detailGrid, address)
+        detailPanel.appendChild(detailGrid)
+        if (item.frontier?.enabled) {
+          const frontier = item.frontier
+          const progress = document.createElement('div')
+          progress.className = 'collector-site-frontier'
+          progress.dataset.backfillPaused = String(Boolean(frontier.backfill_paused))
+          const counts = document.createElement('p')
+          counts.textContent = `待抓 ${frontier.pending || 0} · 执行中 ${frontier.inflight || 0} · 队列已完成 ${frontier.completed || 0}`
+          const mode = document.createElement('p')
+          mode.textContent = item.enabled === false
+            ? '站点已停用，保留队列和回补进度。'
+            : frontier.backfill_paused
+              ? '积压达到上限，暂停历史回补；继续检查最新页。'
+              : `最新页优先，每轮最多回补 ${frontier.backfill_pages_per_run || 0} 个历史页。`
+          const cursors = document.createElement('ul')
+          const pageCursors = Array.isArray(frontier.page_cursors) ? frontier.page_cursors : []
+          pageCursors.forEach((cursor, index) => {
+            const entry = document.createElement('li')
+            entry.textContent = `分区 ${index + 1}：${cursor.completed_at ? '本轮列表已扫描至末页' : `下次回补第 ${cursor.next_page || 2} 页`}`
+            entry.title = cursor.source_url || ''
+            cursors.appendChild(entry)
+          })
+          const note = document.createElement('p')
+          note.textContent = `${pageCursors.length ? '' : '尚无历史回补记录。'}队列已完成仅统计已发现任务，不代表站点全部历史数据。`
+          progress.append(counts, mode, cursors, note)
+          detailPanel.appendChild(progress)
+        }
+        detailPanel.appendChild(address)
         detailCell.appendChild(detailPanel)
         detailRow.appendChild(detailCell)
         body.appendChild(detailRow)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from html import escape
 import hashlib
 import json
@@ -9,6 +10,8 @@ import subprocess
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from darkweb_collector.adapters.base import SiteAdapter
+from darkweb_collector.adapters.forum_artifacts import restore_detail_artifacts
+from darkweb_collector.adapters.pagination import collect_paginated_seed
 from darkweb_collector.browser_client import fetch_page_artifacts_with_browser
 from darkweb_collector.changan_auto_login import recover_changan_session
 from darkweb_collector.db import (
@@ -55,6 +58,13 @@ def _stored_capture_is_complete(html_path, json_path) -> bool:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
+    if not isinstance(payload, dict):
+        return False
+    mirror_hash = escape(str(payload.get("content_hash") or ""), quote=True)
+    if mirror_hash and f'data-collector-content-hash="{mirror_hash}"' in html:
+        return bool(payload.get("content")) and all(
+            f'src="{escape(str(url), quote=True)}"' in html for url in payload.get("attachments") or []
+        )
     required_patterns = (
         r'class="name"[^>]*>\s*[^<\s]',
         r'class="title"[^>]*>\s*[^<\s]',
@@ -83,11 +93,14 @@ def _artifact_stem(url: str) -> str:
 def _fallback_html(detail: dict) -> str:
     title = escape(str(detail.get("title") or "长安不夜城商品详情"))
     content = escape(str(detail.get("content") or "")).replace("\n", "<br>")
-    return f"<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head><body><article><h1>{title}</h1><p>{content}</p></article></body></html>"
+    content_hash = escape(str(detail.get("content_hash") or ""), quote=True)
+    images = "".join(f'<img src="{escape(str(url), quote=True)}" style="max-width:100%">' for url in detail.get("attachments") or [])
+    return f'<!doctype html><html><head><meta charset="utf-8"><title>{title}</title></head><body><article data-collector-content-hash="{content_hash}"><h1>{title}</h1><p>{content}</p>{images}</article></body></html>'
 
 
 class ChanganAdapter(SiteAdapter):
     site_name = "changan"
+    supports_frontier = True
 
     def _api_get_once(
         self,
@@ -154,52 +167,41 @@ class ChanganAdapter(SiteAdapter):
             raise
 
     def collect_seed(self, config: SiteConfig, run_ctx: RunContext) -> SeedResult:
-        collected_at_utc = utc_now_iso()
         base_url = _base_url(config.seed_urls[0])
-        raw = self._api_get(
-            config,
-            "/api/category/goods",
-            {
-                "cid": 0,
-                "page_num": 1,
-                "page_size": config.max_topics_per_run,
-                "order": "",
-                "order_by": "",
-            },
-        )
-        section = parse_changan_list(
-            raw,
-            base_url=base_url,
-            collected_at_utc=collected_at_utc,
-            max_topics=config.max_topics_per_run,
-            excluded_categories=config.extras.get("excluded_categories"),
-        )
-        stored_raw = dict(raw)
-        stored_items = [topic["raw"] for topic in section["topics"]]
-        if isinstance(raw.get("data"), dict):
-            stored_data = dict(raw["data"])
+        page_size = max(1, config.max_topics_per_run)
+
+        def fetch_page(source_url: str, page: int, collected_at: str):
+            params = {"cid": 0, "page_num": page, "page_size": page_size, "order": "", "order_by": ""}
+            raw = self._api_get(config, "/api/category/goods", params)
+            data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+            goods = data.get("goods") if isinstance(data.get("goods"), list) else data.get("list")
+            if not isinstance(goods, list):
+                raise RuntimeError("changan API did not return a goods list")
+            section = parse_changan_list(
+                raw, base_url=base_url, collected_at_utc=collected_at,
+                max_topics=len(goods), excluded_categories=config.extras.get("excluded_categories"),
+            )
+            stored_raw = dict(raw)
+            stored_data = dict(data)
             stored_data.pop("list", None)
-            stored_data["goods"] = stored_items
-            stored_data["total"] = section["total"]
-            stored_raw["data"] = stored_data
-        else:
-            stored_raw.pop("list", None)
-            stored_raw["goods"] = stored_items
-            stored_raw["total"] = section["total"]
-        payload = {
-            "site_name": self.site_name,
-            "source_url": section["source_url"],
-            "collected_at_utc": collected_at_utc,
-            "section_count": 1,
-            "topic_count": section["topic_count"],
-            "sections": [section],
-        }
-        return SeedResult(
-            site_name=self.site_name,
-            collected_at_utc=collected_at_utc,
-            payload=payload,
-            raw_html_by_url={config.seed_urls[0]: json.dumps(stored_raw, ensure_ascii=False, indent=2)},
-        )
+            stored_data["goods"] = [topic["raw"] for topic in section["topics"]]
+            stored_data["source_total"] = section["source_total"]
+            if isinstance(raw.get("data"), dict):
+                stored_raw["data"] = stored_data
+            else:
+                stored_raw = stored_data
+            identifiers = sorted(str(item.get("id") or item.get("gid") or item.get("goods_id") or "") for item in goods if isinstance(item, dict))
+            signature = hashlib.sha256("\n".join(identifiers).encode("utf-8")).hexdigest()
+            if not goods and page == 1 and (section["source_total"] or 0) > 0:
+                raise RuntimeError("changan API returned an empty first page with a positive total")
+            more = bool(goods)
+            if section["source_total"] is not None:
+                actual_page_size = int(data.get("page_size") or data.get("pageSize") or len(goods) or page_size)
+                more = more and page * actual_page_size < section["source_total"]
+            url = f"{base_url}/api/category/goods?{urlencode(params)}"
+            return section, json.dumps(stored_raw, ensure_ascii=False, indent=2), more, signature, url
+
+        return collect_paginated_seed(self.site_name, config, fetch_page)
 
     def plan_details(self, seed_result: SeedResult, config: SiteConfig) -> list[DetailTask]:
         tasks: list[DetailTask] = []
@@ -232,11 +234,13 @@ class ChanganAdapter(SiteAdapter):
                             "artifact_stem": stem,
                             "goods_id": topic["goods_id"],
                             "title": topic["title"],
+                            "source_version": topic["content_hash"],
+                            "discovery_lane": topic.get("discovery_lane", "recent"),
+                            "frontier_fetched_version": topic["content_hash"] if unchanged and detail_snapshot is not None else "",
+                            "frontier_artifacts_complete": artifacts_ready,
                         },
                     )
                 )
-                if len(tasks) >= max(config.max_detail_pages_per_run, 0):
-                    break
         return tasks
 
     def collect_detail(
@@ -245,6 +249,9 @@ class ChanganAdapter(SiteAdapter):
         config: SiteConfig,
         run_ctx: RunContext,
     ) -> DetailResult | None:
+        restored = restore_detail_artifacts(detail_task, config, fallback_html=_fallback_html)
+        if restored is not None:
+            return restored
         raw = self._api_get(config, "/api/goods/detail", {"gid": detail_task.metadata["goods_id"]})
         detail = parse_changan_detail(
             raw,
@@ -282,16 +289,17 @@ class ChanganAdapter(SiteAdapter):
         run_ctx: RunContext,
         seed_result: SeedResult | None = None,
         detail_results: list[DetailResult] | None = None,
+        connection=None,
     ) -> None:
         if seed_result is not None:
             config.output_dir.mkdir(parents=True, exist_ok=True)
             dump_json(config.output_dir / "latest.json", seed_result.payload)
             dump_text(config.output_dir / "latest.raw.json", seed_result.raw_html_by_url[config.seed_urls[0]])
-            with get_db_connection() as connection:
+            with get_db_connection() as seed_connection:
                 for section in seed_result.payload["sections"]:
                     for topic in section["topics"]:
                         upsert_forum_topic(
-                            connection,
+                            seed_connection,
                             site_name=self.site_name,
                             section=SECTION,
                             title=topic["title"],
@@ -304,12 +312,12 @@ class ChanganAdapter(SiteAdapter):
                             content_hash=topic["content_hash"],
                             collected_at_utc=section["collected_at_utc"],
                         )
-                connection.commit()
+                seed_connection.commit()
 
         if detail_results:
             detail_dir = config.output_dir / SECTION / "details"
             detail_dir.mkdir(parents=True, exist_ok=True)
-            with get_db_connection() as connection:
+            with (nullcontext(connection) if connection is not None else get_db_connection()) as detail_connection:
                 for result in detail_results:
                     stem = str(result.metadata.get("artifact_stem") or _artifact_stem(result.target_url))
                     if result.raw_html is not None:
@@ -318,7 +326,7 @@ class ChanganAdapter(SiteAdapter):
                         (detail_dir / f"{stem}.png").write_bytes(result.screenshot_png)
                     dump_json(detail_dir / f"{stem}.json", result.payload)
                     upsert_forum_detail(
-                        connection,
+                        detail_connection,
                         site_name=self.site_name,
                         section=SECTION,
                         topic_url=result.target_url,
@@ -332,4 +340,5 @@ class ChanganAdapter(SiteAdapter):
                         content_hash=result.payload["content_hash"],
                         collected_at_utc=result.payload.get("collected_at_utc", ""),
                     )
-                connection.commit()
+                if connection is None:
+                    detail_connection.commit()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import logging
 import time
 import uuid
 from typing import Callable
@@ -9,6 +10,16 @@ from typing import Callable
 from darkweb_collector.adapters.registry import get_adapter
 from darkweb_collector.changan_auto_login import changan_auto_login_available, recover_changan_session
 from darkweb_collector.config import get_site_config, load_site_configs
+from darkweb_collector.crawl_frontier import (
+    begin_persist_frontier,
+    claim_frontier,
+    complete_frontier,
+    fail_frontier,
+    list_frontier_candidates,
+    observe_frontier,
+    save_page_cursor,
+    start_frontier,
+)
 from darkweb_collector.db import (
     get_active_crawl_job,
     get_db_connection,
@@ -23,6 +34,9 @@ from darkweb_collector.queueing import queue_for_detail, queue_for_seed
 from darkweb_collector.site_auth import SiteAuthenticationRequired, site_auth_readiness
 from darkweb_collector.state_store import StateStore
 from darkweb_collector.utils import utc_now_iso
+
+
+logger = logging.getLogger(__name__)
 
 
 def new_job_id(job_type: str, site_name: str) -> str:
@@ -127,6 +141,45 @@ def _dispatch_detail_jobs(
     return dispatched, failed
 
 
+def _dispatch_frontier_jobs(
+    config: SiteConfig,
+    detail_dispatcher: Callable[[SiteConfig, DetailTask], str | None] | None,
+) -> tuple[list[str], int]:
+    if detail_dispatcher is None or config.max_detail_pages_per_run <= 0:
+        return [], 0
+    with get_db_connection() as connection:
+        candidates = list_frontier_candidates(connection, config.site_name)
+    dispatched: list[str] = []
+    failed = 0
+    for candidate in candidates:
+        if len(dispatched) >= config.max_detail_pages_per_run or failed >= config.max_detail_pages_per_run:
+            break
+        token = str(uuid.uuid4())
+        with get_db_connection() as connection:
+            task = claim_frontier(
+                connection, config.site_name, candidate.target_url, token,
+                config.frontier_lease_seconds,
+            )
+            connection.commit()
+        if task is None:
+            continue
+        try:
+            job_id = detail_dispatcher(config, task)
+            if not job_id:
+                raise RuntimeError("detail dispatcher did not return a job id")
+        except Exception:
+            failed += 1
+            with get_db_connection() as connection:
+                fail_frontier(
+                    connection, config.site_name, task.target_url, token,
+                    retry_seconds=60, error_message="dispatch_failed",
+                )
+                connection.commit()
+            continue
+        dispatched.append(str(job_id))
+    return dispatched, failed
+
+
 def execute_seed_job(
     site_name: str,
     queue_name: str,
@@ -150,15 +203,41 @@ def execute_seed_job(
     adapter = get_adapter(site_name)
     seed_result = adapter.collect_seed(config, run_ctx)
     detail_tasks = adapter.plan_details(seed_result, config)
+    uses_frontier = bool(getattr(adapter, "supports_frontier", False))
+    if uses_frontier:
+        with get_db_connection() as connection:
+            observe_frontier(connection, site_name, detail_tasks)
+            connection.commit()
     adapter.persist(config=config, run_ctx=run_ctx, seed_result=seed_result)
-    dispatched_job_ids, failed_detail_jobs = _dispatch_detail_jobs(
-        config, detail_tasks, state_store, detail_dispatcher
-    )
+    pagination_errors = seed_result.metadata.get("pagination_errors", [])
+    for error in pagination_errors:
+        logger.warning(
+            "%s listing page %s (%s) failed: %s; successful pages and retry position retained",
+            site_name, error.get("page"), error.get("lane"), error.get("error_type"),
+        )
+    if uses_frontier:
+        with get_db_connection() as connection:
+            for cursor in seed_result.metadata.get("cursor_updates", []):
+                save_page_cursor(
+                    connection, site_name, cursor["source_url"],
+                    next_page=cursor["next_page"],
+                    last_signature=cursor.get("last_signature", ""),
+                    completed_at=cursor.get("completed_at", ""),
+                )
+            connection.commit()
+        dispatched_job_ids, failed_detail_jobs = _dispatch_frontier_jobs(config, detail_dispatcher)
+    else:
+        dispatched_job_ids, failed_detail_jobs = _dispatch_detail_jobs(
+            config, detail_tasks, state_store, detail_dispatcher
+        )
     return {
         "site_name": site_name,
         "seed_job_id": run_ctx.job_id,
         "detail_job_ids": dispatched_job_ids,
         "detail_task_count": len(detail_tasks),
+        "detail_dispatched_count": len(dispatched_job_ids),
+        "listing_pages_scanned": seed_result.metadata.get("pages_scanned", 0),
+        "listing_error_count": len(pagination_errors),
         "detail_failed_count": failed_detail_jobs,
         "collected_at_utc": seed_result.collected_at_utc,
     }
@@ -182,29 +261,68 @@ def execute_detail_job(
         attempt=attempt,
     )
     adapter = get_adapter(site_name)
+    frontier_token = str(detail_task.metadata.get("frontier_token") or "")
+    if frontier_token:
+        with get_db_connection() as connection:
+            started = start_frontier(
+                connection, site_name, detail_task.target_url, frontier_token,
+                config.frontier_lease_seconds,
+            )
+            connection.commit()
+        if not started:
+            return {"site_name": site_name, "detail_job_id": run_ctx.job_id, "reason": "stale_frontier"}
+        mark_job_running(
+            job_id=run_ctx.job_id, site_name=site_name, job_type="detail",
+            queue_name=queue_name, target=detail_task.target_url,
+        )
     detail_result = adapter.collect_detail(detail_task, config, run_ctx)
-    if detail_result is not None:
+    if frontier_token:
+        if detail_result is None:
+            raise RuntimeError("detail collection returned no valid content")
+        with get_db_connection() as connection:
+            if not begin_persist_frontier(
+                connection, site_name, detail_task.target_url, frontier_token,
+                config.frontier_lease_seconds,
+            ):
+                return {"site_name": site_name, "detail_job_id": run_ctx.job_id, "reason": "stale_frontier"}
+            adapter.persist(
+                config=config, run_ctx=run_ctx, detail_results=[detail_result],
+                connection=connection,
+            )
+            completed = complete_frontier(
+                connection, site_name, detail_task.target_url, frontier_token,
+                artifacts_complete=bool(detail_result.raw_html and detail_result.screenshot_png),
+                retry_seconds=max(300, config.effective_interval_seconds),
+            )
+            if not completed:
+                raise RuntimeError("detail lease changed before persistence completed")
+            connection.commit()
+    elif detail_result is not None:
         adapter.persist(config=config, run_ctx=run_ctx, detail_results=[detail_result])
     return {
         "site_name": site_name,
         "detail_job_id": run_ctx.job_id,
         "target_url": detail_task.target_url,
+        "artifacts_pending": bool(frontier_token and not (detail_result.raw_html and detail_result.screenshot_png)),
     }
 
 
 def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Path | None = None) -> str:
-    queue_name = queue_for_detail(get_site_config(site_name, config_path))
-    job_id = new_job_id("detail", site_name)
-    mark_job_running(
-        job_id=job_id,
-        site_name=site_name,
-        job_type="detail",
-        queue_name=queue_name,
-        target=detail_task.target_url,
-    )
+    config = get_site_config(site_name, config_path)
+    queue_name = queue_for_detail(config)
+    frontier_token = str(detail_task.metadata.get("frontier_token") or "")
+    job_id = frontier_token or new_job_id("detail", site_name)
+    if not frontier_token:
+        mark_job_running(
+            job_id=job_id,
+            site_name=site_name,
+            job_type="detail",
+            queue_name=queue_name,
+            target=detail_task.target_url,
+        )
     start_perf = time.perf_counter()
     try:
-        execute_detail_job(
+        result = execute_detail_job(
             site_name=site_name,
             detail_task=detail_task,
             queue_name=queue_name,
@@ -212,6 +330,13 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
             config_path=config_path,
         )
     except SiteAuthenticationRequired as exc:
+        if frontier_token:
+            with get_db_connection() as connection:
+                fail_frontier(
+                    connection, site_name, detail_task.target_url, frontier_token,
+                    retry_seconds=config.effective_interval_seconds, error_message="auth_required",
+                )
+                connection.commit()
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
             job_id=job_id,
@@ -225,6 +350,13 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
         )
         return job_id
     except Exception as exc:
+        if frontier_token:
+            with get_db_connection() as connection:
+                fail_frontier(
+                    connection, site_name, detail_task.target_url, frontier_token,
+                    retry_seconds=60, error_message="detail_failed",
+                )
+                connection.commit()
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
             job_id=job_id,
@@ -237,6 +369,8 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
             error_message=str(exc),
         )
         raise
+    if result.get("reason") == "stale_frontier":
+        return job_id
     duration_ms = int((time.perf_counter() - start_perf) * 1000)
     mark_job_finished(
         job_id=job_id,
@@ -244,7 +378,7 @@ def run_detail_job_once(site_name: str, detail_task: DetailTask, config_path: Pa
         job_type="detail",
         queue_name=queue_name,
         target=detail_task.target_url,
-        status="succeeded",
+        status="partial" if result.get("artifacts_pending") else "succeeded",
         duration_ms=duration_ms,
     )
     return job_id

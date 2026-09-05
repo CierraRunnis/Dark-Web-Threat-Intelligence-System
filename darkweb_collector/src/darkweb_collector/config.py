@@ -97,6 +97,15 @@ def _validate_site(payload: dict[str, Any]) -> SiteConfig:
     if max_concurrent_details < 1:
         raise ConfigError(f"{site_name}: max_concurrent_details must be at least 1")
 
+    for key, default, minimum, maximum in (
+        ("recent_pages_per_run", 1, 1, 5),
+        ("backfill_pages_per_run", 5, 0, 50),
+        ("frontier_max_pending", 500, 1, 100000),
+    ):
+        value = payload.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ConfigError(f"{site_name}: {key} must be an integer between {minimum} and {maximum}")
+
     extras = {key: value for key, value in payload.items() if key not in REQUIRED_KEYS}
     return SiteConfig(
         site_name=site_name,

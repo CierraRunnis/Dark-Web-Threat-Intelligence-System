@@ -359,10 +359,10 @@ def _revoke_user_sessions(username: str) -> None:
             _auth_sessions.pop(token, None)
 
 
-def _require_admin(request: Request) -> dict[str, object]:
+def _require_admin(request: Request, *, action: str = "管理账号") -> dict[str, object]:
     user = getattr(request.state, "current_user", None)
     if not user or user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+        raise HTTPException(status_code=403, detail=f"仅管理员可以{action}")
     return user
 
 
@@ -495,7 +495,8 @@ def system_update_status() -> dict:
 
 
 @app.post("/api/system/update", status_code=202)
-def system_update() -> dict:
+def system_update(request: Request) -> dict:
+    _require_admin(request, action="更新系统")
     try:
         return start_self_update()
     except SelfUpdateError as exc:

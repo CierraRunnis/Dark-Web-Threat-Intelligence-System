@@ -8,6 +8,7 @@ import uuid
 
 from darkweb_collector.celery_app import app
 from darkweb_collector.config import get_site_config
+from darkweb_collector.crawl_frontier import fail_frontier, renew_frontier, retry_frontier
 from darkweb_collector.db import get_active_crawl_job, get_db_connection, get_latest_crawl_job
 from darkweb_collector.models import DetailTask, SiteConfig
 from darkweb_collector.orchestrator import (
@@ -46,7 +47,7 @@ def _queue_name_from_request(task) -> str:
 
 def _enqueue_detail_task(config: SiteConfig, detail_task: DetailTask) -> str | None:
     queue_name = queue_for_detail(config)
-    job_id = str(uuid.uuid4())
+    job_id = str(detail_task.metadata.get("frontier_token") or uuid.uuid4())
     mark_job_enqueued(
         job_id=job_id,
         site_name=config.site_name,
@@ -344,6 +345,16 @@ def crawl_detail(
     detail_task = DetailTask.from_dict(detail_task_payload)
     config = get_site_config(site_name)
     queue_name = _queue_name_from_request(self)
+    frontier_token = str(detail_task.metadata.get("frontier_token") or "")
+    if frontier_token:
+        with get_db_connection() as connection:
+            renewed = renew_frontier(
+                connection, site_name, detail_task.target_url, frontier_token,
+                config.frontier_lease_seconds,
+            )
+            connection.commit()
+        if not renewed:
+            return {"site_name": site_name, "detail_job_id": self.request.id, "reason": "stale_frontier"}
     state_store = get_state_store(prefer_redis=True)
     slot_owner = f"{self.request.id}:{getattr(self.request, 'hostname', '') or 'worker'}"
     try:
@@ -366,13 +377,14 @@ def crawl_detail(
         )
     start_perf = time.perf_counter()
     try:
-        mark_job_running(
-            job_id=self.request.id,
-            site_name=site_name,
-            job_type="detail",
-            queue_name=queue_name,
-            target=detail_task.target_url,
-        )
+        if not frontier_token:
+            mark_job_running(
+                job_id=self.request.id,
+                site_name=site_name,
+                job_type="detail",
+                queue_name=queue_name,
+                target=detail_task.target_url,
+            )
         result = execute_detail_job(
             site_name=site_name,
             detail_task=detail_task,
@@ -380,7 +392,16 @@ def crawl_detail(
             attempt=fetch_attempt,
             job_id=self.request.id,
         )
+        if result.get("reason") == "stale_frontier":
+            return result
     except SiteAuthenticationRequired as exc:
+        if frontier_token:
+            with get_db_connection() as connection:
+                fail_frontier(
+                    connection, site_name, detail_task.target_url, frontier_token,
+                    retry_seconds=config.effective_interval_seconds, error_message="auth_required",
+                )
+                connection.commit()
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         mark_job_finished(
             job_id=self.request.id,
@@ -402,6 +423,15 @@ def crawl_detail(
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start_perf) * 1000)
         if fetch_attempt < MAX_RETRIES:
+            if frontier_token:
+                with get_db_connection() as connection:
+                    retrying = retry_frontier(
+                        connection, site_name, detail_task.target_url, frontier_token,
+                        config.frontier_lease_seconds,
+                    )
+                    connection.commit()
+                if not retrying:
+                    return {"site_name": site_name, "detail_job_id": self.request.id, "reason": "stale_frontier"}
             _mark_retry_enqueued(
                 job_id=self.request.id,
                 site_name=site_name,
@@ -419,6 +449,13 @@ def crawl_detail(
                 },
                 max_retries=None,
             )
+        if frontier_token:
+            with get_db_connection() as connection:
+                fail_frontier(
+                    connection, site_name, detail_task.target_url, frontier_token,
+                    retry_seconds=max(60, config.effective_interval_seconds), error_message="detail_failed",
+                )
+                connection.commit()
         mark_job_finished(
             job_id=self.request.id,
             site_name=site_name,
@@ -442,7 +479,7 @@ def crawl_detail(
         job_type="detail",
         queue_name=queue_name,
         target=detail_task.target_url,
-        status="succeeded",
+        status="partial" if result.get("artifacts_pending") else "succeeded",
         duration_ms=duration_ms,
     )
     return result

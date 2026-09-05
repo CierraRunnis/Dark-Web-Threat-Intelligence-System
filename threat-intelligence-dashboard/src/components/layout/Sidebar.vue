@@ -84,7 +84,7 @@
           size="small"
           :type="updateState?.status === 'failed' ? 'danger' : versionStatus?.update_available ? 'primary' : 'default'"
           :loading="updateRunning"
-          :disabled="versionLoading || updateRunning"
+          :disabled="!canUpdate || versionLoading || updateRunning"
           @click="runUpdate"
         >
           <el-icon v-if="!updateRunning"><Download /></el-icon>
@@ -105,7 +105,7 @@
 import { ElMessage } from 'element-plus'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { clearAuthSession } from '@/composables/useAuth'
+import { clearAuthSession, isCurrentUserAdmin } from '@/composables/useAuth'
 import { useShellLayout } from '@/composables/useShellLayout'
 
 const route = useRoute()
@@ -118,6 +118,7 @@ const versionStatus = ref(null)
 const versionLoading = ref(false)
 const versionError = ref('')
 const updateState = ref(null)
+const canUpdate = computed(isCurrentUserAdmin)
 let versionTimer = null
 let updatePollTimer = null
 let updateStartedAt = 0
@@ -212,6 +213,7 @@ const currentVersionLabel = computed(() => (
 const updateRunning = computed(() => ['queued', 'running'].includes(updateState.value?.status))
 
 const updateButtonLabel = computed(() => {
+  if (!canUpdate.value) return '仅管理员可更新'
   if (updateRunning.value) return updateState.value?.message || '正在更新'
   if (updateState.value?.status === 'failed') return '重试更新'
   return versionStatus.value?.update_available ? '一键更新' : '检查并更新'
@@ -311,6 +313,10 @@ async function pollUpdateStatus() {
 }
 
 async function runUpdate() {
+  if (!canUpdate.value) {
+    ElMessage.warning('仅管理员可以更新系统')
+    return
+  }
   if (updateRunning.value) return
   try {
     const response = await fetch('/api/system/update', { method: 'POST' })

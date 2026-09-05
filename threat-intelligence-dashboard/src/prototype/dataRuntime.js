@@ -2533,7 +2533,32 @@ async function hydrateCollectorRunDetail(root, route) {
     setText(card, 'strong', item[1])
     setText(card, 'small', item[2])
   })
-  setDetailSection(root, 'collector-run-progress', false)
+  const frontier = site?.frontier
+  const progress = setDetailSection(root, 'collector-run-progress', Boolean(frontier?.enabled))
+  if (frontier?.enabled) {
+    setText(progress, '.panel-header h2', '详情队列与历史回补')
+    setText(progress, '.panel-header p', '统计已发现任务；队列已完成不代表站点全部历史数据已抓取。')
+    const progressBar = query(progress, '.detail-progress')
+    if (progressBar) progressBar.hidden = true
+    const progressBadge = query(progress, '.panel-header .badge')
+    if (progressBadge) {
+      progressBadge.textContent = site.enabled === false ? '站点已停用' : frontier.backfill_paused ? '积压暂停回补' : '最新页优先'
+      progressBadge.className = `badge ${frontier.backfill_paused ? 'badge-high' : 'badge-success'}`
+    }
+    const pageCursors = Array.isArray(frontier.page_cursors) ? frontier.page_cursors : []
+    replaceStructuredRows(query(progress, '.detail-list'), [
+      { label: '待抓', value: number(frontier.pending || 0), note: '包括等待自动重试的任务' },
+      { label: '执行中', value: number(frontier.inflight || 0), note: '已领取或排队等待执行' },
+      { label: '队列已完成', value: number(frontier.completed || 0), note: '已发现任务的当前版本已补齐' },
+      { label: '历史回补', value: site.enabled === false ? '站点已停用，保留进度' : frontier.backfill_paused ? '积压达到上限，暂停回补' : `每轮最多 ${number(frontier.backfill_pages_per_run || 0)} 页`, note: site.enabled === false ? '' : '继续检查最新页' },
+      ...pageCursors.map((cursor, index) => ({
+        label: `分区 ${index + 1}`,
+        value: cursor.completed_at ? '本轮列表已扫描至末页' : `下次回补第 ${number(cursor.next_page || 2)} 页`,
+        note: cursor.source_url || '',
+      })),
+      ...(!pageCursors.length ? [{ label: '分页游标', value: '尚无历史回补记录', note: '' }] : []),
+    ])
+  }
   setDetailSection(root, 'collector-run-configuration', false)
   setDetailSection(root, 'collector-run-log', false)
   hideDetailRail(root, 'collector-action-rail')
