@@ -1,0 +1,39 @@
+name: darkweb_batch_search
+description: >
+  Batch dark web threat-intelligence search. Accepts a list of keywords and
+  queries the local dark web intelligence API once per keyword. When
+  search_window_days is given, keeps only events disclosed within that time
+  window and drops entries with an unparseable date. Industry, region, country,
+  and severity filtering is left to darkweb-search-agent.
+description_cn: >
+  暗网情报批量搜索。接收关键词列表，对本地暗网情报 API 逐关键词查询。
+  传入 search_window_days 时，仅保留披露时间在该时间窗内的事件，
+  无法解析日期的条目直接丢弃。行业、地区、国家、严重性等筛选由
+  darkweb-search-agent 负责。
+category: search
+enabled: true
+
+inputSchema:
+  type: object
+  properties:
+    keywords:
+      type: array
+      description: >
+        Keywords to query. Each item is either a plain string or an object with
+        a `keyword` field (other fields such as `priority`, `source_hint`,
+        `search_intent` are accepted and ignored). Order is preserved.
+      items:
+        type: object
+    search_window_days:
+      type: integer
+      description: >
+        Optional time window in days. When set to a positive integer, only
+        events whose disclosure date falls within the last N days are kept, and
+        events with an unparseable date are dropped. Omit or set <= 0 to disable
+        date filtering.
+  required: [keywords]
+
+handler:
+  type: script
+  script_file: darkweb_batch_search.handler.py
+  function: handle

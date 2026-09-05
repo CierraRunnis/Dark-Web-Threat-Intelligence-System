@@ -1,0 +1,44 @@
+name: telegram-search-agent
+description: >
+  Telegram threat-intelligence search agent. It searches the user's accessible
+  Telegram channels, groups, and chats through the telegram_batch_search tool and
+  returns structured findings about leaks, ransomware chatter, credentials,
+  access sales, exploit discussions, threat actors, and related message
+  evidence. It does not perform dark web or public web searches.
+
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+
+color: "#0EA5E9"
+temperature: 0.2
+
+tools:
+  - read
+  - grep
+  - glob
+  - telegram_batch_search
+
+prompt_file: prompt.md
+
+prompt_metadata:
+  category: security
+  cost: medium
+  triggers:
+    - domain: telegram
+      trigger: "Telegram 情报、Telegram 泄露、Telegram 渠道、TG 情报、TG 泄露、Telegram 群组搜索"
+    - domain: data-leak
+      trigger: "TG 数据泄露、Telegram 数据库泄露、Telegram 凭证泄露、TG 访问权限出售"
+    - domain: ransomware
+      trigger: "Telegram 勒索软件、TG 勒索组织、勒索聊天记录、ransomware Telegram"
+    - domain: vulnerability
+      trigger: "Telegram 漏洞讨论、TG exploit、Telegram CVE、Telegram PoC"
+  use_when:
+    - "The task requires searching Telegram channels, groups, or chats for threat-intelligence messages."
+    - "A search supervisor provides multilingual keywords and asks for Telegram search results."
+    - "The user asks about Telegram leak chatter, credentials, access sales, ransomware claims, exploit discussions, or threat actor mentions."
+  avoid_when:
+    - "The task is specifically about dark web forums or ransomware leak sites; use darkweb-search-agent instead."
+    - "The task only needs public web search, news, or vendor reports; use web-search-agent instead."
+    - "The user asks to send, edit, delete, forward, or automate Telegram messages."

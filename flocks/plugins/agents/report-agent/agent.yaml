@@ -1,0 +1,38 @@
+name: report-agent
+description: >
+  Generates final Markdown threat-intelligence reports from the normalized
+  output of noise-reduction-agent. It writes concise, source-grounded reports
+  with executive summary, key findings, timeline, source coverage, high-risk
+  leads, and validation gaps.
+
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+
+color: "#9333EA"
+temperature: 0.2
+
+tools:
+  - read
+  - grep
+  - glob
+
+prompt_file: prompt.md
+
+prompt_metadata:
+  category: security
+  cost: low
+  triggers:
+    - domain: threat-intelligence
+      trigger: "情报报告、威胁情报报告、Markdown 报告、总结报告、最终报告"
+    - domain: search-pipeline
+      trigger: "generate report from deduped events, report-agent, final intelligence report"
+  use_when:
+    - "Noise-reduction-agent has produced deduped_events and the user needs a final Markdown report."
+    - "A search supervisor needs to transform normalized threat-intelligence findings into a readable report."
+    - "The task requires summarizing source coverage, high-risk leads, and validation gaps."
+  avoid_when:
+    - "The task requires executing searches."
+    - "The task requires deduplication, confidence scoring, or evidence merging before report writing."
+    - "The input contains only raw search results and has not yet passed through noise-reduction-agent."

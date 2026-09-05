@@ -1,0 +1,150 @@
+{
+  "workflow_ids": [
+    "darkweb_source_search",
+    "telegram_source_search",
+    "threat_intel_search_pipeline",
+    "web_source_search"
+  ],
+  "agents": [
+    "darkweb-search-agent",
+    "multilingual-keyword-agent",
+    "noise-reduction-agent",
+    "report-agent",
+    "search-supervisor",
+    "telegram-search-agent",
+    "web-search-agent"
+  ],
+  "custom_tools": [
+    "darkweb_batch_search",
+    "telegram_batch_search",
+    "web_batch_search"
+  ],
+  "live_checks": [
+    {
+      "workflow": "threat_intel_search_pipeline",
+      "matches_running_definition": true
+    },
+    {
+      "workflow": "darkweb_source_search",
+      "matches_running_definition": true
+    },
+    {
+      "workflow": "telegram_source_search",
+      "matches_running_definition": true
+    },
+    {
+      "workflow": "web_source_search",
+      "matches_running_definition": true
+    }
+  ],
+  "plugin_files": [
+    {
+      "path": "plugins/agents/darkweb-search-agent/agent.yaml",
+      "sha256": "6d49d89c21204e5d46cd4e3a089af04709e5e9fbf9ad5623b443ee77facd36f1"
+    },
+    {
+      "path": "plugins/agents/darkweb-search-agent/prompt.md",
+      "sha256": "f231f14b7bf57ec4c3cbac6b9d630aee062bc6e6926e087755a32dab7419aa67"
+    },
+    {
+      "path": "plugins/agents/multilingual-keyword-agent/agent.yaml",
+      "sha256": "daf230638bf30b8e746969c48d02e40dd8aee6207997b449789bee7b1808f86f"
+    },
+    {
+      "path": "plugins/agents/multilingual-keyword-agent/prompt.md",
+      "sha256": "d445667c130d3168fe99b27f8970d538c53ce4fe9768e0c1f6c2d26e3a7dae74"
+    },
+    {
+      "path": "plugins/agents/noise-reduction-agent/agent.yaml",
+      "sha256": "751b18c28d7463ea3ffb18460c1fa24d1b47f0364285ee348d61e87e7acbbae4"
+    },
+    {
+      "path": "plugins/agents/noise-reduction-agent/prompt.md",
+      "sha256": "9a095724a1fd4b7885b69b1469bd7f454cae10700894a72e599277d5fb807844"
+    },
+    {
+      "path": "plugins/agents/report-agent/agent.yaml",
+      "sha256": "64e3326b8f46a99a7ad479575295924e9fb983847825a95739143ddf84a68c9a"
+    },
+    {
+      "path": "plugins/agents/report-agent/prompt.md",
+      "sha256": "589383b7bced8a3badf4c2cb40ab5cbdf362c9b58e2de010abd08a2d959f0cf2"
+    },
+    {
+      "path": "plugins/agents/search-supervisor/agent.yaml",
+      "sha256": "d16c43f768408d3bec2667d600d81d14410e693c54df7639a727de7f1a7edc9b"
+    },
+    {
+      "path": "plugins/agents/search-supervisor/prompt.md",
+      "sha256": "fcd9c7875862c245f77c0fb42b6d095f4292bb2d2494bc7b0481ef3e173a8aad",
+      "source_sha256": "ddc946efb67747f61cab40634c790e54821b9e58728dda23dfd781639a213667"
+    },
+    {
+      "path": "plugins/agents/telegram-search-agent/agent.yaml",
+      "sha256": "d8fef9310c244564c49bfd79fa2dab3647e0fcae93c7b5b8f5446b276074087e"
+    },
+    {
+      "path": "plugins/agents/telegram-search-agent/prompt.md",
+      "sha256": "072456b7318684ad6f1d6c0b6d055aeccad23d8c52a433f40be22a9a90fe00a0"
+    },
+    {
+      "path": "plugins/agents/web-search-agent/agent.yaml",
+      "sha256": "53263f21a8a9f041dc254490ed5752382f1bf8507ca005e35b563c4545ee37f8"
+    },
+    {
+      "path": "plugins/agents/web-search-agent/prompt.md",
+      "sha256": "c18359fdf8449d230efe52a7c476236258afa8d5ef3f21a1f2b29a2f38b601a7"
+    },
+    {
+      "path": "plugins/tools/api/darkweb_batch_search.handler.py",
+      "sha256": "a5107936d1d39023a80509fb12cd755ebce8e55d46f5935d9b719af312a1c91f"
+    },
+    {
+      "path": "plugins/tools/api/darkweb_batch_search.yaml",
+      "sha256": "0d7b8ff2571ec04c8eebb72b86471101e57e967f95de40f7addecc1dd4525754"
+    },
+    {
+      "path": "plugins/tools/api/telegram_batch_search.handler.py",
+      "sha256": "3c92c53bd3af4c1c26e1833b085076f72f8888382dd223142c134b8b9a586c9d"
+    },
+    {
+      "path": "plugins/tools/api/telegram_batch_search.yaml",
+      "sha256": "d8e028be65b36d15d7a89de4fef1a43075dcaf182e56bddf2287e42f41b40c28"
+    },
+    {
+      "path": "plugins/tools/api/web_batch_search.handler.py",
+      "sha256": "21752f513e72ec297cf262619193e05ceeb6b245177fcc135bf5db6c76066a7d"
+    },
+    {
+      "path": "plugins/tools/api/web_batch_search.yaml",
+      "sha256": "5805f5965d017a8189f0796f8f9fc2fd4f012373610f1d376e318ae2d56e9ab8"
+    },
+    {
+      "path": "plugins/workflows/darkweb_source_search/workflow.json",
+      "sha256": "fe13c3c4957546edc8aa98ca1de7a3948d76fbfc9c1f375d5502e8daceeeb266"
+    },
+    {
+      "path": "plugins/workflows/telegram_source_search/workflow.json",
+      "sha256": "6daf08bf689eb46dba64262b31ec69c6f9d221de9baaf00858b422e3e459c5c8"
+    },
+    {
+      "path": "plugins/workflows/threat_intel_search_pipeline/README.md",
+      "sha256": "2229c5ecf63659dd8953ebcfa9c5f085f8fe0d63c00e30fd0158632fbcaa0e7e"
+    },
+    {
+      "path": "plugins/workflows/threat_intel_search_pipeline/workflow.json",
+      "sha256": "4a461903681544cfa857e2e5eb30211e9256f2c36a914306e12272852aeb50be"
+    },
+    {
+      "path": "plugins/workflows/web_source_search/workflow.json",
+      "sha256": "b5e880adc3310cc9b4925a0012ff49ecc2cd6038c86e2d837106118e9523b649"
+    }
+  ],
+  "runtime_patch_files": 15,
+  "export_adjustments": [
+    {
+      "path": "plugins/agents/search-supervisor/prompt.md",
+      "change": "Replaced a machine-specific absolute workflow path with ~/.flocks/plugins/workflows/threat_intel_search_pipeline/workflow.json."
+    }
+  ]
+}

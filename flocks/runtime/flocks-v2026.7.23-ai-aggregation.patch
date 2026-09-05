@@ -1,0 +1,1389 @@
+diff --git a/flocks/agent/prompt_utils.py b/flocks/agent/prompt_utils.py
+index 9c7beb9434a13f2f2f0f50e5ed306bd95fa44d43..a48f8adac81007b89af26266d279edbde8513610 100644
+--- a/flocks/agent/prompt_utils.py
++++ b/flocks/agent/prompt_utils.py
+@@ -382,8 +382,18 @@ def build_workflows_section(workflows: List[AvailableWorkflow]) -> str:
+         short_desc = w.description.split("\n")[0] if w.description else ""
+         rows.append(f"| `{w.name}` | {short_desc} | `{w.path}` | global |")
+ 
++    input_notes: List[str] = []
++    for w in workflows:
++        if w.name == "threat_intel_search_pipeline":
++            input_notes.append(
++                "- `threat_intel_search_pipeline`: pass the user's search request as `inputs.query`; "
++                "infer optional scope into `inputs.search_window_days`, `inputs.include_sources`, and related inputs."
++            )
++
+     rows += [
+         "",
+         '**Usage**: `run_workflow(workflow="<path>", inputs={...})`',
+     ]
++    if input_notes:
++        rows += ["", "**Input notes**:", *input_notes]
+     return "\n".join(rows)
+diff --git a/flocks/task/background.py b/flocks/task/background.py
+index e5a62d0efb9c013e43a3df34cecb79a9d61b83ba..c3ce4baa19fb4fce0562da3b142cf110a9875b6c 100644
+--- a/flocks/task/background.py
++++ b/flocks/task/background.py
+@@ -6,6 +6,7 @@ Ported from oh-my-opencode background agent manager behavior.
+ from __future__ import annotations
+ 
+ import asyncio
++import os
+ from dataclasses import dataclass, field
+ from datetime import datetime
+ from typing import Dict, Optional, Any, List
+@@ -20,8 +21,32 @@ from flocks.session.session_loop import SessionLoop
+ 
+ log = Log.create(service="background.manager")
+ 
++_DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 1800
++
++
++def _read_inactivity_timeout_seconds() -> int:
++    raw = os.environ.get("FLOCKS_TASK_INACTIVITY_TIMEOUT")
++    if raw is None:
++        return _DEFAULT_INACTIVITY_TIMEOUT_SECONDS
++    try:
++        timeout_seconds = int(raw)
++    except ValueError:
++        timeout_seconds = 0
++    if timeout_seconds <= 0:
++        log.warn(
++            "background.inactivity_timeout.invalid",
++            {
++                "value": raw,
++                "default": _DEFAULT_INACTIVITY_TIMEOUT_SECONDS,
++            },
++        )
++        return _DEFAULT_INACTIVITY_TIMEOUT_SECONDS
++    return timeout_seconds
++
++
+ # 任务无活跃交互超时时间（秒），超过此时间任务将被标记为失败
+-_INACTIVITY_TIMEOUT_SECONDS = 300  # 5 minutes
++# 可通过环境变量 FLOCKS_TASK_INACTIVITY_TIMEOUT 覆盖；默认 1800 秒（30 分钟）
++_INACTIVITY_TIMEOUT_SECONDS = _read_inactivity_timeout_seconds()
+ # 看门狗检查间隔（秒）
+ _WATCHDOG_CHECK_INTERVAL = 30
+ 
+diff --git a/flocks/task/executor.py b/flocks/task/executor.py
+index 875cddf320faa4a6b9e12b74c89e24252ba8cd07..8681a6364f8a3284a14ba8897b5d62f8f5a381fc 100644
+--- a/flocks/task/executor.py
++++ b/flocks/task/executor.py
+@@ -53,9 +53,7 @@ class TaskExecutor:
+         if execution.started_at is None:
+             execution.started_at = datetime.now(timezone.utc)
+ 
+-        session_id: Optional[str] = None
+-        if execution.execution_mode == ExecutionMode.AGENT:
+-            session_id = await cls._create_task_session(execution, scheduler)
++        session_id = await cls._create_task_session(execution, scheduler)
+ 
+         execution.session_id = session_id
+         await TaskStore.update_execution(execution)
+@@ -165,12 +163,23 @@ class TaskExecutor:
+         cls, execution: TaskExecution, scheduler: TaskScheduler
+     ) -> Optional[str]:
+         from flocks.workflow.fs_store import read_workflow_from_fs
++        from flocks.workflow.tool_context import build_workflow_tool_context
+ 
+         if not execution.workflow_id:
+             raise ValueError("workflow execution_mode requires workflow_id")
+         workflow_data = read_workflow_from_fs(execution.workflow_id)
+         if workflow_data is None:
+             raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
++        if not execution.session_id:
++            raise RuntimeError("Workflow task session was not created")
++
++        tool_context = await build_workflow_tool_context(
++            workflow_id=execution.workflow_id,
++            action_name="task",
++            session_id=execution.session_id,
++            agent=execution.agent_name,
++        )
++
+         snapshot = execution.execution_input_snapshot or {}
+         inputs = snapshot.get("context") or scheduler.context or {}
+         result = await asyncio.to_thread(
+@@ -178,6 +187,7 @@ class TaskExecutor:
+             execution.id,
+             workflow_data["workflowJson"],
+             inputs,
++            tool_context,
+         )
+         result_status = getattr(result, "status", None)
+         if result_status == "CANCELLED":
+@@ -194,6 +204,7 @@ class TaskExecutor:
+         execution_id: str,
+         workflow: dict[str, Any],
+         inputs: Dict[str, Any],
++        tool_context: Optional[Any] = None,
+     ):
+         from flocks.workflow.runner import run_workflow
+ 
+@@ -207,6 +218,7 @@ class TaskExecutor:
+                 workflow=workflow,
+                 inputs=inputs,
+                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
++                tool_context=tool_context,
+                 cancel=cancel_event.is_set,
+             )
+         finally:
+diff --git a/flocks/tool/task/run_workflow.py b/flocks/tool/task/run_workflow.py
+index a52ca2426bd9e90a94e6fde10dcecf64154d5b1a..0bca24fd26dd6823af3f303a1979ed4f3aca0b2f 100644
+--- a/flocks/tool/task/run_workflow.py
++++ b/flocks/tool/task/run_workflow.py
+@@ -108,6 +108,8 @@ Note:
+ - If no workflow file exists, ask user to specify the workflow file path or use the `workflow-builder` skill to create."""
+ 
+ DESCRIPTION = _BASE_DESCRIPTION
++_THREAT_INTEL_SEARCH_WORKFLOW = "threat_intel_search_pipeline"
++_THREAT_INTEL_SEARCH_QUERY_KEYS = ("query", "target", "text")
+ 
+ # TTL cache for _build_description — avoid repeated file-system scans on every tool call.
+ _DESCRIPTION_CACHE: Optional[str] = None
+@@ -342,6 +344,35 @@ def _workflow_tool_metadata(
+     return metadata
+ 
+ 
++def _is_threat_intel_search_workflow(identifier: Any) -> bool:
++    normalized = str(identifier or "").strip().lower().replace("\\", "/")
++    if not normalized:
++        return False
++    return _THREAT_INTEL_SEARCH_WORKFLOW in [part for part in normalized.split("/") if part]
++
++
++def _has_threat_intel_search_query(inputs: Dict[str, Any]) -> bool:
++    return any(str(inputs.get(key) or "").strip() for key in _THREAT_INTEL_SEARCH_QUERY_KEYS)
++
++
++def _validate_workflow_inputs(
++    workflow_id: Any,
++    workflow_name: Any,
++    inputs: Dict[str, Any],
++) -> Optional[str]:
++    if not (
++        _is_threat_intel_search_workflow(workflow_id)
++        or _is_threat_intel_search_workflow(workflow_name)
++    ):
++        return None
++    if _has_threat_intel_search_query(inputs):
++        return None
++    return (
++        "threat_intel_search_pipeline requires a search target. "
++        "Call run_workflow with inputs.query (or inputs.target/inputs.text) set to the user's search request."
++    )
++
++
+ async def _record_workflow_tool_result(workflow_id: str, result: Any) -> None:
+     """Record workflow tool execution to JSONL (best-effort)."""
+     try:
+@@ -549,9 +580,12 @@ async def run_workflow_tool(
+     else:
+         workflow_id = str(workflow_source)
+ 
+-    workflow_inputs = inputs or {}
++    workflow_inputs = dict(inputs or {})
+     canonical_workflow_id = registered_workflow_id or resolve_workflow_id_from_source(workflow_source)
+     display_workflow_id = canonical_workflow_id or workflow_id
++    validation_error = _validate_workflow_inputs(display_workflow_id, workflow_name, workflow_inputs)
++    if validation_error:
++        return ToolResult(success=False, error=validation_error)
+     tracked_execution: Optional[Dict[str, Any]] = None
+     tracked_step_count = 0
+     pending_step_index: Optional[int] = None
+diff --git a/flocks/tool/truncation.py b/flocks/tool/truncation.py
+index bea3e10993f1c58dbfc044be13b8f33792597732..b133aeaf6c7cd2f019748b91d7a73d8661e87bd7 100644
+--- a/flocks/tool/truncation.py
++++ b/flocks/tool/truncation.py
+@@ -28,8 +28,8 @@ from flocks.workspace.manager import WorkspaceManager
+ 
+ log = Log.create(service="tool.truncation")
+ 
+-MAX_LINES = 1000
+-MAX_BYTES = 100 * 1024  # 100 KB
++MAX_LINES = 5000
++MAX_BYTES = 500 * 1024  # 500 KB
+ 
+ MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3
+ HARD_MAX_TOOL_RESULT_CHARS = 100_000
+diff --git a/flocks/tool/web/websearch.py b/flocks/tool/web/websearch.py
+index c1d9c7f7259b03243804f70f0a8039a708a736ec..ffb3cfc58dc19f70e311744ba0d4be64796eeee1 100644
+--- a/flocks/tool/web/websearch.py
++++ b/flocks/tool/web/websearch.py
+@@ -1,11 +1,16 @@
+ """
+-WebSearch Tool - Web search
++WebSearch Tool - Web search via Exa
+ 
+-Performs web searches using external search APIs.
+-Requires API configuration to function.
++Performs a single semantic web search through the Exa API (https://exa.ai)
++and returns structured results. Exa is a neural / semantic search engine, so
++a natural-language query is matched by meaning rather than literal keywords.
++
++Requires an Exa API key in the flocks secret store under "exa_api_key"
++(falls back to the EXA_API_KEY environment variable).
+ """
+ 
+ import json
++import os
+ from typing import Optional
+ from datetime import datetime
+ 
+@@ -18,30 +23,65 @@ from flocks.utils.log import Log
+ log = Log.create(service="tool.websearch")
+ 
+ 
+-# API configuration (can be overridden)
+-API_BASE_URL = "https://mcp.exa.ai"
+-DEFAULT_NUM_RESULTS = 8
+-DEFAULT_TIMEOUT = 25  # seconds
++EXA_API_URL = "https://api.exa.ai/search"
++DEFAULT_NUM_RESULTS = 10
++MAX_NUM_RESULTS = 100
++DEFAULT_TIMEOUT = 45  # seconds
++_SNIPPET_MAX_CHARS = 600
++EXA_SEARCH_TYPES = (
++    "instant",
++    "fast",
++    "auto",
++    "deep-lite",
++    "deep",
++    "deep-reasoning",
++)
++LEGACY_SEARCH_TYPE_MAP = {
++    "neural": "auto",
++    "keyword": "auto",
++}
++
++
++def _get_exa_api_key() -> Optional[str]:
++    """Return the Exa API key from the flocks secret store, or None.
++
++    Looked up from the secret store ("exa_api_key"), falling back to the
++    EXA_API_KEY environment variable.
++    """
++    try:
++        from flocks.security import get_secret_manager
++        key = get_secret_manager().get("exa_api_key")
++        if key and key.strip():
++            return key.strip()
++    except Exception as e:
++        log.warning("websearch.exa_key_lookup_failed", {"error": str(e)})
++    env_key = os.environ.get("EXA_API_KEY")
++    return env_key.strip() if env_key and env_key.strip() else None
+ 
+ 
+ def get_description() -> str:
+     """Get tool description with current date"""
+     today = datetime.now().strftime("%Y-%m-%d")
+-    return f"""Search the web for real-time information about any topic.
++    return f"""Search the web for real-time information via Exa semantic search.
+ 
+ Use this tool when you need:
+ - Up-to-date information that might not be in training data
+-- Current events or technology news
++- Current events, security news, breach reports, or advisories
+ - Documentation for libraries, frameworks, or tools
+ - Verification of current facts
+ 
++Exa matches the query by meaning, so a descriptive natural-language query
++works best.
++
+ Today's date: {today}
+ Use the current year when searching for recent information.
+ 
+ Parameters:
+-- query: Search query (be specific for better results)
+-- numResults: Number of results to return (default: 8)
+-- type: Search type - auto, fast, or deep"""
++- query: Search query (a natural-language description works best)
++- numResults: Number of results to return (1-100; default: 10)
++- startPublishedDate: ISO date; only return results published on/after it
++- type: Exa search type - instant, fast, auto, deep-lite, deep, or deep-reasoning.
++  Legacy neural/keyword values are accepted and mapped to auto."""
+ 
+ 
+ @ToolRegistry.register_function(
+@@ -58,17 +98,27 @@ Parameters:
+         ToolParameter(
+             name="numResults",
+             type=ParameterType.INTEGER,
+-            description="Number of search results to return (default: 8)",
++            description="Number of search results to return (1-100; default: 10)",
+             required=False,
+             default=DEFAULT_NUM_RESULTS
+         ),
++        ToolParameter(
++            name="startPublishedDate",
++            type=ParameterType.STRING,
++            description="ISO 8601 date; only return results published on or after it",
++            required=False,
++            default=""
++        ),
+         ToolParameter(
+             name="type",
+             type=ParameterType.STRING,
+-            description="Search type - 'auto': balanced, 'fast': quick, 'deep': comprehensive",
++            description=(
++                "Exa search type: instant, fast, auto, deep-lite, deep, or deep-reasoning. "
++                "Legacy neural/keyword values map to auto."
++            ),
+             required=False,
+             default="auto",
+-            enum=["auto", "fast", "deep"]
++            enum=[*EXA_SEARCH_TYPES, *LEGACY_SEARCH_TYPE_MAP]
+         ),
+     ]
+ )
+@@ -76,26 +126,65 @@ async def websearch_tool(
+     ctx: ToolContext,
+     query: str,
+     numResults: int = DEFAULT_NUM_RESULTS,
++    startPublishedDate: str = "",
+     type: str = "auto",
+ ) -> ToolResult:
+     """
+-    Perform a web search
+-    
++    Perform a single web search via the Exa API.
++
+     Args:
+         ctx: Tool context
+         query: Search query
+-        numResults: Number of results
+-        type: Search type
+-        
++        numResults: Maximum number of results to return
++        startPublishedDate: ISO date lower bound on publish date (optional)
++        type: Exa search type; legacy neural/keyword values map to auto
++
+     Returns:
+-        ToolResult with search results
++        ToolResult whose output is a list of
++        {title, url, snippet, publishedDate} dicts.
+     """
+     if not query:
+         return ToolResult(
+             success=False,
+             error="Search query is required"
+         )
+-    
++
++    api_key = _get_exa_api_key()
++    if not api_key:
++        return ToolResult(
++            success=False,
++            error="Exa API key not configured (set secret 'exa_api_key' or EXA_API_KEY)",
++        )
++
++    requested_type = type
++    if requested_type in LEGACY_SEARCH_TYPE_MAP:
++        effective_type = LEGACY_SEARCH_TYPE_MAP[requested_type]
++        log.warning(
++            "websearch.legacy_type_mapped",
++            {"requested_type": requested_type, "effective_type": effective_type},
++        )
++    elif requested_type in EXA_SEARCH_TYPES:
++        effective_type = requested_type
++    else:
++        effective_type = "auto"
++        log.warning(
++            "websearch.invalid_type_defaulted",
++            {"requested_type": requested_type, "effective_type": effective_type},
++        )
++
++    try:
++        num = int(numResults)
++        if num <= 0:
++            num = DEFAULT_NUM_RESULTS
++        elif num > MAX_NUM_RESULTS:
++            log.warning(
++                "websearch.num_results_clamped",
++                {"requested_num_results": num, "effective_num_results": MAX_NUM_RESULTS},
++            )
++            num = MAX_NUM_RESULTS
++    except Exception:
++        num = DEFAULT_NUM_RESULTS
++
+     # Request permission
+     await ctx.ask(
+         permission="websearch",
+@@ -103,91 +192,98 @@ async def websearch_tool(
+         always=["*"],
+         metadata={
+             "query": query,
+-            "numResults": numResults,
+-            "type": type
++            "numResults": num,
++            "requested_type": requested_type,
++            "effective_type": effective_type,
+         }
+     )
+-    
+-    title = f"Web search: {query}"
+-    
++
++    title = f"Web search: {query[:80]}"
++
++    body = {
++        "query": query,
++        "type": effective_type,
++        "numResults": num,
++        "contents": {"text": {"maxCharacters": 800}},
++    }
++    if startPublishedDate:
++        body["startPublishedDate"] = startPublishedDate
++
+     try:
+         import aiohttp
+-        
+-        # Build request
+-        request_data = {
+-            "jsonrpc": "2.0",
+-            "id": 1,
+-            "method": "tools/call",
+-            "params": {
+-                "name": "web_search_exa",
+-                "arguments": {
+-                    "query": query,
+-                    "type": type,
+-                    "numResults": numResults,
+-                    "livecrawl": "fallback"
+-                }
+-            }
+-        }
+-        
+-        headers = {
+-            "Accept": "application/json, text/event-stream",
+-            "Content-Type": "application/json"
+-        }
+-        
++
+         async with aiohttp.ClientSession() as session:
+             async with session.post(
+-                f"{API_BASE_URL}/mcp",
+-                json=request_data,
+-                headers=headers,
+-                timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
++                EXA_API_URL,
++                json=body,
++                headers={"x-api-key": api_key, "Content-Type": "application/json"},
++                timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
+             ) as response:
++                response_text = await response.text()
+                 if response.status != 200:
+-                    error_text = await response.text()
+                     return ToolResult(
+                         success=False,
+-                        error=f"Search error ({response.status}): {error_text}",
+-                        title=title
++                        error=f"Exa error ({response.status}): {response_text[:300]}",
++                        title=title,
+                     )
+-                
+-                response_text = await response.text()
+-                
+-                # Parse SSE response
+-                for line in response_text.split("\n"):
+-                    if line.startswith("data: "):
+-                        data = json.loads(line[6:])
+-                        if data.get("result", {}).get("content"):
+-                            content = data["result"]["content"]
+-                            if content:
+-                                return ToolResult(
+-                                    success=True,
+-                                    output=content[0].get("text", ""),
+-                                    title=title,
+-                                    metadata={}
+-                                )
+-                
+-                return ToolResult(
+-                    success=True,
+-                    output="No search results found. Please try a different query.",
+-                    title=title,
+-                    metadata={}
+-                )
+-                
++
++        try:
++            payload = json.loads(response_text)
++        except Exception as e:
++            return ToolResult(
++                success=False,
++                error=f"Exa returned a non-JSON response: {e}",
++                title=title,
++            )
++
++        items = []
++        for r in payload.get("results") or []:
++            if not isinstance(r, dict):
++                continue
++            url = r.get("url") or ""
++            if not url:
++                continue
++            snippet = r.get("text") or ""
++            if isinstance(snippet, str) and len(snippet) > _SNIPPET_MAX_CHARS:
++                snippet = snippet[:_SNIPPET_MAX_CHARS] + "..."
++            items.append({
++                "title": r.get("title") or "",
++                "url": url,
++                "snippet": snippet,
++                "publishedDate": r.get("publishedDate") or "",
++            })
++
++        return ToolResult(
++            success=True,
++            output=items,
++            title=title,
++            metadata={
++                "query": query,
++                "result_count": len(items),
++                "requested_type": requested_type,
++                "effective_type": effective_type,
++                "num_results": num,
++            },
++        )
++
+     except ImportError:
+         return ToolResult(
+             success=False,
+             error="Web search requires aiohttp library. Install with: pip install aiohttp",
+-            title=title
++            title=title,
+         )
+     except Exception as e:
+-        if "timeout" in str(e).lower() or "abort" in str(e).lower():
++        msg = str(e).lower()
++        if "timeout" in msg or "timed out" in msg:
+             return ToolResult(
+                 success=False,
+-                error="Search request timed out",
+-                title=title
++                error=f"Exa request timed out after {DEFAULT_TIMEOUT}s",
++                title=title,
+             )
+-        
++        # Phrased to include "connection" so a momentary network blip is
++        # treated as transient by the batch handler's retry.
+         return ToolResult(
+             success=False,
+-            error=f"Search failed: {str(e)}",
+-            title=title
++            error=f"Exa connection failed: {e}",
++            title=title,
+         )
+diff --git a/flocks/workflow/engine.py b/flocks/workflow/engine.py
+index a0dcffe273cde20ba82488122ed6229567d88ee6..a67806e5109a7b9fad7c08d61c5d5d0ed838f04d 100644
+--- a/flocks/workflow/engine.py
++++ b/flocks/workflow/engine.py
+@@ -88,8 +88,50 @@ def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
+ 
+ 
+ def _default_workflow_loader(workflow_id: str) -> "Workflow":
+-    """Default loader: resolves workflow by ID from disk, then legacy KV."""
++    """Resolve a workflow from disk, legacy KV, an explicit path, or registry."""
+     import asyncio
++    from pathlib import Path
++
++    def _read_workflow_path(path_value: Any) -> Optional[Dict[str, Any]]:
++        raw = str(path_value or "").strip()
++        if not raw:
++            return None
++        candidate = Path(raw).expanduser()
++        if candidate.is_dir():
++            candidate = candidate / "workflow.json"
++        if not candidate.is_file():
++            return None
++        return json.loads(candidate.read_text(encoding="utf-8"))
++
++    async def _read_registered_workflow_path() -> Optional[Dict[str, Any]]:
++        from flocks.workflow.center import list_registry_entries
++
++        try:
++            entries = await list_registry_entries()
++        except Exception:
++            _logger.debug("Failed to read workflow registry", exc_info=True)
++            return None
++
++        requested_id = str(workflow_id or "").strip()
++        for entry in entries:
++            if not isinstance(entry, dict):
++                continue
++            identifiers = {
++                str(value).strip()
++                for value in (
++                    entry.get("id"),
++                    entry.get("name"),
++                    entry.get("workflowId"),
++                    entry.get("logicalWorkflowId"),
++                )
++                if value is not None
++            }
++            if requested_id not in identifiers:
++                continue
++            workflow = _read_workflow_path(entry.get("workflowPath"))
++            if workflow is not None:
++                return workflow
++        return None
+ 
+     async def _load():
+         from flocks.workflow.fs_store import read_workflow_from_fs
+@@ -98,6 +140,10 @@ def _default_workflow_loader(workflow_id: str) -> "Workflow":
+         data = read_workflow_from_fs(workflow_id)
+         if data is None:
+             data = await Storage.read(f"workflow/{workflow_id}")
++        if data is None:
++            data = _read_workflow_path(workflow_id)
++        if data is None:
++            data = await _read_registered_workflow_path()
+         if data is None:
+             raise NodeExecutionError(
+                 node_id="<subworkflow>",
+@@ -473,6 +519,7 @@ class WorkflowEngine:
+                     _nid, _nd, _inp, _src = ready[_eo.idx]
+                     _sn = state.steps + _eo.idx + 1
+                     state.last_node_id = _nid
++                    state.result_outputs = _eo.outputs
+                     state.last_outputs = (
+                         _summarize_for_observability(_eo.outputs) if self.history_mode == "summary" else _eo.outputs
+                     )
+@@ -949,7 +996,9 @@ class WorkflowEngine:
+             use_llm=self.use_llm,
+             trace=self.trace,
+             node_timeout_s=self.node_timeout_s,
+-            history_mode=self.history_mode,
++            # Child outputs feed the parent runtime dataflow and must remain raw.
++            # The parent still applies its own history mode for observability.
++            history_mode="full",
+             dataflow_mode=self.dataflow_mode,
+             _depth=self._depth + 1,
+             max_parallel_workers=self.max_parallel_workers,
+diff --git a/flocks/workflow/execution_state.py b/flocks/workflow/execution_state.py
+index e418217fabe0f6a0d91d307ed46a71c651658f23..190f0e04a0b409bd7a0baf1fd5c933340376b090 100644
+--- a/flocks/workflow/execution_state.py
++++ b/flocks/workflow/execution_state.py
+@@ -40,6 +40,7 @@ class WorkflowExecutionState:
+     steps: int = 0
+     last_node_id: Optional[str] = None
+     last_outputs: Dict[str, Any] = field(default_factory=dict)
++    result_outputs: Dict[str, Any] = field(default_factory=dict)
+     history: list[StepResult] = field(default_factory=list)
+     join_inputs: Dict[str, Dict[str, Dict[str, Any]]] = field(default_factory=dict)
+     join_seen_sources: Dict[str, Set[str]] = field(default_factory=dict)
+@@ -70,6 +71,6 @@ class WorkflowExecutionState:
+             steps=self.steps,
+             history=self.history,
+             last_node_id=self.last_node_id,
+-            outputs=self.last_outputs,
++            outputs=self.result_outputs,
+             run_id=self.run_id,
+         )
+diff --git a/tests/agent/test_prompt_utils.py b/tests/agent/test_prompt_utils.py
+index e90c8c685fa2c9823c12152754e49c039c17b039..6b4cc402046cc70b074081281cab15f52e4bd7b6 100644
+--- a/tests/agent/test_prompt_utils.py
++++ b/tests/agent/test_prompt_utils.py
+@@ -337,6 +337,12 @@ class TestBuildWorkflowsSection:
+         output = build_workflows_section([wf])
+         assert "run_workflow" in output
+ 
++    def test_threat_intel_workflow_query_hint_present(self):
++        wf = self._make_workflow(name="threat_intel_search_pipeline")
++        output = build_workflows_section([wf])
++        assert "inputs.query" in output
++        assert "search_window_days" in output
++
+     def test_section_header_present(self):
+         wf = self._make_workflow()
+         output = build_workflows_section([wf])
+diff --git a/tests/task/test_task.py b/tests/task/test_task.py
+index f2b31aad7e05f3558a4ef09d083f0ec2468a6ba0..607c69e2a31a3a14ece9ff51c1f95d5665f9cfff 100644
+--- a/tests/task/test_task.py
++++ b/tests/task/test_task.py
+@@ -14,7 +14,8 @@ import flocks.task.manager as task_manager_module
+ import flocks.task.plugin_sync as plugin_sync_module
+ from flocks.server.routes import question as question_routes
+ from flocks.config.config import Config
+-from flocks.session.message import ToolPart, ToolStateCompleted
++from flocks.session.message import Message, ToolPart, ToolStateCompleted
++from flocks.session.session import Session
+ from flocks.storage.storage import Storage
+ from flocks.task.background import BackgroundManager, BackgroundTask, LaunchInput
+ from flocks.task.executor import TaskExecutor
+@@ -486,6 +487,44 @@ async def test_queue_status_uses_largest_elapsed_running_time(tmp_path: Path):
+     assert status["oldest_running_seconds"] >= task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+ 
+ 
++def test_background_inactivity_timeout_defaults_when_env_is_missing(
++    monkeypatch: pytest.MonkeyPatch,
++):
++    monkeypatch.delenv("FLOCKS_TASK_INACTIVITY_TIMEOUT", raising=False)
++
++    assert background_module._read_inactivity_timeout_seconds() == 1800
++
++
++def test_background_inactivity_timeout_uses_positive_env_value(
++    monkeypatch: pytest.MonkeyPatch,
++):
++    monkeypatch.setenv("FLOCKS_TASK_INACTIVITY_TIMEOUT", "2400")
++
++    assert background_module._read_inactivity_timeout_seconds() == 2400
++
++
++@pytest.mark.parametrize("raw_value", ["", "invalid", "0", "-1"])
++def test_background_inactivity_timeout_invalid_value_warns_and_defaults(
++    monkeypatch: pytest.MonkeyPatch,
++    raw_value: str,
++):
++    warnings: list[tuple[str, dict[str, object]]] = []
++    monkeypatch.setenv("FLOCKS_TASK_INACTIVITY_TIMEOUT", raw_value)
++    monkeypatch.setattr(
++        background_module.log,
++        "warn",
++        lambda event, payload: warnings.append((event, payload)),
++    )
++
++    assert background_module._read_inactivity_timeout_seconds() == 1800
++    assert warnings == [
++        (
++            "background.inactivity_timeout.invalid",
++            {"value": raw_value, "default": 1800},
++        )
++    ]
++
++
+ @pytest.mark.asyncio
+ async def test_background_task_fails_fast_when_user_input_is_required(
+     monkeypatch: pytest.MonkeyPatch,
+@@ -689,9 +728,11 @@ async def test_background_task_completion_does_not_resume_running_parent(
+ 
+ 
+ @pytest.mark.asyncio
+-async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
++async def test_dispatch_workflow_creates_persisted_context_before_run(
++    tmp_path: Path,
+     monkeypatch: pytest.MonkeyPatch,
+ ):
++    from flocks.server.routes import event as event_routes
+     from flocks.workflow import fs_store
+     from flocks.workflow import runner
+ 
+@@ -702,39 +743,75 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
+         "edges": [],
+     }
+     captured: dict[str, object] = {}
++    timeline: list[str] = []
+ 
+     def fake_read_workflow_from_fs(workflow_id: str):
+         captured["workflow_id"] = workflow_id
+         return {"workflowJson": workflow_json}
+ 
+     def fake_run_workflow(*, workflow, inputs, **_kwargs):
++        timeline.append("workflow")
+         captured["workflow"] = workflow
+         captured["inputs"] = inputs
+-        return SimpleNamespace(error=None, outputs={"ok": True})
++        captured["tool_context"] = _kwargs.get("tool_context")
++        return SimpleNamespace(status="COMPLETED", error=None, outputs={"ok": True})
++
++    async def fake_publish_event(event_name: str, payload: dict[str, object]):
++        persisted = await TaskStore.get_execution(execution.id)
++        assert persisted is not None
++        assert persisted.session_id == payload["sessionID"]
++        timeline.append(event_name)
++        captured["event_payload"] = payload
+ 
+     monkeypatch.setattr(fs_store, "read_workflow_from_fs", fake_read_workflow_from_fs)
+     monkeypatch.setattr(runner, "run_workflow", fake_run_workflow)
++    monkeypatch.setattr(event_routes, "publish_event", fake_publish_event)
++    monkeypatch.setattr(
++        TaskExecutor,
++        "_resolve_task_session_context",
++        AsyncMock(return_value=(str(tmp_path / "workflow-task"), "project-workflow")),
++    )
+ 
+-    scheduler = TaskScheduler(
++    scheduler = await TaskManager.create_scheduler(
+         title="定时 workflow",
+-        executionMode=ExecutionMode.WORKFLOW,
+-        workflowID="local-script-runner",
++        mode=SchedulerMode.ONCE,
++        trigger=TaskTrigger(run_immediately=False),
++        execution_mode=ExecutionMode.WORKFLOW,
++        workflow_id="local-script-runner",
+         context={"fallback": "scheduler"},
++        workspace_directory=str(tmp_path / "workflow-task"),
+     )
+-    execution = TaskExecution(
+-        schedulerID=scheduler.id,
+-        title=scheduler.title,
+-        executionMode=ExecutionMode.WORKFLOW,
+-        workflowID="local-script-runner",
+-        executionInputSnapshot={"context": {"source": "snapshot"}},
++    execution = await TaskManager.create_execution_from_scheduler(
++        scheduler,
++        trigger_type=ExecutionTriggerType.RUN_ONCE,
++        enqueue=False,
+     )
++    execution.execution_input_snapshot = {"context": {"source": "snapshot"}}
++    await TaskStore.update_execution(execution)
+ 
+-    result = await TaskExecutor._trigger_workflow(execution, scheduler)
++    result = await TaskExecutor.dispatch(execution, scheduler)
+ 
+     assert captured["workflow_id"] == "local-script-runner"
+     assert captured["workflow"] == workflow_json
+     assert captured["inputs"] == {"source": "snapshot"}
+-    assert result == "{'ok': True}"
++    tool_context = captured["tool_context"]
++    assert tool_context.session_id == result.session_id
++    assert tool_context.agent == "rex"
++    assert await Session.get_by_id(tool_context.session_id) is not None
++    assert await Message.get(tool_context.session_id, tool_context.message_id) is not None
++
++    persisted = await TaskStore.get_execution(execution.id)
++    assert persisted is not None
++    assert persisted.session_id == tool_context.session_id
++    assert timeline == ["task.updated", "workflow"]
++    assert captured["event_payload"] == {
++        "executionID": execution.id,
++        "schedulerID": scheduler.id,
++        "sessionID": tool_context.session_id,
++        "status": TaskStatus.RUNNING.value,
++    }
++    assert result.status == TaskStatus.COMPLETED
++    assert result.result_summary == "{'ok': True}"
+ 
+ 
+ @pytest.mark.asyncio
+diff --git a/tests/tool/test_run_workflow_tool_inputs.py b/tests/tool/test_run_workflow_tool_inputs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..36a64a38788fcdf1f29d56840910fa1a2fe57341
+--- /dev/null
++++ b/tests/tool/test_run_workflow_tool_inputs.py
+@@ -0,0 +1,101 @@
++from __future__ import annotations
++
++from unittest.mock import AsyncMock, Mock
++
++import pytest
++
++from flocks.tool import ToolContext
++import flocks.tool.task.run_workflow as run_workflow_module
++from flocks.tool.task.run_workflow import _validate_workflow_inputs
++
++
++@pytest.mark.parametrize(
++    ("workflow_id", "workflow_name"),
++    [
++        ("threat_intel_search_pipeline", "Threat Intel Search"),
++        ("other-id", "threat_intel_search_pipeline"),
++        (r"C:\workflows\THREAT_INTEL_SEARCH_PIPELINE\workflow.json", "Threat Intel Search"),
++    ],
++)
++def test_threat_intel_workflow_requires_query_input(workflow_id, workflow_name):
++    error = _validate_workflow_inputs(
++        workflow_id,
++        workflow_name,
++        {},
++    )
++
++    assert error is not None
++    assert "inputs.query" in error
++
++
++@pytest.mark.parametrize(
++    "inputs",
++    [
++        {"query": "recent energy ransomware incidents"},
++        {"target": "example.com"},
++        {"text": "APT activity"},
++    ],
++)
++def test_threat_intel_workflow_accepts_supported_query_input(inputs):
++    error = _validate_workflow_inputs(
++        "threat_intel_search_pipeline",
++        "threat_intel_search_pipeline",
++        inputs,
++    )
++
++    assert error is None
++
++
++def test_threat_intel_workflow_rejects_blank_query_input():
++    error = _validate_workflow_inputs(
++        "threat_intel_search_pipeline",
++        "threat_intel_search_pipeline",
++        {"query": " \t"},
++    )
++
++    assert error is not None
++
++
++def test_unrelated_workflow_does_not_require_query_input():
++    error = _validate_workflow_inputs("other_workflow", "other_workflow", {})
++
++    assert error is None
++
++
++@pytest.mark.anyio
++async def test_registered_threat_intel_workflow_is_validated_before_execution(monkeypatch):
++    runtime = Mock(name="run_workflow")
++    registered_workflow = {
++        "name": "Threat Intel Search",
++        "start": "search",
++        "nodes": [{"id": "search", "type": "python", "code": "outputs['ok'] = True"}],
++        "edges": [],
++    }
++    read_registered = Mock(
++        return_value={
++            "id": "threat_intel_search_pipeline",
++            "workflowJson": registered_workflow,
++        }
++    )
++    monkeypatch.setattr(run_workflow_module, "_build_description", AsyncMock(return_value="Run workflow"))
++    monkeypatch.setattr(
++        run_workflow_module,
++        "_get_workflow_runtime",
++        Mock(return_value=(Mock(name="RequirementsInstaller"), runtime, Mock(name="RunWorkflowResult"))),
++    )
++    monkeypatch.setattr(run_workflow_module, "read_workflow_from_fs", read_registered)
++
++    result = await run_workflow_module.run_workflow_tool(
++        ctx=ToolContext(
++            session_id="test-session",
++            message_id="test-message",
++            agent="test",
++        ),
++        workflow="threat_intel_search_pipeline",
++        inputs={},
++    )
++
++    assert result.success is False
++    assert "inputs.query" in result.error
++    read_registered.assert_called_once_with("threat_intel_search_pipeline")
++    runtime.assert_not_called()
+diff --git a/tests/tool/test_truncation.py b/tests/tool/test_truncation.py
+index ec2b243cd5a89c3af55dddd9f7e8f5885ddc6da3..7f60980491da6bdff518787ebe544c95151c98eb 100644
+--- a/tests/tool/test_truncation.py
++++ b/tests/tool/test_truncation.py
+@@ -5,9 +5,9 @@ from __future__ import annotations
+ from flocks.tool import truncation
+ 
+ 
+-def test_default_limits_are_1000_lines_and_100kb():
+-    assert truncation.MAX_LINES == 1000
+-    assert truncation.MAX_BYTES == 100 * 1024
++def test_default_limits_are_5000_lines_and_500kb():
++    assert truncation.MAX_LINES == 5000
++    assert truncation.MAX_BYTES == 500 * 1024
+     assert truncation.HARD_MAX_TOOL_RESULT_CHARS == 100_000
+ 
+ 
+diff --git a/tests/tool/test_websearch.py b/tests/tool/test_websearch.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..12d7ab4559ecca5cbed1adcd4b95ef07ef63d5f9
+--- /dev/null
++++ b/tests/tool/test_websearch.py
+@@ -0,0 +1,91 @@
++import json
++from unittest.mock import AsyncMock, MagicMock
++
++import aiohttp
++import pytest
++
++import flocks.tool.web.websearch as websearch_module
++from flocks.tool.registry import ToolRegistry
++
++
++@pytest.fixture
++def mocked_exa(monkeypatch):
++    response = MagicMock(status=200)
++    response.text = AsyncMock(return_value=json.dumps({"results": []}))
++
++    response_context = MagicMock()
++    response_context.__aenter__ = AsyncMock(return_value=response)
++    response_context.__aexit__ = AsyncMock(return_value=None)
++
++    session = MagicMock()
++    session.post = MagicMock(return_value=response_context)
++    session.__aenter__ = AsyncMock(return_value=session)
++    session.__aexit__ = AsyncMock(return_value=None)
++
++    monkeypatch.setattr(aiohttp, "ClientSession", MagicMock(return_value=session))
++    monkeypatch.setattr(websearch_module, "_get_exa_api_key", lambda: "test-api-key")
++
++    ctx = MagicMock()
++    ctx.ask = AsyncMock()
++    return ctx, session
++
++
++def test_websearch_schema_exposes_current_and_legacy_types():
++    tool = ToolRegistry._tools["websearch"]
++    type_parameter = next(parameter for parameter in tool.info.parameters if parameter.name == "type")
++
++    assert type_parameter.enum == [
++        *websearch_module.EXA_SEARCH_TYPES,
++        *websearch_module.LEGACY_SEARCH_TYPE_MAP,
++    ]
++
++
++@pytest.mark.parametrize("search_type", websearch_module.EXA_SEARCH_TYPES)
++@pytest.mark.asyncio
++async def test_websearch_sends_current_exa_search_types_unchanged(mocked_exa, search_type):
++    ctx, session = mocked_exa
++
++    result = await websearch_module.websearch_tool(ctx, query="current contract", type=search_type)
++
++    request_body = session.post.call_args.kwargs["json"]
++    assert request_body["type"] == search_type
++    assert result.success is True
++    assert result.metadata["requested_type"] == search_type
++    assert result.metadata["effective_type"] == search_type
++
++
++@pytest.mark.parametrize("legacy_type", ["neural", "keyword"])
++@pytest.mark.asyncio
++async def test_websearch_maps_legacy_search_types_to_auto(mocked_exa, legacy_type):
++    ctx, session = mocked_exa
++
++    result = await websearch_module.websearch_tool(ctx, query="legacy contract", type=legacy_type)
++
++    request_body = session.post.call_args.kwargs["json"]
++    assert request_body["type"] == "auto"
++    assert result.success is True
++    assert result.metadata["requested_type"] == legacy_type
++    assert result.metadata["effective_type"] == "auto"
++
++
++@pytest.mark.parametrize(
++    ("requested", "expected"),
++    [
++        (1, 1),
++        (100, 100),
++        (101, 100),
++        (0, websearch_module.DEFAULT_NUM_RESULTS),
++        (-1, websearch_module.DEFAULT_NUM_RESULTS),
++        ("invalid", websearch_module.DEFAULT_NUM_RESULTS),
++    ],
++)
++@pytest.mark.asyncio
++async def test_websearch_keeps_num_results_within_exa_contract(mocked_exa, requested, expected):
++    ctx, session = mocked_exa
++
++    result = await websearch_module.websearch_tool(ctx, query="bounded results", numResults=requested)
++
++    request_body = session.post.call_args.kwargs["json"]
++    assert request_body["numResults"] == expected
++    assert result.success is True
++    assert result.metadata["num_results"] == expected
+diff --git a/tests/workflow/test_workflow_fixes.py b/tests/workflow/test_workflow_fixes.py
+index c516a8e2b4843db75d6327f691bd875bcef1ed8c..83199e507cae35ad5bc32791898fdf5c5b7ba719 100644
+--- a/tests/workflow/test_workflow_fixes.py
++++ b/tests/workflow/test_workflow_fixes.py
+@@ -9,14 +9,14 @@ from __future__ import annotations
+ import json
+ from pathlib import Path
+ from typing import Any, Dict
+-from unittest.mock import MagicMock, patch
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ import pytest
+ 
+ from flocks.tool import Tool, ToolCategory, ToolContext, ToolInfo, ToolRegistry, ToolResult
+ from flocks.workflow.errors import WorkflowValidationError
+ from flocks.workflow.models import Workflow
+-from flocks.workflow.engine import WorkflowEngine
++from flocks.workflow.engine import WorkflowEngine, _default_workflow_loader
+ from flocks.workflow import fs_store
+ from flocks.workflow.repl_runtime import PythonExecRuntime
+ from flocks.workflow.runner import run_workflow
+@@ -104,6 +104,240 @@ def test_subworkflow_loader_reads_filesystem_workflow_without_legacy_kv(
+     assert result.outputs == {"output": {"child_result": "ok"}}
+ 
+ 
++def test_subworkflow_preserves_business_outputs_in_summary_mode():
++    child = Workflow.from_dict(
++        {
++            "id": "child-large-output",
++            "start": "produce",
++            "nodes": [
++                {
++                    "id": "produce",
++                    "type": "python",
++                    "code": "outputs['items'] = [{'id': i} for i in range(25)]",
++                }
++            ],
++            "edges": [],
++        }
++    )
++    parent = Workflow.from_dict(
++        {
++            "id": "parent-summary-history",
++            "start": "call_child",
++            "nodes": [
++                {
++                    "id": "call_child",
++                    "type": "subworkflow",
++                    "workflow_id": "child-large-output",
++                    "output_key": "child_result",
++                },
++                {
++                    "id": "consume",
++                    "type": "python",
++                    "code": "\n".join(
++                        [
++                            "items = (inputs.get('child_result') or {}).get('items')",
++                            "outputs['received_type'] = type(items).__name__",
++                            "outputs['received_count'] = len(items)",
++                            "outputs['first_id'] = items[0]['id'] if isinstance(items, list) and items else None",
++                        ]
++                    ),
++                },
++            ],
++            "edges": [{"from": "call_child", "to": "consume"}],
++        }
++    )
++    engine = WorkflowEngine(
++        parent,
++        runtime=PythonExecRuntime(),
++        history_mode="summary",
++        workflow_loader=lambda _workflow_id: child,
++    )
++
++    result = engine.run(retain_history=True)
++
++    assert result.outputs == {
++        "received_type": "list",
++        "received_count": 25,
++        "first_id": 0,
++    }
++    assert result.history[0].outputs["child_result"]["items"] == {
++        "_type": "list",
++        "count": 25,
++    }
++
++
++def test_summary_mode_preserves_terminal_outputs_and_summarizes_history():
++    report = "R" * 1000
++    workflow = Workflow.from_dict(
++        {
++            "id": "large-terminal-output",
++            "start": "report",
++            "nodes": [
++                {
++                    "id": "report",
++                    "type": "python",
++                    "code": "outputs['report'] = inputs['report']",
++                }
++            ],
++            "edges": [],
++        }
++    )
++    engine = WorkflowEngine(
++        workflow,
++        runtime=PythonExecRuntime(),
++        history_mode="summary",
++    )
++
++    result = engine.run({"report": report}, retain_history=True)
++
++    assert result.outputs == {"report": report}
++    assert result.history[0].outputs["report"] == {
++        "_type": "string",
++        "chars": len(report),
++        "preview": report[:200],
++    }
++
++
++def test_default_workflow_loader_prefers_filesystem_and_injects_id(
++    monkeypatch: pytest.MonkeyPatch,
++):
++    workflow_id = "filesystem-first"
++    workflow_json = {
++        "start": "node",
++        "nodes": [{"id": "node", "type": "python", "code": "pass"}],
++        "edges": [],
++    }
++    monkeypatch.setattr(
++        fs_store,
++        "read_workflow_from_fs",
++        lambda _workflow_id: {"workflowJson": workflow_json},
++    )
++    legacy_read = AsyncMock(side_effect=AssertionError("legacy KV must not be read"))
++    monkeypatch.setattr("flocks.storage.storage.Storage.read", legacy_read)
++
++    sentinel = object()
++    with patch.object(Workflow, "from_dict", return_value=sentinel) as from_dict:
++        loaded = _default_workflow_loader(workflow_id)
++
++    assert loaded is sentinel
++    assert from_dict.call_args.args[0] == {**workflow_json, "id": workflow_id}
++    legacy_read.assert_not_awaited()
++
++
++def test_default_workflow_loader_prefers_legacy_kv_over_explicit_path(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++):
++    workflow_path = tmp_path / "workflow.json"
++    workflow_path.write_text(
++        json.dumps(
++            {
++                "name": "Explicit Path",
++                "start": "node",
++                "nodes": [{"id": "node", "type": "python", "code": "pass"}],
++                "edges": [],
++            }
++        ),
++        encoding="utf-8",
++    )
++    monkeypatch.setattr(fs_store, "read_workflow_from_fs", lambda _workflow_id: None)
++    monkeypatch.setattr(
++        "flocks.storage.storage.Storage.read",
++        AsyncMock(
++            return_value={
++                "workflowJson": {
++                    "name": "Legacy KV",
++                    "start": "node",
++                    "nodes": [{"id": "node", "type": "python", "code": "pass"}],
++                    "edges": [],
++                }
++            }
++        ),
++    )
++
++    loaded = _default_workflow_loader(str(workflow_path))
++
++    assert loaded.name == "Legacy KV"
++
++
++def test_default_workflow_loader_prefers_explicit_path_over_registry(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++):
++    workflow_path = tmp_path / "workflow.json"
++    workflow_path.write_text(
++        json.dumps(
++            {
++                "name": "Explicit Path",
++                "start": "node",
++                "nodes": [{"id": "node", "type": "python", "code": "pass"}],
++                "edges": [],
++            }
++        ),
++        encoding="utf-8",
++    )
++    monkeypatch.setattr(fs_store, "read_workflow_from_fs", lambda _workflow_id: None)
++    monkeypatch.setattr(
++        "flocks.storage.storage.Storage.read",
++        AsyncMock(return_value=None),
++    )
++    registry_entries = AsyncMock(
++        side_effect=AssertionError("registry must not be read")
++    )
++    monkeypatch.setattr(
++        "flocks.workflow.center.list_registry_entries",
++        registry_entries,
++    )
++
++    loaded = _default_workflow_loader(str(workflow_path))
++
++    assert loaded.name == "Explicit Path"
++    registry_entries.assert_not_awaited()
++
++
++@pytest.mark.parametrize("identifier_field", ["name", "workflowId"])
++def test_default_workflow_loader_uses_registry_path_as_final_fallback(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    identifier_field: str,
++):
++    workflow_path = tmp_path / "registered-workflow.json"
++    workflow_path.write_text(
++        json.dumps(
++            {
++                "name": "Registry Workflow",
++                "start": "node",
++                "nodes": [{"id": "node", "type": "python", "code": "pass"}],
++                "edges": [],
++            }
++        ),
++        encoding="utf-8",
++    )
++    requested_id = f"registered-by-{identifier_field}"
++    monkeypatch.setattr(fs_store, "read_workflow_from_fs", lambda _workflow_id: None)
++    monkeypatch.setattr(
++        "flocks.storage.storage.Storage.read",
++        AsyncMock(return_value=None),
++    )
++    registry_entries = AsyncMock(
++        return_value=[
++            {
++                identifier_field: requested_id,
++                "workflowPath": str(workflow_path),
++            }
++        ]
++    )
++    monkeypatch.setattr(
++        "flocks.workflow.center.list_registry_entries",
++        registry_entries,
++    )
++
++    loaded = _default_workflow_loader(requested_id)
++
++    assert loaded.name == "Registry Workflow"
++    registry_entries.assert_awaited_once_with()
++
++
+ # ===================================================================
+ # 方案 1: run_safe() tests
+ # ===================================================================
+diff --git a/tests/workflow/test_workflow_history_mode.py b/tests/workflow/test_workflow_history_mode.py
+index af4412ea703f8ad90fd0e42c61c9b007e9bb428a..475c5f94bdca9c1e746bf0893e256b756d2d61a6 100644
+--- a/tests/workflow/test_workflow_history_mode.py
++++ b/tests/workflow/test_workflow_history_mode.py
+@@ -51,7 +51,7 @@ def test_run_workflow_summary_history_does_not_retain_large_step_payloads() -> N
+     assert result.history[1]["inputs"]["raw_alerts"]["count"] == 200
+ 
+ 
+-def test_run_workflow_defaults_to_summary_history_mode() -> None:
++def test_run_workflow_defaults_to_summary_history_but_preserves_terminal_outputs() -> None:
+     workflow = {
+         "start": "produce",
+         "nodes": [
+@@ -68,18 +68,11 @@ def test_run_workflow_defaults_to_summary_history_mode() -> None:
+ 
+     assert result.status == "SUCCEEDED"
+     assert result.history == []
+-    assert result.outputs["items"] == {
+-        "_type": "list",
+-        "count": 200,
+-        "preview": [
+-            {"_type": "dict", "keys": ["body"]},
+-            {"_type": "dict", "keys": ["body"]},
+-            {"_type": "dict", "keys": ["body"]},
+-        ],
+-    }
++    assert len(result.outputs["items"]) == 200
++    assert result.outputs["items"][0] == {"body": "x" * 1000}
+ 
+ 
+-def test_run_workflow_summary_outputs_do_not_retain_large_final_payloads() -> None:
++def test_run_workflow_summary_mode_preserves_large_final_payloads() -> None:
+     workflow = {
+         "start": "final",
+         "nodes": [
+@@ -99,8 +92,8 @@ def test_run_workflow_summary_outputs_do_not_retain_large_final_payloads() -> No
+     )
+ 
+     assert result.status == "SUCCEEDED"
+-    assert result.outputs["items"]["_type"] == "list"
+-    assert result.outputs["items"]["count"] == 200
++    assert len(result.outputs["items"]) == 200
++    assert result.outputs["items"][-1] == {"body": "x" * 1000}
+ 
+ 
+ def test_run_workflow_can_retain_history_when_requested() -> None:

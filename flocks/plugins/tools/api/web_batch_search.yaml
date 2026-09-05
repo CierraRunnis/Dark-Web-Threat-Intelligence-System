@@ -1,0 +1,40 @@
+name: web_batch_search
+description: >
+  Public web threat-intelligence search. Accepts a list of keywords plus an
+  optional recency window (window_days), builds two natural-language
+  threat-intel queries (one Chinese, one English), runs each through Exa
+  semantic search restricted to that window, and returns the merged,
+  URL-deduplicated results. Call it exactly once per task; web-search-agent
+  applies source-quality and verification filtering afterwards.
+description_cn: >
+  公开 web 情报搜索。接收关键词列表和可选的时间窗 window_days，按中英文各构造
+  一条威胁情报自然语言查询，分别通过 Exa 语义搜索（限定该时间窗）执行，返回按
+  URL 去重合并后的结果。每个任务调用一次；来源质量、核实等筛选由 web-search-agent
+  后续完成。
+category: search
+enabled: true
+
+inputSchema:
+  type: object
+  properties:
+    keywords:
+      type: array
+      description: >
+        Keywords to query. Each item is either a plain string or an object with
+        a `keyword` field (other fields such as `priority`, `source_hint`,
+        `search_intent` are accepted and ignored). Order is preserved.
+      items:
+        type: object
+    window_days:
+      type: integer
+      description: >
+        Recency window in days for Exa's publish-date filter. Pass the task's
+        `search_window_days`. Only pages published within the last
+        `window_days` days are returned. Use 0 or a negative value for no date
+        filter. Optional; defaults to 30 when omitted.
+  required: [keywords]
+
+handler:
+  type: script
+  script_file: web_batch_search.handler.py
+  function: handle

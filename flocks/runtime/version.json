@@ -1,0 +1,70 @@
+{
+  "upstream_url": "https://gitee.com/flocks/flocks.git",
+  "base_tag": "v2026.7.23",
+  "base_commit": "a4d1830031004ca5397071d304b71be7a21d9e62",
+  "observed_runtime_commit": "0515eaa9f247af68ba28604a8efa21243d031f61",
+  "patch": "flocks-v2026.7.23-ai-aggregation.patch",
+  "python_requires": ">=3.12,<3.13",
+  "changed_files": [
+    {
+      "path": "flocks/agent/prompt_utils.py",
+      "git_blob": "a48f8adac81007b89af26266d279edbde8513610"
+    },
+    {
+      "path": "flocks/task/background.py",
+      "git_blob": "c3ce4baa19fb4fce0562da3b142cf110a9875b6c"
+    },
+    {
+      "path": "flocks/task/executor.py",
+      "git_blob": "8681a6364f8a3284a14ba8897b5d62f8f5a381fc"
+    },
+    {
+      "path": "flocks/tool/task/run_workflow.py",
+      "git_blob": "0bca24fd26dd6823af3f303a1979ed4f3aca0b2f"
+    },
+    {
+      "path": "flocks/tool/truncation.py",
+      "git_blob": "b133aeaf6c7cd2f019748b91d7a73d8661e87bd7"
+    },
+    {
+      "path": "flocks/tool/web/websearch.py",
+      "git_blob": "ffb3cfc58dc19f70e311744ba0d4be64796eeee1"
+    },
+    {
+      "path": "flocks/workflow/engine.py",
+      "git_blob": "a67806e5109a7b9fad7c08d61c5d5d0ed838f04d"
+    },
+    {
+      "path": "flocks/workflow/execution_state.py",
+      "git_blob": "190f0e04a0b409bd7a0baf1fd5c933340376b090"
+    },
+    {
+      "path": "tests/agent/test_prompt_utils.py",
+      "git_blob": "6b4cc402046cc70b074081281cab15f52e4bd7b6"
+    },
+    {
+      "path": "tests/task/test_task.py",
+      "git_blob": "607c69e2a31a3a14ece9ff51c1f95d5665f9cfff"
+    },
+    {
+      "path": "tests/tool/test_run_workflow_tool_inputs.py",
+      "git_blob": "36a64a38788fcdf1f29d56840910fa1a2fe57341"
+    },
+    {
+      "path": "tests/tool/test_truncation.py",
+      "git_blob": "7f60980491da6bdff518787ebe544c95151c98eb"
+    },
+    {
+      "path": "tests/tool/test_websearch.py",
+      "git_blob": "12d7ab4559ecca5cbed1adcd4b95ef07ef63d5f9"
+    },
+    {
+      "path": "tests/workflow/test_workflow_fixes.py",
+      "git_blob": "83199e507cae35ad5bc32791898fdf5c5b7ba719"
+    },
+    {
+      "path": "tests/workflow/test_workflow_history_mode.py",
+      "git_blob": "475c5f94bdca9c1e746bf0893e256b756d2d61a6"
+    }
+  ]
+}

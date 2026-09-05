@@ -1,0 +1,39 @@
+name: telegram_batch_search
+description: >
+  Batch Telegram threat-intelligence search. Accepts a list of keywords and
+  searches Telegram through the resident tg-search MCP service once per
+  keyword. The MCP service exclusively owns the Telethon session to avoid
+  cross-process session conflicts. When search_window_days is given, only
+  messages within that window are kept. Region, sender, and media filtering is
+  left to telegram-search-agent.
+description_cn: >
+  Telegram 情报批量搜索。接收关键词列表，通过常驻 tg-search MCP 服务逐关键词
+  执行全局搜索，由该服务独占 Telethon 会话以避免跨进程冲突。传入
+  search_window_days 时，仅保留该时间窗内的消息。地区、发件人、媒体类型等筛选
+  由 telegram-search-agent 负责。
+category: search
+enabled: true
+
+inputSchema:
+  type: object
+  properties:
+    keywords:
+      type: array
+      description: >
+        Keywords to query. Each item is either a plain string or an object with
+        a `keyword` field (other fields such as `priority`, `source_hint`,
+        `search_intent` are accepted and ignored). Order is preserved.
+      items:
+        type: object
+    search_window_days:
+      type: integer
+      description: >
+        Optional time window in days. When set to a positive integer, only
+        messages sent within the last N days are requested from tg-search MCP.
+        Omit or set <= 0 to disable date filtering.
+  required: [keywords]
+
+handler:
+  type: script
+  script_file: telegram_batch_search.handler.py
+  function: handle

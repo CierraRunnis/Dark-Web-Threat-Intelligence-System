@@ -1,0 +1,41 @@
+name: multilingual-keyword-agent
+description: >
+  Generates target-related threat-intelligence search keywords, aliases, and
+  multilingual expansions for Chinese, English, Russian, and Persian. It is
+  designed for dark web, Telegram, and public web intelligence search planning.
+
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+
+color: "#2563EB"
+temperature: 0.2
+
+tools:
+  - read
+  - grep
+  - glob
+
+prompt_file: prompt.md
+
+prompt_metadata:
+  category: security
+  cost: low
+  triggers:
+    - domain: threat-intelligence
+      trigger: "keyword expansion, multilingual keyword generation, threat intel search terms"
+    - domain: darkweb
+      trigger: "dark web leak keywords, ransomware search terms, credential sale terms"
+    - domain: telegram
+      trigger: "Telegram leak keywords, TG channel search terms, multilingual Telegram search"
+    - domain: web
+      trigger: "public web OSINT keywords, news search keywords, report search terms"
+  use_when:
+    - "A search supervisor needs target-related keywords before running dark web, Telegram, or web searches."
+    - "The user asks to generate multilingual keywords, aliases, translations, or search terms for a target."
+    - "The task requires structured keyword output with priority and reasoning."
+  avoid_when:
+    - "The task requires executing searches or collecting evidence directly."
+    - "The task requires writing a final intelligence report."
+    - "The task is unrelated to threat intelligence or OSINT search planning."

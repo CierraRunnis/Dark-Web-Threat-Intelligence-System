@@ -1,0 +1,38 @@
+name: noise-reduction-agent
+description: >
+  Minimal noise filter for threat-intelligence search results. Given a slim
+  list of candidate items (id + source + short title or text excerpt), returns
+  only the integer ids that are noise (irrelevant, SEO spam, navigation, etc.).
+  Does not deduplicate, merge evidence, score risk, or summarize — the
+  workflow handles all of that in deterministic Python.
+
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+
+color: "#64748B"
+temperature: 0.1
+
+tools:
+  - read
+  - grep
+  - glob
+
+prompt_file: prompt.md
+
+prompt_metadata:
+  category: security
+  cost: low
+  triggers:
+    - domain: threat-intelligence
+      trigger: "情报噪音过滤、SEO 噪声、不相关条目识别、threat-intel noise filter"
+    - domain: search-pipeline
+      trigger: "filter noise from darkweb telegram web results, identify irrelevant items"
+  use_when:
+    - "The workflow has aggregated source results and needs a per-item noise/relevance verdict."
+    - "A caller provides a slim {id, source, title/text} list and expects {\"noise_ids\": [...]} back."
+  avoid_when:
+    - "The task requires executing dark web, Telegram, or public web searches."
+    - "The task requires deduplication, evidence merging, risk scoring, or report writing."
+    - "The input has not yet been collected from search agents."

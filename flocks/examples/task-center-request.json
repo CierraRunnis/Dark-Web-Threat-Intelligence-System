@@ -1,0 +1,16 @@
+{
+  "title": "AI 聚合示例",
+  "description": "搜索示例行业最近 7 天的威胁情报",
+  "type": "queued",
+  "priority": "normal",
+  "executionMode": "workflow",
+  "workflowID": "threat_intel_search_pipeline",
+  "agentName": "search-supervisor",
+  "tags": ["ai-aggregation"],
+  "context": {
+    "query": "搜索示例行业最近 7 天的威胁情报",
+    "search_window_days": 7,
+    "include_sources": ["darkweb", "telegram", "web"],
+    "report_language": "zh-CN"
+  }
+}

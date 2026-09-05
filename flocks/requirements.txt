@@ -1,0 +1,6 @@
+# Flocks itself is installed from the pinned base plus runtime patch.
+# These are the direct dependencies of the exported handlers and validator.
+aiohttp>=3.13.3
+httpx>=0.26.0
+mcp>=1.26.0
+PyYAML>=6.0.1

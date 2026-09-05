@@ -1,0 +1,42 @@
+name: search-supervisor
+description: 'Threat-intelligence search supervisor. It identifies search intent,
+  normalizes inputs, runs the fixed threat_intel_search_pipeline workflow, and returns
+  the final Markdown report.
+
+  '
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+color: '#DC2626'
+temperature: 1.0
+tools:
+- read
+- grep
+- glob
+- run_workflow
+prompt_file: prompt.md
+prompt_metadata:
+  category: security
+  cost: high
+  triggers:
+  - domain: threat-intelligence
+    trigger: 搜索相关情报、威胁情报搜索、情报检索、泄露查询、暗网 TG Web 综合搜索
+  - domain: search-pipeline
+    trigger: search supervisor, threat intel pipeline, multi-agent search, darkweb
+      telegram web search
+  - domain: data-leak
+    trigger: 数据泄露综合检索、凭证泄露、访问权限出售、勒索软件情报
+  - domain: vulnerability
+    trigger: 漏洞情报综合检索、CVE 威胁情报、漏洞利用线索
+  use_when:
+  - The user asks to search threat intelligence for a target across dark web, Telegram,
+    and public web sources.
+  - The request needs multilingual keyword expansion, multi-source search, deduplication,
+    confidence scoring, and final reporting.
+  - The caller wants a single end-to-end intelligence search report.
+  avoid_when:
+  - The user only asks to generate keywords; use multilingual-keyword-agent.
+  - The user only asks to search one specific source; use the corresponding source
+    agent directly.
+  - The user only provides already deduplicated data and asks for a report; use report-agent.

@@ -1,0 +1,168 @@
+{
+  "name": "threat_intel_search_pipeline",
+  "description": "Fixed threat-intelligence workflow with keyword expansion, parallel source searches, join, noise reduction, and Markdown reporting.",
+  "start": "prepare_input",
+  "metadata": {
+    "category": "security",
+    "entry_agent": "search-supervisor",
+    "agents": [
+      "multilingual-keyword-agent",
+      "darkweb-search-agent",
+      "telegram-search-agent",
+      "web-search-agent",
+      "noise-reduction-agent",
+      "report-agent"
+    ],
+    "default_max_parallel_workers": 3,
+    "node_timeout_s": 1200,
+    "runtime_defaults": {
+      "node_timeout_s": 1200,
+      "default_max_parallel_workers": 3,
+      "source_dispatch_mode": "subagent_dedicated_python_batch"
+    },
+    "source_dispatch_mode": "subagent_dedicated_python_batch",
+    "source_parallel_limits": {
+      "telegram": 1,
+      "web": 1,
+      "darkweb": 1
+    }
+  },
+  "nodes": [
+    {
+      "id": "prepare_input",
+      "type": "python",
+      "description": "Normalize user inputs and pipeline defaults.",
+      "code": "import re\n\nquery = inputs.get('query') or inputs.get('target') or inputs.get('text') or ''\nquery = str(query).strip()\nif not query:\n    raise ValueError('query is required')\n\ntext = query.lower()\n\n\ndef safe_int(value, default):\n    try:\n        if value is None or value == '':\n            return default\n        value = int(value)\n        return value if value > 0 else default\n    except Exception:\n        return default\n\n\ndef parse_number(value):\n    value = str(value or '').strip()\n    if value.isdigit():\n        return int(value)\n    digits = {\n        '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,\n        '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,\n    }\n    if value in digits:\n        return digits[value]\n    if value == '十':\n        return 10\n    if '十' in value:\n        left, _, right = value.partition('十')\n        tens = digits.get(left, 1) if left else 1\n        ones = digits.get(right, 0) if right else 0\n        return tens * 10 + ones\n    return 0\n\n\ndef infer_days(default):\n    explicit = inputs.get('search_window_days')\n    explicit_value = safe_int(explicit, default) if explicit not in (None, '') else None\n\n    # If the caller only provided the default, natural-language time in query wins.\n    if explicit_value is None or explicit_value == default:\n        if any(term in query for term in ['今天', '今日']) or 'today' in text:\n            return 1\n        if any(term in query for term in ['昨天', '昨日']) or 'yesterday' in text:\n            return 2\n\n        m = re.search(\n            r'(?:近|最近|过去|过去的|最近的|近来)?\\s*'\n            r'([0-9]+|[零〇一二两三四五六七八九十]+)\\s*'\n            r'(天|日|周|星期|个月|月|年)',\n            query,\n        )\n        if m:\n            number = parse_number(m.group(1))\n            unit = m.group(2)\n            if number > 0:\n                if unit in ('天', '日'):\n                    return number\n                if unit in ('周', '星期'):\n                    return number * 7\n                if unit in ('个月', '月'):\n                    return number * 30\n                if unit == '年':\n                    return number * 365\n\n        if any(term in query for term in ['最近一周', '近一周', '近7天', '近七天']):\n            return 7\n        if any(term in query for term in ['近半月', '最近半月', '近15天', '近十五天']):\n            return 15\n        if any(term in query for term in ['最近', '最新', '近期']) or 'latest' in text or 'recent' in text:\n            return 30\n        if any(term in query for term in ['今年', '本年']):\n            return 365\n        if any(term in query for term in ['全部威胁情报', '全部的威胁情报', '所有威胁情报', '所有的威胁情报', '全部历史威胁情报', '不限时间', '不限制时间', '不设时间窗口', '无视时间窗口', '无时间限制']):\n            return 3650\n\n    if explicit_value is not None:\n        return explicit_value\n    return default\n\n\ndef normalize_sources(value):\n    aliases = {\n        'darkweb': 'darkweb', 'dark web': 'darkweb', '暗网': 'darkweb', 'onion': 'darkweb',\n        'telegram': 'telegram', 'tg': 'telegram', '电报': 'telegram',\n        'web': 'web', 'public web': 'web', '公开网': 'web', '网页': 'web',\n        '新闻': 'web', '公告': 'web', '报告': 'web', 'osint': 'web',\n    }\n    if isinstance(value, str):\n        parts = [x.strip() for x in re.split(r'[,，、\\s]+', value) if x.strip()]\n    else:\n        parts = list(value or [])\n    out = []\n    for item in parts:\n        key = str(item).strip().lower()\n        source = aliases.get(key, key)\n        if source in ('darkweb', 'telegram', 'web') and source not in out:\n            out.append(source)\n    return out\n\n\ndef infer_sources(default):\n    explicit = inputs.get('include_sources')\n    explicit_sources = normalize_sources(explicit) if explicit not in (None, '') else []\n    if explicit_sources and set(explicit_sources) != set(default):\n        return explicit_sources\n    if any(term in query for term in ['全网', '多源', '综合', '全部来源']):\n        return default\n    mentioned = []\n    checks = [\n        ('darkweb', ['暗网', 'dark web', 'darkweb', 'onion', '泄露论坛', '勒索站']),\n        ('telegram', ['Telegram', 'telegram', 'TG', 'tg', '电报']),\n        ('web', ['公开网', '网页', '新闻', '公告', '报告', 'web', 'public web', 'OSINT', 'osint']),\n    ]\n    for source, terms in checks:\n        if any(term in query or term.lower() in text for term in terms):\n            mentioned.append(source)\n    return mentioned or explicit_sources or default\n\n\ndef infer_report_language(default):\n    explicit = inputs.get('report_language')\n    if explicit and explicit != default:\n        return explicit\n    if 'in english' in text or any(term in query for term in ['英文报告', '用英文']):\n        return 'en'\n    if any(term in query for term in ['中文报告', '用中文']):\n        return 'zh-CN'\n    return explicit or default\n\n\ndef infer_keyword_languages(default):\n    explicit = inputs.get('keyword_languages')\n    explicit_langs = []\n    if explicit:\n        if isinstance(explicit, str):\n            explicit_langs = [x.strip() for x in re.split(r'[,，、\\s]+', explicit) if x.strip()]\n        else:\n            explicit_langs = list(explicit)\n        if explicit_langs and explicit_langs != default:\n            return explicit_langs\n    if any(term in query for term in ['只用中文', '中文关键词']):\n        return ['zh-CN']\n    if any(term in query for term in ['中英文', '中文和英文']):\n        return ['zh-CN', 'en']\n    return explicit_langs or default\n\n\ndef infer_depth():\n    if any(term in query for term in ['快速', '简单', '先看看']):\n        return 'quick'\n    if any(term in query for term in ['深入', '全面', '尽可能多', '详细']):\n        return 'deep'\n    return 'normal'\n\n\nvalid_sources = {'darkweb', 'telegram', 'web'}\ndefault_sources = ['darkweb', 'telegram', 'web']\ninclude_sources = [s for s in infer_sources(default_sources) if s in valid_sources] or default_sources\nsearch_window_days = infer_days(30)\nreport_language = infer_report_language('zh-CN')\nkeyword_languages = infer_keyword_languages(['zh-CN', 'en', 'ru', 'fa-IR'])\ndepth = infer_depth()\n\nlimit_default = 50\ntimeout_default = 1200\nif depth == 'quick':\n    limit_default = 20\n    timeout_default = 600\nelif depth == 'deep':\n    limit_default = 100\n    timeout_default = 1800\n\nlimit = safe_int(inputs.get('limit') or inputs.get('limit_per_source'), limit_default)\ntimeout_seconds = safe_int(inputs.get('timeout_seconds'), timeout_default)\npipeline = {\n    'query': query,\n    'search_window_days': search_window_days,\n    'report_language': report_language,\n    'keyword_languages': keyword_languages,\n    'timeout_seconds': timeout_seconds,\n    'include_sources': include_sources,\n    'limit': limit,\n    'web_limit': safe_int(inputs.get('web_limit') or inputs.get('limit_per_source'), limit),\n    'darkweb_limit': safe_int(inputs.get('darkweb_limit') or inputs.get('limit_per_source'), limit),\n    'inferred_depth': depth,\n}\noutputs['pipeline'] = pipeline\noutputs['query'] = query"
+    },
+    {
+      "id": "expand_keywords",
+      "type": "python",
+      "description": "Delegate multilingual keyword expansion.",
+      "code": "import json\nimport re\n\npipeline = dict(inputs.get('pipeline') or {})\nquery = pipeline.get('query') or inputs.get('query') or ''\nprompt = 'TASK: Generate multilingual threat-intelligence search keywords.\\nTARGET: ' + query + '\\nPARAMETERS:\\n' + json.dumps(pipeline, ensure_ascii=False, indent=2) + '\\nOUTPUT CONTRACT: Return exactly one raw JSON object using the multilingual-keyword-agent schema. The first character is {, the last character is }, and Python json.loads accepts the complete response.'\nres = tool.run_safe('delegate_task', subagent_type='multilingual-keyword-agent', category='', session_id='', command='threat-intel-keyword-expansion', load_skills=[], description='Generate multilingual threat-intelligence keywords', prompt=prompt)\ntext = res.get('text') or ''\nobj = None\nfallback_used = False\ntry:\n    obj = json.loads(text.strip())\nexcept Exception:\n    m = re.search(r'\\{.*\\}', text, re.S)\n    if m:\n        try:\n            obj = json.loads(m.group(0))\n        except Exception:\n            obj = None\nif obj is None:\n    fallback_used = True\n    obj = {\n        'target': query,\n        'normalized_target': query,\n        'target_type': 'unknown',\n        'keywords': [\n            {\n                'canonical': query,\n                'type': 'target',\n                'languages': {lang: [query] for lang in pipeline.get('keyword_languages', ['zh-CN', 'en', 'ru', 'fa-IR'])},\n                'search_intent': 'all',\n                'priority': 'high',\n                'reason': 'Keyword expansion agent failed; using the original query as a conservative fallback.',\n            }\n        ],\n        'language_coverage': pipeline.get('keyword_languages', ['zh-CN', 'en', 'ru', 'fa-IR']),\n        'include_sources': pipeline.get('include_sources', ['darkweb', 'telegram', 'web']),\n        'notes': ['Keyword expansion failed, falling back to original query'],\n    }\noutputs['keyword_result'] = obj\noutputs['keyword_text'] = text\noutputs['keyword_status'] = 'fallback' if fallback_used else ('completed' if res.get('success') else 'failed')\noutputs['pipeline'] = pipeline"
+    },
+    {
+      "id": "search_darkweb",
+      "type": "subworkflow",
+      "workflow_id": "darkweb_source_search",
+      "output_key": "darkweb_result",
+      "description": "Run darkweb source subworkflow via dedicated Python batch tool.",
+      "inputs_mapping": {
+        "pipeline": "$.pipeline",
+        "keyword_result": "$.keyword_result",
+        "keyword_text": "$.keyword_text",
+        "query": "$.query"
+      },
+      "inputs_const": {
+        "source": "darkweb"
+      }
+    },
+    {
+      "id": "search_telegram",
+      "type": "subworkflow",
+      "workflow_id": "telegram_source_search",
+      "output_key": "telegram_result",
+      "description": "Run telegram source subworkflow via dedicated Python batch tool.",
+      "inputs_mapping": {
+        "pipeline": "$.pipeline",
+        "keyword_result": "$.keyword_result",
+        "keyword_text": "$.keyword_text",
+        "query": "$.query"
+      },
+      "inputs_const": {
+        "source": "telegram"
+      }
+    },
+    {
+      "id": "search_web",
+      "type": "subworkflow",
+      "workflow_id": "web_source_search",
+      "output_key": "web_result",
+      "description": "Run web source subworkflow via dedicated Python batch tool.",
+      "inputs_mapping": {
+        "pipeline": "$.pipeline",
+        "keyword_result": "$.keyword_result",
+        "keyword_text": "$.keyword_text",
+        "query": "$.query"
+      },
+      "inputs_const": {
+        "source": "web"
+      }
+    },
+    {
+      "id": "join_search_results",
+      "type": "python",
+      "join": true,
+      "join_mode": "flat",
+      "description": "Join the three source branches into the noise-reduction input.",
+      "code": "query = inputs.get('query') or ''\npipeline = inputs.get('pipeline') or {}\ninclude_sources = set(pipeline.get('include_sources') or [])\n\n\ndef source_fallback(source):\n    if source in include_sources:\n        return {\n            'source': source,\n            'status': 'timeout',\n            'query': query,\n            'results': [],\n            'source_coverage': {source: 'timeout'},\n            'errors': ['source branch did not return structured output before node timeout'],\n            'notes': []\n        }\n    return {\n        'source': source,\n        'status': 'not_provided',\n        'query': query,\n        'results': [],\n        'source_coverage': {source: 'not_provided'},\n        'errors': [],\n        'notes': ['source excluded']\n    }\n\n\nresults_by_source = {\n    'darkweb': inputs.get('darkweb') or source_fallback('darkweb'),\n    'telegram': inputs.get('telegram') or source_fallback('telegram'),\n    'web': inputs.get('web') or source_fallback('web')\n}\noutputs['query'] = query\noutputs['pipeline'] = pipeline\noutputs['results_by_source'] = results_by_source\noutputs['noise_input'] = {\n    'query': query,\n    'pipeline': pipeline,\n    'search_window_days': pipeline.get('search_window_days'),\n    'results_by_source': results_by_source,\n}"
+    },
+    {
+      "id": "reduce_noise",
+      "type": "python",
+      "description": "Filter noise via LLM (id-only verdict on slim payload); Python does URL-dedup and reconstructs deduped_events from full source data.",
+      "code": "import json\nimport re\n\n# Inputs --------------------------------------------------------------\nnoise_input = inputs.get('noise_input') or {\n    'query': inputs.get('query'),\n    'pipeline': inputs.get('pipeline') or {},\n    'search_window_days': (inputs.get('pipeline') or {}).get('search_window_days'),\n    'results_by_source': inputs.get('results_by_source') or {},\n}\nquery = noise_input.get('query') or inputs.get('query') or ''\npipeline = inputs.get('pipeline') or noise_input.get('pipeline') or {}\nresults_by_source = noise_input.get('results_by_source') or {}\nif not isinstance(results_by_source, dict):\n    results_by_source = {}\n\n# Phase 1: flatten 3-source results into stable-ID event list ---------\nall_events = []\nsource_coverage = {}\nfor source in ('darkweb', 'telegram', 'web'):\n    block = results_by_source.get(source) or {}\n    source_coverage[source] = block.get('status') or 'not_provided'\n    for r in (block.get('results') or []):\n        if not isinstance(r, dict):\n            continue\n        all_events.append({'id': len(all_events), 'source': source, 'full': r})\n\n# Phase 2: Python-side URL-based dedup. Same URL across sources = same event,\n# merge into the first occurrence; later ones become secondaries.\nprimary_by_url = {}\nduplicates = {}\nfor e in all_events:\n    url = (e['full'].get('url') or '').strip()\n    if not url:\n        continue\n    if url in primary_by_url:\n        duplicates[e['id']] = primary_by_url[url]\n    else:\n        primary_by_url[url] = e['id']\n\n# Phase 3: build slim payload (scheme B) for the LLM noise filter.\n# - darkweb / web: title (redacted, capped 120 chars)\n# - telegram: first 80 chars of summary (the chat-title field is useless for\n#   per-message relevance because it is shared across all messages of one chat)\ndef _redact(s):\n    if not isinstance(s, str):\n        return ''\n    s = re.sub(r'https?://\\S+', '[LINK]', s)\n    s = re.sub(r'\\.onion\\S*', '[ONION]', s)\n    s = re.sub(r't\\.me/\\S+', '[TG]', s)\n    return s\n\ndef _parse_evidence_tags(evidence_str):\n    tags = {}\n    for part in (evidence_str or '').split(';'):\n        if '=' in part:\n            k, _, v = part.partition('=')\n            k = k.strip(); v = v.strip()\n            if k and v:\n                tags[k] = v\n    return tags\n\nslim_items = []\nfor e in all_events:\n    if e['id'] in duplicates:\n        continue  # secondaries don't need the LLM's opinion; Python merges them\n    full = e['full']\n    item = {'id': e['id'], 'source': e['source']}\n    if e['source'] == 'telegram':\n        item['text'] = _redact(full.get('summary') or '')[:80]\n    else:\n        item['title'] = _redact(full.get('title') or '')[:120]\n        tags = _parse_evidence_tags(full.get('evidence') or '')\n        if tags.get('industry'):\n            item['industry'] = tags['industry']\n        if tags.get('category'):\n            item['category'] = tags['category']\n        summary_red = _redact(full.get('summary') or '')[:100]\n        if summary_red:\n            item['summary'] = summary_red\n    slim_items.append(item)\n\n# Phase 4: ask the LLM filter agent. Graceful fallback if it errors / refuses.\nnoise_ids = set()\nagent_text = ''\nagent_error = None\nagent_succeeded = False\nif slim_items:\n    payload = {'query': query, 'items': slim_items}\n    prompt = (\n        'TASK: Classify which items are noise for the given query. '\n        'Return JSON only: {\"noise_ids\": [int, ...]}.\\n'\n        'INPUT:\\n' + json.dumps(payload, ensure_ascii=False)\n    )\n    res = tool.run_safe(\n        'delegate_task',\n        subagent_type='noise-reduction-agent',\n        category='',\n        session_id='',\n        command='threat-intel-noise-filter',\n        load_skills=[],\n        description='Noise filter for threat-intel candidate list',\n        prompt=prompt,\n    )\n    agent_text = res.get('text') or ''\n    agent_error = res.get('error')\n    if agent_text and not agent_error:\n        s = agent_text.strip()\n        obj = None\n        try:\n            obj = json.loads(s)\n        except Exception:\n            start = s.find('{')\n            if start >= 0:\n                try:\n                    obj, _ = json.JSONDecoder().raw_decode(s, start)\n                except Exception:\n                    obj = None\n        if isinstance(obj, dict) and isinstance(obj.get('noise_ids'), list):\n            for nid in obj['noise_ids']:\n                if isinstance(nid, int) and 0 <= nid < len(all_events):\n                    noise_ids.add(nid)\n            agent_succeeded = True\n\n# Phase 5: build deduped_events from full data --------------------------\ndef _infer_event_type(full):\n    title = (full.get('title') or '').lower()\n    url = (full.get('url') or '').lower()\n    evidence = (full.get('evidence') or '').lower()\n    if 'ransomware' in title or 'ransomware' in url or 'ransom' in evidence:\n        return 'ransomware'\n    if 'leak' in title or 'database' in title or '泄露' in title:\n        return 'data_leak'\n    if 'credential' in title or 'creds' in title:\n        return 'credential_exposure'\n    if re.search(r'\\bcve-\\d{4}-\\d+\\b', title) or 'vulnerability' in title or 'cve=' in evidence:\n        return 'vulnerability'\n    if 'access' in title and ('sale' in title or 'sell' in title or 'sold' in title):\n        return 'access_sale'\n    return 'unknown'\n\n_SEVERITY_RE = re.compile(r'severity=(\\w+)', re.I)\ndef _infer_risk(full, event_type):\n    m = _SEVERITY_RE.search(full.get('evidence') or '')\n    sev = (m.group(1).lower() if m else '')\n    if event_type == 'ransomware' or sev == 'critical':\n        return 'critical'\n    if event_type in ('data_leak', 'credential_exposure', 'access_sale') or sev == 'high':\n        return 'high'\n    if event_type == 'vulnerability' or sev == 'medium':\n        return 'medium'\n    return 'low'\n\ndef _evidence_dict(full, src):\n    return {\n        'source': src,\n        'url': full.get('url') or '',\n        'time': full.get('time') or '',\n        'title': full.get('title') or '',\n        'evidence': full.get('evidence') or '',\n        'confidence': full.get('confidence') or 'medium',\n    }\n\ndeduped_events = []\nevent_by_primary = {}\ndiscarded_items = []\n\nfor e in all_events:\n    full = e['full']\n    src = e['source']\n    if e['id'] in noise_ids:\n        discarded_items.append({\n            'source': src,\n            'title': full.get('title') or '',\n            'url': full.get('url') or '',\n            'reason': 'classified as noise by filter agent',\n        })\n        continue\n\n    primary_id = duplicates.get(e['id'], e['id'])\n    if primary_id != e['id']:\n        idx = event_by_primary.get(primary_id)\n        if idx is None:\n            # primary itself was discarded as noise; drop this duplicate too\n            discarded_items.append({\n                'source': src,\n                'title': full.get('title') or '',\n                'url': full.get('url') or '',\n                'reason': 'duplicate of an event already classified as noise',\n            })\n            continue\n        primary = deduped_events[idx]\n        if src not in primary['sources']:\n            primary['sources'].append(src)\n        primary['evidence'].append(_evidence_dict(full, src))\n        for u in (full.get('sample_urls') or []):\n            if isinstance(u, str) and u and u not in primary['raw_refs']:\n                primary['raw_refs'].append(u)\n        continue\n\n    etype = _infer_event_type(full)\n    risk = _infer_risk(full, etype)\n    confidence = full.get('confidence') or 'medium'\n    deduped_events.append({\n        'id': 'event_' + str(e['id']),\n        'title': full.get('title') or '',\n        'event_type': etype,\n        'target': query,\n        'time': full.get('time') or '',\n        'sources': [src],\n        'primary_url': full.get('url') or '',\n        'summary': full.get('summary') or '',\n        'evidence': [_evidence_dict(full, src)],\n        'confidence': confidence,\n        'confidence_reason': '基于 ' + src + ' 单源 ' + confidence + ' 命中',\n        'risk_level': risk,\n        'risk_reason': '依据事件类型 ' + etype + ' 与严重度推断为 ' + risk,\n        'raw_refs': [u for u in (full.get('sample_urls') or []) if isinstance(u, str) and u],\n    })\n    event_by_primary[e['id']] = len(deduped_events) - 1\n\n# Phase 6: aggregate top-level risk + notes ----------------------------\n_RANK = {'low': 0, 'medium': 1, 'high': 2, 'critical': 3}\noverall_risk = 'low'\nfor ev in deduped_events:\n    if _RANK.get(ev['risk_level'], 0) > _RANK[overall_risk]:\n        overall_risk = ev['risk_level']\n\nnotes = []\nif not slim_items:\n    notes.append('No source results to evaluate.')\nelif not agent_succeeded:\n    detail = agent_error or 'agent did not return a valid {\"noise_ids\": [...]} object'\n    notes.append('Noise filter agent did not deliver a usable verdict; keeping all non-duplicate events. Detail: ' + str(detail))\nelif noise_ids:\n    notes.append('Filter agent discarded ' + str(len(noise_ids)) + ' item(s) as noise.')\n\nif duplicates:\n    notes.append('Python URL-dedup merged ' + str(len(duplicates)) + ' duplicate occurrence(s) into primary events.')\n\nif not deduped_events:\n    overall_confidence_reason = '所有源均无可保留的事件'\nelse:\n    overall_confidence_reason = '共 ' + str(len(deduped_events)) + ' 条事件经噪音过滤与 URL 去重后保留'\n\noutputs['query'] = query\noutputs['pipeline'] = pipeline\noutputs['noise_result'] = {\n    'deduped_events': deduped_events,\n    'source_coverage': source_coverage,\n    'risk_level': overall_risk if deduped_events else 'low',\n    'confidence_reason': overall_confidence_reason,\n    'discarded_items': discarded_items,\n    'notes': notes,\n}\noutputs['noise_text'] = agent_text\noutputs['noise_status'] = 'completed' if (agent_succeeded or not slim_items) else 'partial'\n"
+    },
+    {
+      "id": "generate_report",
+      "type": "python",
+      "description": "Delegate final Markdown report generation.",
+      "code": "import json\n\nnoise_result = inputs.get('noise_result') or {}\npipeline = inputs.get('pipeline') or {}\nreport_payload = dict(noise_result)\nreport_payload['query'] = inputs.get('query') or pipeline.get('query') or ''\nreport_payload['report_language'] = pipeline.get('report_language') or 'zh-CN'\nreport_payload['search_window_days'] = pipeline.get('search_window_days') or 30\nprompt = 'TASK: Generate final Markdown threat-intelligence report.\\nINPUT:\\n' + json.dumps(report_payload, ensure_ascii=False, indent=2) + '\\nOUTPUT: Markdown report only.'\nres = tool.run_safe('delegate_task', subagent_type='report-agent', category='', session_id='', command='threat-intel-report', load_skills=[], description='Generate final threat-intelligence report', prompt=prompt)\nreport = res.get('text') or ''\nfallback_used = not report.strip()\nif fallback_used:\n    report = '# Threat Intelligence Report\\n\\n## Summary\\n\\nThe report agent did not return usable Markdown. The normalized evidence payload is included below for review.\\n\\n```json\\n' + json.dumps(noise_result, ensure_ascii=False, indent=2) + '\\n```'\noutputs['final_report'] = report\noutputs['report_markdown'] = report\noutputs['report_status'] = 'fallback' if fallback_used else ('completed' if res.get('success') else 'failed')\noutputs['noise_result'] = noise_result\noutputs['workflow_metadata'] = {\n    'keyword': inputs.get('keyword_status', 'completed'),\n    'noise': inputs.get('noise_status', 'completed'),\n    'report': outputs['report_status'],\n    'source_coverage': noise_result.get('source_coverage', {}),\n}"
+    }
+  ],
+  "edges": [
+    {
+      "from": "prepare_input",
+      "to": "expand_keywords"
+    },
+    {
+      "from": "expand_keywords",
+      "to": "search_darkweb"
+    },
+    {
+      "from": "expand_keywords",
+      "to": "search_telegram"
+    },
+    {
+      "from": "expand_keywords",
+      "to": "search_web"
+    },
+    {
+      "from": "expand_keywords",
+      "to": "join_search_results",
+      "mapping": {
+        "query": "$.query",
+        "pipeline": "$.pipeline",
+        "keyword_result": "$.keyword_result"
+      }
+    },
+    {
+      "from": "search_darkweb",
+      "to": "join_search_results",
+      "mapping": {
+        "darkweb": "$.darkweb_result"
+      }
+    },
+    {
+      "from": "search_telegram",
+      "to": "join_search_results",
+      "mapping": {
+        "telegram": "$.telegram_result"
+      }
+    },
+    {
+      "from": "search_web",
+      "to": "join_search_results",
+      "mapping": {
+        "web": "$.web_result"
+      }
+    },
+    {
+      "from": "join_search_results",
+      "to": "reduce_noise"
+    },
+    {
+      "from": "reduce_noise",
+      "to": "generate_report"
+    }
+  ]
+}

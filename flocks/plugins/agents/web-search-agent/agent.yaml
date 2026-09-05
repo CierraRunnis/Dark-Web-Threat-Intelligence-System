@@ -1,0 +1,45 @@
+name: web-search-agent
+description: >
+  Public web threat-intelligence search agent. It searches open web sources,
+  news, advisories, vendor reports, vulnerability databases, blogs, and public
+  security reports using web_batch_search and webfetch, then returns structured
+  findings for downstream deduplication and reporting. It does not perform dark
+  web or Telegram searches.
+
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+
+color: "#16A34A"
+temperature: 0.2
+
+tools:
+  - read
+  - grep
+  - glob
+  - web_batch_search
+  - webfetch
+
+prompt_file: prompt.md
+
+prompt_metadata:
+  category: security
+  cost: medium
+  triggers:
+    - domain: web
+      trigger: "Web 情报、公开情报、公开 Web 搜索、OSINT、新闻搜索、安全报告"
+    - domain: vulnerability
+      trigger: "漏洞公告、CVE、漏洞利用、厂商公告、安全通告、NVD、CISA KEV"
+    - domain: incident
+      trigger: "数据泄露新闻、入侵事件、泄露公告、breach notification、security incident"
+    - domain: threat-intelligence
+      trigger: "威胁情报报告、攻击组织报告、恶意软件分析、vendor report、threat report"
+  use_when:
+    - "The task requires public web search for threat intelligence, news, reports, advisories, or vulnerability references."
+    - "A search supervisor provides multilingual keywords and asks for public web search results."
+    - "The user asks about publicly reported breaches, vendor research, CVEs, threat actor reports, malware reports, or security advisories."
+  avoid_when:
+    - "The task is specifically about dark web forums or ransomware leak sites; use darkweb-search-agent instead."
+    - "The task is specifically about Telegram channels, Telegram groups, or TG messages; use telegram-search-agent instead."
+    - "The task requires final report writing rather than search execution and structured evidence extraction."

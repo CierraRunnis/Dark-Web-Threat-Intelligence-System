@@ -1,0 +1,44 @@
+name: darkweb-search-agent
+description: >
+  Dark web threat-intelligence search agent. It queries dark web intelligence
+  through the darkweb_batch_search tool and returns structured findings about data
+  leaks, ransomware disclosures, vulnerability intelligence, exposed samples,
+  victim claims, threat actors, and related evidence. It does not perform
+  Telegram searches.
+
+mode: subagent
+strategy: read_only
+delegatable: true
+hidden: false
+
+color: "#7F1D1D"
+temperature: 0.2
+
+tools:
+  - read
+  - grep
+  - glob
+  - darkweb_batch_search
+
+prompt_file: prompt.md
+
+prompt_metadata:
+  category: security
+  cost: medium
+  triggers:
+    - domain: darkweb
+      trigger: "暗网情报、暗网查询、暗网搜索、dark web、data leak、ransomware leak"
+    - domain: ransomware
+      trigger: "勒索软件、勒索组织、受害者公告、ransomware victim、ransomware disclosure"
+    - domain: data-leak
+      trigger: "数据泄露、数据库泄露、凭证泄露、访问权限出售、样本泄露"
+    - domain: vulnerability
+      trigger: "漏洞情报、CVE 暗网情报、漏洞利用、exploited vulnerability"
+  use_when:
+    - "The task requires querying dark web intelligence for a target, victim, attacker, CVE, industry, country, or keyword."
+    - "A search supervisor provides multilingual keywords and asks for dark web search results."
+    - "The user asks about data leaks, ransomware disclosures, exposed databases, sold credentials, initial access, or dark web source evidence."
+  avoid_when:
+    - "The task is specifically about Telegram channels, Telegram groups, or TG leaks; use telegram-search-agent instead."
+    - "The task only needs public web search, news, or vendor reports; use web-search-agent instead."
+    - "The task requires final report writing rather than search execution and structured evidence extraction."
