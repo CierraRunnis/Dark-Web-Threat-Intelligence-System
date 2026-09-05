@@ -88,6 +88,28 @@
       "browser_storage_state_file": "browser-state/cracked/storage-state.json"
     },
     {
+      "site_name": "raidforums",
+      "enabled": true,
+      "seed_urls": [
+        "https://raidforums.im/Forum-Databases",
+        "https://raidforums.im/Forum-Other-Leaks",
+        "https://raidforums.im/Forum-Sellers-Place"
+      ],
+      "seed_fetch_mode": "browser",
+      "detail_fetch_mode": "browser",
+      "browser_queue": "browser_public",
+      "profile": "warm",
+      "max_topics_per_run": 20,
+      "max_detail_pages_per_run": 10,
+      "cooldown_seconds": 3600,
+      "output_dir": "output/raidforums",
+      "dedupe_window_minutes": 180,
+      "max_concurrent_details": 1,
+      "display_name": "RaidForums",
+      "render_wait_seconds": 8,
+      "fetch_timeout_seconds": 90
+    },
+    {
       "site_name": "pwnfrm",
       "enabled": false,
       "seed_urls": [

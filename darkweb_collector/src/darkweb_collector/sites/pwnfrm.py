@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -21,6 +22,18 @@ FORUM_SECTIONS = {
     "databases": f"http://{PWNFRM_ONION_HOST}/Forum-Databases?sortby=started&order=desc&datecut=9999&prefix=0",
     "other_leaks": f"http://{PWNFRM_ONION_HOST}/Forum-Other-Leaks?sortby=started&order=desc&datecut=9999&prefix=0",
 }
+
+
+def _safe_console_text(value: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return str(value).encode(encoding, errors="replace").decode(encoding, errors="replace")
+    except LookupError:
+        return str(value).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
+def _debug_log(message: str) -> None:
+    print(_safe_console_text(message))
 
 
 # --- HTML/text helpers ----------------------------------------------------
@@ -207,10 +220,16 @@ def normalize_pwnfrm_timestamp(value: str | None, *, collected_at_utc: str | Non
 
 # --- public parsers -------------------------------------------------------
 
-def parse_pwnfrm_list(url: str, html: str, max_topics: int = 5) -> dict:
+def parse_pwnfrm_list(
+    url: str,
+    html: str,
+    max_topics: int = 5,
+    *,
+    site_name: str = "pwnfrm",
+) -> dict:
     """Parse a pwnfrm MyBB forum listing page."""
     start_time = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] parsing list: {url}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] parsing list: {url}")
 
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
     title = _clean_html_text(title_match.group(1)) if title_match else ""
@@ -228,7 +247,7 @@ def parse_pwnfrm_list(url: str, html: str, max_topics: int = 5) -> dict:
     )
 
     matches = topic_pattern.findall(html)
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] found {len(matches)} topic matches")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] found {len(matches)} topic matches")
 
     for tid, href, raw_title in matches:
         if tid in seen_tids:
@@ -255,26 +274,26 @@ def parse_pwnfrm_list(url: str, html: str, max_topics: int = 5) -> dict:
             "potential_victim": victim,
         }
         topics.append(topic)
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [pwnfrm] topic {len(topics)}: "
+        _debug_log(
+            f"[{time.strftime('%H:%M:%S')}] [{site_name}] topic {len(topics)}: "
             f"{clean_title[:70]}"
         )
 
         if len(topics) >= max_topics:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [pwnfrm] reached cap of "
+            _debug_log(
+                f"[{time.strftime('%H:%M:%S')}] [{site_name}] reached cap of "
                 f"{max_topics} topics, stopping"
             )
             break
 
     elapsed = time.time() - start_time
-    print(
-        f"[{time.strftime('%H:%M:%S')}] [pwnfrm] list parse done in "
+    _debug_log(
+        f"[{time.strftime('%H:%M:%S')}] [{site_name}] list parse done in "
         f"{elapsed:.2f}s, {len(topics)} topics"
     )
 
     return {
-        "site_name": "pwnfrm",
+        "site_name": site_name,
         "source_url": url,
         "domain": domain,
         "title": title,
@@ -284,10 +303,15 @@ def parse_pwnfrm_list(url: str, html: str, max_topics: int = 5) -> dict:
     }
 
 
-def parse_pwnfrm_detail(url: str, html: str) -> dict:
+def parse_pwnfrm_detail(
+    url: str,
+    html: str,
+    *,
+    site_name: str = "pwnfrm",
+) -> dict:
     """Parse a pwnfrm thread page and extract the first post."""
     start_time = time.time()
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] parsing detail: {url}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] parsing detail: {url}")
 
     title_match = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
     title = _clean_html_text(title_match.group(1)) if title_match else ""
@@ -319,7 +343,7 @@ def parse_pwnfrm_detail(url: str, html: str) -> dict:
                 content_match = fallback_match
                 break
     content = _clean_html_text(content_match.group(1)) if content_match else ""
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] content length: {len(content)} chars")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] content length: {len(content)} chars")
 
     # Prefer the /User-NAME slug from the profile link — it's stable across
     # username styles (color spans, prefix icons, deleted-line-through, etc.)
@@ -339,15 +363,15 @@ def parse_pwnfrm_detail(url: str, html: str) -> dict:
             )
             if user_match:
                 author = _clean_html_text(user_match.group(1)) or "Unknown"
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] author: {author}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] author: {author}")
 
     timestamp = _extract_timestamp_text(post_block, html)
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] timestamp: {timestamp}")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] timestamp: {timestamp}")
 
     victims = extract_victims_from_content(content, title)
     attackers = extract_attackers_from_content(content)
-    print(
-        f"[{time.strftime('%H:%M:%S')}] [pwnfrm] victims={len(victims)} "
+    _debug_log(
+        f"[{time.strftime('%H:%M:%S')}] [{site_name}] victims={len(victims)} "
         f"attackers={len(attackers)}"
     )
 
@@ -366,11 +390,11 @@ def parse_pwnfrm_detail(url: str, html: str) -> dict:
     attachments = [urljoin(url, match) for match in attachment_matches]
 
     elapsed = time.time() - start_time
-    print(f"[{time.strftime('%H:%M:%S')}] [pwnfrm] detail parse done in {elapsed:.2f}s")
+    _debug_log(f"[{time.strftime('%H:%M:%S')}] [{site_name}] detail parse done in {elapsed:.2f}s")
 
     collected_at_utc = datetime.now(timezone.utc).isoformat()
     return {
-        "site_name": "pwnfrm",
+        "site_name": site_name,
         "source_url": url,
         "domain": domain,
         "title": title,

@@ -8,6 +8,7 @@ from darkweb_collector.adapters.darkforums import DarkforumsAdapter
 from darkweb_collector.adapters.dragonforce import DragonforceAdapter
 from darkweb_collector.adapters.lynx import LynxAdapter
 from darkweb_collector.adapters.pwnfrm import PwnfrmAdapter
+from darkweb_collector.adapters.raidforums import RaidforumsAdapter
 
 
 ADAPTERS: dict[str, SiteAdapter] = {
@@ -16,6 +17,7 @@ ADAPTERS: dict[str, SiteAdapter] = {
     DarkforumsAdapter.site_name: DarkforumsAdapter(),
     CrackedAdapter.site_name: CrackedAdapter(),
     PwnfrmAdapter.site_name: PwnfrmAdapter(),
+    RaidforumsAdapter.site_name: RaidforumsAdapter(),
     ChaosAdapter.site_name: ChaosAdapter(),
     LynxAdapter.site_name: LynxAdapter(),
 }
