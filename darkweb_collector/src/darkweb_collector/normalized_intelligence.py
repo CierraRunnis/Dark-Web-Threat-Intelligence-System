@@ -69,6 +69,7 @@ SOURCE_LABELS = {
     "chaos": "Chaos",
     "lynx": "Lynx",
     "pwnfrm": "PwnedForums",
+    "raidforums": "RaidForums",
     "baidu_wenku": "百度文库",
     "docin": "豆丁",
     "doc88": "道客巴巴",
@@ -411,6 +412,7 @@ SOURCE_HOSTNAME_KEYWORDS = {
     "chaos",
     "lynx",
     "pwnfrm",
+    "raidforums",
     "blogspot",
     "wordpress",
     "onion",
@@ -421,6 +423,7 @@ _FORUM_TIMESTAMP_NORMALIZERS = {
     "cracked": normalize_cracked_timestamp,
     "darkforums": normalize_darkforums_timestamp,
     "pwnfrm": normalize_pwnfrm_timestamp,
+    "raidforums": normalize_pwnfrm_timestamp,
 }
 
 

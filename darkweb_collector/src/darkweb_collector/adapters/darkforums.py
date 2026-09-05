@@ -42,6 +42,9 @@ def _detail_artifacts_exist(output_dir, section_name: str, topic_url: str) -> bo
 
 class DarkforumsAdapter(SiteAdapter):
     site_name = "darkforums"
+    list_parser = staticmethod(parse_darkforums_list)
+    detail_parser = staticmethod(parse_darkforums_detail)
+    detail_screenshot_selectors = ("#thread-info", ".post.classic")
 
     @staticmethod
     def _is_valid_seed_html(html: str) -> bool:
@@ -70,7 +73,7 @@ class DarkforumsAdapter(SiteAdapter):
             retries=1,
         )
         if not self._is_valid_seed_html(fallback_html):
-            raise RuntimeError(f"DarkForums list page did not contain forum topics: {url}")
+            raise RuntimeError(f"{self.site_name} list page did not contain forum topics: {url}")
         return fallback_html
 
     @staticmethod
@@ -95,7 +98,7 @@ class DarkforumsAdapter(SiteAdapter):
         collected_at_utc = utc_now_iso()
         for url in config.seed_urls:
             html = self._fetch_html(url, config, config.seed_fetch_mode)
-            parsed = parse_darkforums_list(url, html, max_topics=config.max_topics_per_run)
+            parsed = self.list_parser(url, html, max_topics=config.max_topics_per_run)
             section = _section_name(url)
             parsed["section"] = section
             for topic in parsed["topics"]:
@@ -105,7 +108,7 @@ class DarkforumsAdapter(SiteAdapter):
 
         payload = {
             "site_name": self.site_name,
-            "source_url": "darkforums",
+            "source_url": self.site_name,
             "collected_at_utc": collected_at_utc,
             "section_count": len(sections),
             "topic_count": sum(int(section["topic_count"]) for section in sections),
@@ -185,7 +188,7 @@ class DarkforumsAdapter(SiteAdapter):
                 bypass_proxy=True,
             )
             if self._is_valid_detail_html(direct_html):
-                direct_detail = parse_darkforums_detail(detail_task.target_url, direct_html)
+                direct_detail = self.detail_parser(detail_task.target_url, direct_html)
                 if self._is_valid_detail_payload(direct_detail):
                     try:
                         screenshot_png = screenshot_html_with_browser(
@@ -193,7 +196,7 @@ class DarkforumsAdapter(SiteAdapter):
                             detail_task.target_url,
                             wait_seconds=config.render_wait_seconds,
                             timeout_seconds=config.fetch_timeout_seconds,
-                            screenshot_selectors=("#thread-info", ".post.classic"),
+                            screenshot_selectors=self.detail_screenshot_selectors,
                             hide_selectors=("header", "#panel", "#quick-search", ".bam_wrapper", ".footer", "footer"),
                         )
                     except Exception:
@@ -214,10 +217,7 @@ class DarkforumsAdapter(SiteAdapter):
                 mode=config.detail_fetch_mode,
                 timeout_seconds=config.fetch_timeout_seconds,
                 render_wait_seconds=config.render_wait_seconds,
-                screenshot_selectors=(
-                    "#thread-info",
-                    ".post.classic",
-                ),
+                screenshot_selectors=self.detail_screenshot_selectors,
                 hide_selectors=(
                     "header",
                     "#panel",
@@ -229,7 +229,7 @@ class DarkforumsAdapter(SiteAdapter):
                 render_html_for_screenshot=True,
             )
             if self._is_valid_detail_html(html):
-                detail = parse_darkforums_detail(detail_task.target_url, html)
+                detail = self.detail_parser(detail_task.target_url, html)
                 if self._is_valid_detail_payload(detail):
                     return DetailResult(
                         site_name=self.site_name,
@@ -240,10 +240,11 @@ class DarkforumsAdapter(SiteAdapter):
                         metadata=detail_task.metadata,
                     )
             print(
-                f"[darkforums] invalid detail html on attempt {attempt + 1} for {detail_task.target_url}; retrying"
+                f"[{self.site_name}] invalid detail html on attempt {attempt + 1} for "
+                f"{detail_task.target_url}; retrying"
             )
             close_browser_client()
-        print(f"[darkforums] skipping invalid detail persist for {detail_task.target_url}")
+        print(f"[{self.site_name}] skipping invalid detail persist for {detail_task.target_url}")
         return None
 
     def persist(
