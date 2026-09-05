@@ -6,11 +6,14 @@ from hashlib import sha1
 import json
 import os
 from pathlib import Path
+import sqlite3
 from threading import Lock
 from typing import Any
 
 import darkweb_collector.monitoring_rules as monitoring_rules_module
+from darkweb_collector.adapters.registry import ADAPTERS
 from darkweb_collector.config import get_site_config, load_site_configs
+from darkweb_collector.crawl_frontier import frontier_counts, list_page_cursors
 from darkweb_collector.detail_i18n import translate_event_detail_text_with_meta
 from darkweb_collector.document_exposure import (
     build_document_exposure_event_detail,
@@ -2259,6 +2262,19 @@ def build_jobs_payload() -> dict[str, Any]:
             "SELECT COUNT(*) AS count, MAX(disclosure_time) AS latest_disclosure_time FROM vulnerability_records"
         ).fetchone()
         connectivity_probe_map = get_site_connectivity_probe_map(connection)
+        try:
+            frontier_count_map = frontier_counts(connection)
+            frontier_cursor_map = list_page_cursors(connection)
+        except Exception as exc:
+            missing_frontier_table = (
+                isinstance(exc, sqlite3.OperationalError) and "no such table:" in str(exc)
+                or getattr(exc, "pgcode", None) == "42P01"
+            ) and any(name in str(exc) for name in ("crawl_frontier", "crawl_page_cursors"))
+            if not missing_frontier_table:
+                raise
+            connection.rollback()
+            frontier_count_map = {}
+            frontier_cursor_map = {}
 
     from darkweb_collector.api_actions import (
         get_browser_runtime_status,
@@ -2352,6 +2368,10 @@ def build_jobs_payload() -> dict[str, Any]:
         active_enqueued = sum(1 for row in site_rows if _effective_job_status(row) == "enqueued")
         failed_jobs_24h = failure_counts_24h.get(site_name, 0)
         connectivity_probe = connectivity_probe_map.get(site_name) or {}
+        frontier = frontier_count_map.get(site_name) or {}
+        frontier_enabled = bool(getattr(ADAPTERS.get(site_name), "supports_frontier", False))
+        frontier_pending = int(frontier.get("pending", 0))
+        frontier_inflight = int(frontier.get("inflight", 0))
 
         latest_seed_dt = _job_event_dt(latest_seed)
         latest_detail_dt = _job_event_dt(latest_detail)
@@ -2417,6 +2437,18 @@ def build_jobs_payload() -> dict[str, Any]:
                 "detail_status": detail_status,
                 "running_jobs": active_running,
                 "enqueued_jobs": active_enqueued,
+                "frontier": {
+                    "enabled": frontier_enabled,
+                    "pending": frontier_pending,
+                    "inflight": frontier_inflight,
+                    "completed": int(frontier.get("completed", 0)),
+                    "artifacts_pending": int(frontier.get("artifacts_pending", 0)),
+                    "backfill_paused": frontier_enabled and frontier_pending + frontier_inflight >= (
+                        config.frontier_max_pending if config is not None else 500
+                    ),
+                    "backfill_pages_per_run": config.backfill_pages_per_run if config is not None else 5,
+                    "page_cursors": frontier_cursor_map.get(site_name) or [],
+                },
                 "failed_jobs_24h": failed_jobs_24h,
                 "last_success_at": _format_dt(latest_success.get("finished_at") if latest_success else None),
                 "last_error": (

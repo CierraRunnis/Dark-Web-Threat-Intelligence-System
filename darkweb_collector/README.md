@@ -11,6 +11,7 @@
 - 支持单次运行和持续轮询
 - 支持 SQLite 结果落库和 `crawl_jobs` 审计
 - 支持列表页增量判断和详情页按变化抓取
+- 数据泄露站点支持最新页发现、持久历史回补游标和详情待抓队列
 - 支持浏览器抓取与非浏览器抓取两种模式
 - 按目标 URL 主机名自动区分 Tor 路径和普通代理路径
 
@@ -378,16 +379,20 @@ SQLite 默认路径：
 - 采集结果表
 - forum topic/detail 表
 - `crawl_jobs` 审计表
+- `crawl_frontier` 详情待抓队列和 `crawl_page_cursors` 历史分页游标
 
-## darkforums 当前行为说明
+## 数据泄露站点的持续采集
 
-`darkforums` 现在的运行策略是：
+`changan`、`darkforums`、`cracked`、`raidforums` 和 `pwnfrm` 使用统一的分页回补与详情待抓机制；`pwnfrm` 仍按配置默认停用。
 
-- 每轮都会抓取 `databases`、`other_leaks`、`sellers_place` 三个板块的列表页
-- 每个板块每轮最多解析 `max_topics_per_run`
-- 详情页总数受 `max_detail_pages_per_run` 限制
-- detail 任务会按板块轮转分配，而不是永远只优先 `databases`
-- 已抓取且未变化的帖子会跳过 detail，避免重复抓取
+- 每轮先检查各分区最新页，默认 `recent_pages_per_run=1`
+- 每站每轮共回补最多 `backfill_pages_per_run=5` 个历史页，按分区公平分配并保存游标
+- 未完成的详情积压达到 `frontier_max_pending=500` 时，暂停历史回补，继续检查最新页
+- 已发现详情持久保存；本轮额度不足、等待重试或任务中断都不会把它们误标为抓取完成
+- 详情成功领取后才计入 `max_detail_pages_per_run`，按分区轮转，冷却中的任务不会挡住后续可抓任务
+- 分开记录发现版本与成功入库版本，已成功抓取且未变化的内容会跳过
+
+“站点管理”的展开信息和采集运行摘要展示待抓、执行中、队列已完成及各分区历史游标。队列已完成统计已发现任务，不等于源站总量；列表扫描到末页也不代表所有详情已补齐。
 
 如果使用 `--continuous`，它不会无限无间隔请求，而是：
 
@@ -414,6 +419,8 @@ python scripts/crawl.py run-site --site <site_name> --once
 ```
 
 验证接入是否成功
+
+有分页列表的数据泄露站点须复用共享分页与待抓机制，接入协议、默认预算、失败恢复和验收标准见 [CRAWLER_ADAPTER_GUIDE.md](./CRAWLER_ADAPTER_GUIDE.md)。无分页、增量 API 或仅少量公告的来源应按自身能力选择发现方式，仍复用稳定标识、版本确认和有界重试；不应为了统一形式增加无效请求。
 
 ## 本地 HTML 导入与样本开发
 

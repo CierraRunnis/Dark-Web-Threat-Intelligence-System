@@ -2628,6 +2628,17 @@ h1, h2, h3, h4 { font-weight: 650; letter-spacing: 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.collector-site-frontier {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.collector-site-frontier p { margin: 0; color: var(--muted); }
+.collector-site-frontier p:first-child { color: var(--fg); font-weight: 650; }
+.collector-site-frontier[data-backfill-paused="true"] p:nth-child(2) { color: var(--warning); }
+.collector-site-frontier ul { margin: 4px 0; padding-left: 18px; }
 .collector-site-availability::before {
   content: '';
   width: 7px;

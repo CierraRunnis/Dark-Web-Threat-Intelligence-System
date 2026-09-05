@@ -8,6 +8,7 @@ import sqlite3
 from threading import Lock
 import time
 
+from darkweb_collector.crawl_frontier import ensure_frontier_schema
 from darkweb_collector.postgres_backend import connect_postgres
 from darkweb_collector.runtime import (
     active_release_config,
@@ -682,6 +683,7 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
             if "no such column" in message:
                 continue
             raise
+    ensure_frontier_schema(connection)
     _ensure_legacy_columns(connection)
     connection.execute(
         """
@@ -729,14 +731,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
                     pass
             stat = resolved.stat()
             schema_key = str(resolved)
-            if skip_wsl_checks and stat.st_size > 0:
-                _SCHEMA_INIT_FINGERPRINTS.clear()
-                _SCHEMA_INIT_FINGERPRINTS.add(schema_key)
-                return connection
             if schema_key not in _SCHEMA_INIT_FINGERPRINTS:
                 with _SCHEMA_INIT_LOCK:
                     if schema_key not in _SCHEMA_INIT_FINGERPRINTS:
-                        _ensure_schema(connection)
+                        if skip_wsl_checks and stat.st_size > 0:
+                            ensure_frontier_schema(connection)
+                        else:
+                            _ensure_schema(connection)
                         _SCHEMA_INIT_FINGERPRINTS.add(schema_key)
             return connection
         except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:

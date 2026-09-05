@@ -68,6 +68,22 @@ class SiteConfig:
         return max(1, int(self.extras.get("detail_slot_retry_seconds", 5)))
 
     @property
+    def recent_pages_per_run(self) -> int:
+        return int(self.extras.get("recent_pages_per_run", 1))
+
+    @property
+    def backfill_pages_per_run(self) -> int:
+        return int(self.extras.get("backfill_pages_per_run", 5))
+
+    @property
+    def frontier_max_pending(self) -> int:
+        return int(self.extras.get("frontier_max_pending", 500))
+
+    @property
+    def frontier_lease_seconds(self) -> int:
+        return max(3600, self.detail_slot_ttl_seconds)
+
+    @property
     def failure_cooldown_seconds(self) -> int:
         return int(self.extras.get("failure_cooldown_seconds", 30 * 60))
 

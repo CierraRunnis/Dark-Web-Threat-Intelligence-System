@@ -8,6 +8,8 @@ import re
 from threading import BoundedSemaphore, Lock
 from typing import Any, Callable, Sequence
 
+from darkweb_collector.crawl_frontier import ensure_frontier_schema
+
 
 class PostgreSQLBackendError(RuntimeError):
     pass
@@ -318,6 +320,10 @@ def _get_pool(
                     expected_fingerprint=expected_fingerprint,
                     expected_version=expected_version,
                 )
+                with raw.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema()), hashtext('crawl_frontier_v1'))")
+                    ensure_frontier_schema(cursor)
+                raw.commit()
             finally:
                 pool.putconn(raw)
         except Exception:

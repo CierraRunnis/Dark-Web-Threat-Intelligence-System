@@ -79,6 +79,7 @@ def main() -> int:
     print(f"2. Replace the placeholder regex in {parser_path.name}")
     print(f"3. Drop authorized HTML samples into {sample_dir}")
     print(f"4. Run {import_path.name} against a sample HTML file")
+    print("5. For paginated collectors, follow CRAWLER_ADAPTER_GUIDE.md and reuse the persistent frontier and pagination helpers")
     return 0
 
 

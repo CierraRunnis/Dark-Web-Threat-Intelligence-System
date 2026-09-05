@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from html import unescape
-import json
 import re
 from typing import Any
 from urllib.parse import quote_plus
@@ -117,20 +116,22 @@ def parse_changan_list(
                     author,
                     category,
                     published_at,
-                    views,
-                    price,
-                    json.dumps(item, ensure_ascii=False, sort_keys=True),
+                    _clean_html(_first(item, "detail", "content", "ctt", "body")),
+                    _named_value(_first(item, "originName", "origin", "source")),
                 ),
                 "raw": item,
             }
         )
+    source_total = int(data["total"]) if data.get("total") not in (None, "") else None
     return {
         "site_name": "changan",
         "source_url": f"{base_url.rstrip('/')}/#/products",
         "section": "sellers_place",
         "collected_at_utc": collected_at_utc,
         "topic_count": len(topics),
-        "total": len(topics) if excluded else int(data.get("total") or len(topics)),
+        "total": source_total if source_total is not None else len(goods),
+        "source_total": source_total,
+        "source_count": len(goods),
         "topics": topics,
     }
 
@@ -176,10 +177,14 @@ def parse_changan_detail(
         "attackers": [seller] if seller else [],
         "content_hash": content_hash(
             detail_url,
-            content,
+            title,
+            intro,
+            body,
+            category,
+            origin,
+            seller,
             published_at,
             "\n".join(images),
-            json.dumps(data, ensure_ascii=False, sort_keys=True),
         ),
         "collected_at_utc": collected_at_utc,
         "raw": data,

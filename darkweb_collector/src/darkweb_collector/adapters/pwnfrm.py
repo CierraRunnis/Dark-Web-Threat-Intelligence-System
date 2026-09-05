@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 from urllib.parse import urlparse
 
 from darkweb_collector.adapters.base import SiteAdapter
+from darkweb_collector.adapters.forum_artifacts import restore_detail_artifacts
+from darkweb_collector.adapters.pagination import collect_forum_seed
 from darkweb_collector.browser_client import close_browser_client
 from darkweb_collector.db import (
     get_db_connection,
@@ -16,7 +19,7 @@ from darkweb_collector.models import DetailResult, DetailTask, RunContext, SeedR
 from darkweb_collector.session_cookies import resolve_session_cookie
 from darkweb_collector.sites.pwnfrm import parse_pwnfrm_detail, parse_pwnfrm_list
 from darkweb_collector.tor_fetch import fetch_page_artifacts, fetch_url
-from darkweb_collector.utils import dump_json, dump_text, safe_stem, utc_now_iso
+from darkweb_collector.utils import dump_json, dump_text, safe_stem
 
 
 def _section_name(url: str) -> str:
@@ -44,6 +47,7 @@ def _detail_artifacts_exist(output_dir, section_name: str, topic_url: str) -> bo
 
 class PwnfrmAdapter(SiteAdapter):
     site_name = "pwnfrm"
+    supports_frontier = True
 
     def _fetch_html(self, url: str, config: SiteConfig, mode: str) -> str:
         # pwnfrm sits behind tor; cookie header is optional (only used if the
@@ -75,33 +79,7 @@ class PwnfrmAdapter(SiteAdapter):
         return bool(content) or (author and author != "Unknown")
 
     def collect_seed(self, config: SiteConfig, run_ctx: RunContext) -> SeedResult:
-        sections: list[dict[str, object]] = []
-        raw_html_by_url: dict[str, str] = {}
-        collected_at_utc = utc_now_iso()
-        for url in config.seed_urls:
-            html = self._fetch_html(url, config, config.seed_fetch_mode)
-            parsed = parse_pwnfrm_list(url, html, max_topics=config.max_topics_per_run)
-            section = _section_name(url)
-            parsed["section"] = section
-            for topic in parsed["topics"]:
-                topic["section"] = section
-            raw_html_by_url[url] = html
-            sections.append(parsed)
-
-        payload = {
-            "site_name": self.site_name,
-            "source_url": "pwnfrm",
-            "collected_at_utc": collected_at_utc,
-            "section_count": len(sections),
-            "topic_count": sum(int(section["topic_count"]) for section in sections),
-            "sections": sections,
-        }
-        return SeedResult(
-            site_name=self.site_name,
-            collected_at_utc=collected_at_utc,
-            payload=payload,
-            raw_html_by_url=raw_html_by_url,
-        )
+        return collect_forum_seed(self, config, parse_pwnfrm_list, _section_name)
 
     def plan_details(self, seed_result: SeedResult, config: SiteConfig) -> list[DetailTask]:
         per_section_tasks: list[list[DetailTask]] = []
@@ -141,6 +119,10 @@ class PwnfrmAdapter(SiteAdapter):
                                 "section": section_name,
                                 "artifact_stem": _detail_artifact_stem(str(topic["full_url"])),
                                 "title": topic["title"],
+                                "source_version": topic["content_hash"],
+                                "discovery_lane": topic.get("discovery_lane", "recent"),
+                                "frontier_fetched_version": topic["content_hash"] if not topic_changed and detail_snapshot is not None else "",
+                                "frontier_artifacts_complete": detail_artifacts_ready,
                             },
                         )
                     )
@@ -149,12 +131,9 @@ class PwnfrmAdapter(SiteAdapter):
 
         # Round-robin so one noisy section can't starve the others.
         tasks: list[DetailTask] = []
-        max_details = max(config.max_detail_pages_per_run, 0)
-        while len(tasks) < max_details and any(per_section_tasks):
+        while any(per_section_tasks):
             next_round: list[list[DetailTask]] = []
             for bucket in per_section_tasks:
-                if len(tasks) >= max_details:
-                    break
                 if not bucket:
                     continue
                 tasks.append(bucket.pop(0))
@@ -166,6 +145,12 @@ class PwnfrmAdapter(SiteAdapter):
     def collect_detail(
         self, detail_task: DetailTask, config: SiteConfig, run_ctx: RunContext
     ) -> DetailResult | None:
+        restored = restore_detail_artifacts(
+            detail_task, config, screenshot_selectors=("#thread-info", ".post.classic"),
+            hide_selectors=("header", "#panel", "#quick-search", ".bam_wrapper", ".footer", "footer"),
+        )
+        if restored is not None:
+            return restored
         html = ""
         screenshot_png = None
         cookie_header = resolve_session_cookie(config)
@@ -215,10 +200,11 @@ class PwnfrmAdapter(SiteAdapter):
         run_ctx: RunContext,
         seed_result: SeedResult | None = None,
         detail_results: list[DetailResult] | None = None,
+        connection=None,
     ) -> None:
         if seed_result is not None:
             output_dir = config.output_dir
-            with get_db_connection() as connection:
+            with get_db_connection() as seed_connection:
                 for section in seed_result.payload["sections"]:
                     section_name = str(section["section"])
                     section_dir = output_dir / section_name
@@ -228,7 +214,7 @@ class PwnfrmAdapter(SiteAdapter):
                     dump_json(section_dir / "topics_list.json", section)
                     for topic in section["topics"]:
                         upsert_forum_topic(
-                            connection,
+                            seed_connection,
                             site_name=self.site_name,
                             section=section_name,
                             title=topic["title"],
@@ -241,11 +227,11 @@ class PwnfrmAdapter(SiteAdapter):
                             content_hash=topic["content_hash"],
                             collected_at_utc=section["collected_at_utc"],
                         )
-                connection.commit()
+                seed_connection.commit()
             dump_json(output_dir / "latest.json", seed_result.payload)
 
         if detail_results:
-            with get_db_connection() as connection:
+            with (nullcontext(connection) if connection is not None else get_db_connection()) as detail_connection:
                 for detail_result in detail_results:
                     section_name = str(detail_result.metadata["section"])
                     section_dir = config.output_dir / section_name / "details"
@@ -259,7 +245,7 @@ class PwnfrmAdapter(SiteAdapter):
                         (section_dir / f"{artifact_stem}.png").write_bytes(detail_result.screenshot_png)
                     dump_json(section_dir / f"{artifact_stem}.json", detail_result.payload)
                     upsert_forum_detail(
-                        connection,
+                        detail_connection,
                         site_name=self.site_name,
                         section=section_name,
                         topic_url=detail_result.target_url,
@@ -273,4 +259,5 @@ class PwnfrmAdapter(SiteAdapter):
                         content_hash=detail_result.payload["content_hash"],
                         collected_at_utc=detail_result.payload.get("collected_at_utc", ""),
                     )
-                connection.commit()
+                if connection is None:
+                    detail_connection.commit()
