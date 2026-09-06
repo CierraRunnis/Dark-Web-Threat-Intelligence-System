@@ -1,11 +1,11 @@
 {
   "name": "threat-intelligence-dashboard",
-  "version": "20260905.2.0",
+  "version": "20260906.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:wsl": "vite --host 0.0.0.0 --port 5173",
+    "dev:wsl": "vite --host 0.0.0.0 --port 5174",
     "build": "vite build",
     "preview": "vite preview"
   },
