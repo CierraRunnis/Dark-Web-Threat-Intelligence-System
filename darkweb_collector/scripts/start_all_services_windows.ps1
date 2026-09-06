@@ -43,7 +43,7 @@ $ApiBaseUrl = "http://${ApiHost}:${ApiPort}"
 $ApiHealthUrl = "$ApiBaseUrl/api/health"
 $ApiJobsUrl = "$ApiBaseUrl/api/jobs"
 $FrontendHost = "127.0.0.1"
-$FrontendPort = if ($env:DARKWEB_FRONTEND_PORT) { [int]$env:DARKWEB_FRONTEND_PORT } else { 5173 }
+$FrontendPort = if ($env:DARKWEB_FRONTEND_PORT) { [int]$env:DARKWEB_FRONTEND_PORT } else { 5174 }
 $FrontendUrl = "http://${FrontendHost}:${FrontendPort}"
 $NewUiMarker = '<meta name="darkweb-ui" content="xuanjian-new-ui"'
 $ServiceWaitSeconds = 45
@@ -2870,7 +2870,7 @@ function Stop-Services {
     $portsToClean = @($ApiPort, $FrontendPort)
     Load-RuntimePorts
     $runtimePortsToClean = @($ApiPort, $FrontendPort)
-    $projectPortsToClean = @(8000, 5173)
+    $projectPortsToClean = @(8000, 5173, 5174)
 
     $records = @(Get-ServiceRecords)
     $ownedProcessIds = @()

@@ -3,7 +3,8 @@ import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 
 const apiTarget = process.env.VITE_API_TARGET || process.env.DARKWEB_API_TARGET || 'http://127.0.0.1:8000'
-const frontendPort = Number(process.env.VITE_FRONTEND_PORT || process.env.DARKWEB_FRONTEND_PORT || 5173)
+const frontendPort = Number(process.env.VITE_FRONTEND_PORT || process.env.DARKWEB_FRONTEND_PORT || 5174)
+const allowedHosts = ['darkweb-monitor.threatbook-inc.cn']
 const proxy = {
   '/api': {
     target: apiTarget,
@@ -22,12 +23,14 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: frontendPort,
+    allowedHosts,
     proxy,
   },
   preview: {
     host: '0.0.0.0',
     port: frontendPort,
     strictPort: true,
+    allowedHosts,
     proxy,
   },
   resolve: {

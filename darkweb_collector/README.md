@@ -155,7 +155,7 @@ bash scripts/start_all_services_wsl.sh uninstall purge-data
 
 默认启动后可访问：
 
-- 前端：`http://localhost:5173`
+- 前端：`http://localhost:5174`
 - 后端健康检查：`http://127.0.0.1:8000/api/health`
 
 ### 查看当前站点
@@ -201,7 +201,7 @@ python scripts/crawl.py show-runs --limit 20
 启动后端 API 和前端后，进入：
 
 ```text
-http://localhost:5173/collector-control
+http://localhost:5174/collector-control
 ```
 
 在“Bot 助手推送”卡片中填写：
